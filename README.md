@@ -121,6 +121,12 @@ The `QKDrv::Manager` probes for available controllers and selects the best drive
 
 ## Building
 
+First-time setup (required):
+
+```bash
+git submodule update --init --recursive
+```
+
 ```bash
 # Configure
 cmake -B build -S .
@@ -150,7 +156,7 @@ qemu-system-x86_64 -kernel build/citadel.elf -serial stdio -usb -device usb-tabl
 
 # Create ISO with Limine
 ./build.sh
-qemu-system-x86_64 -cdrom qaios.iso -serial stdio
+qemu-system-x86_64 -cdrom build/citadel-limine.iso -serial stdio
 ```
 
 ### Shared host folder (QEMU)

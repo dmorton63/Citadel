@@ -163,6 +163,21 @@ fi
 echo -e "${YELLOW}[5/5] Creating bootable ISO...${NC}"
 cd "${PROJECT_DIR}"
 
+# Ensure Limine boot binaries exist in the ISO tree.
+# These files are typically provided by the `limine` submodule and are ignored by git in the ISO staging folder.
+mkdir -p "${ISO_DIR}/boot/limine"
+for f in limine-bios-cd.bin limine-bios.sys limine-uefi-cd.bin; do
+    if [ ! -f "${ISO_DIR}/boot/limine/${f}" ]; then
+        if [ -f "${LIMINE_DIR}/${f}" ]; then
+            cp "${LIMINE_DIR}/${f}" "${ISO_DIR}/boot/limine/${f}"
+        else
+            echo -e "${RED}Missing Limine boot file: ${f}${NC}"
+            echo -e "${RED}Hint: run 'git submodule update --init --recursive' to populate limine.${NC}"
+            exit 1
+        fi
+    fi
+done
+
 # Check for xorriso
 if ! command -v xorriso &> /dev/null; then
     echo -e "${RED}xorriso not found! Install with: sudo apt install xorriso${NC}"
