@@ -1,6 +1,6 @@
 add_subdirectory(drivers)
 
-add_executable(qaios_kernel
+add_executable(citadel_kernel
     QKMain.cpp
     QKConsole.cpp
     Boot/QKBoot.cpp
@@ -21,14 +21,14 @@ add_executable(qaios_kernel
 
 # Add assembly with custom compile flags
 set_source_files_properties(QKBoot.asm PROPERTIES LANGUAGE ASM_NASM)
-target_sources(qaios_kernel PRIVATE QKBoot.asm)
+target_sources(citadel_kernel PRIVATE QKBoot.asm)
 
-target_include_directories(qaios_kernel PRIVATE
+target_include_directories(citadel_kernel PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${PROJECT_SOURCE_DIR}/limine
 )
 
-target_link_libraries(qaios_kernel PRIVATE
+target_link_libraries(citadel_kernel PRIVATE
     QCommon
     QKernel
     QKMemory
@@ -42,16 +42,16 @@ target_link_libraries(qaios_kernel PRIVATE
     QKDrivers
 )
 
-target_compile_options(qaios_kernel PRIVATE ${KERNEL_COMPILE_FLAGS})
+target_compile_options(citadel_kernel PRIVATE ${KERNEL_COMPILE_FLAGS})
 
 # Linker script
-set_target_properties(qaios_kernel PROPERTIES
+set_target_properties(citadel_kernel PROPERTIES
     LINK_FLAGS "-T ${CMAKE_CURRENT_SOURCE_DIR}/linker.ld -nostdlib -static"
-    OUTPUT_NAME "qaios.elf"
+    OUTPUT_NAME "citadel.elf"
 )
 
 # Custom target to create bootable image
-add_custom_command(TARGET qaios_kernel POST_BUILD
-    COMMAND ${CMAKE_OBJCOPY} -O binary $<TARGET_FILE:qaios_kernel> ${CMAKE_BINARY_DIR}/qaios.bin
+add_custom_command(TARGET citadel_kernel POST_BUILD
+    COMMAND ${CMAKE_OBJCOPY} -O binary $<TARGET_FILE:citadel_kernel> ${CMAKE_BINARY_DIR}/citadel.bin
     COMMENT "Creating bootable binary image"
 )

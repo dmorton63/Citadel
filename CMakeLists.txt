@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(QAIOSPlus VERSION 1.0.0 LANGUAGES C CXX ASM)
+project(Citadel VERSION 1.0.0 LANGUAGES C CXX ASM)
 
 # Helps editors (VS Code, clangd) mirror CMake's exact include paths/defines.
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)

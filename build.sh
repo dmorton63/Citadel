@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# QAIOS Build Script
+# CITADEL Build Script
 # Builds the kernel and creates a bootable ISO
 #
 
@@ -22,13 +22,13 @@ RAMDISK_DIR="${PROJECT_DIR}/ramdisk"
 SHARED_DIR="${PROJECT_DIR}/shared"
 
 # Output files
-KERNEL_ELF="${BUILD_DIR}/kernel/qaios.elf"
-ISO_FILE="${BUILD_DIR}/qaios-limine.iso"
+KERNEL_ELF="${BUILD_DIR}/kernel/citadel.elf"
+ISO_FILE="${BUILD_DIR}/citadel-limine.iso"
 RAMDISK_OUTPUT="${ISO_DIR}/modules/ramdisk.img"
 SERIAL_LOG="${BUILD_DIR}/serial.log"
 
 echo -e "${CYAN}========================================${NC}"
-echo -e "${CYAN}       QAIOS Build System${NC}"
+echo -e "${CYAN}       CITADEL Build System${NC}"
 echo -e "${CYAN}========================================${NC}"
 
 # Parse arguments
@@ -139,7 +139,7 @@ if [ -d "${RAMDISK_DIR}" ]; then
     mkdir -p "${ISO_DIR}/modules"
     RAMDISK_TEMP="${BUILD_DIR}/ramdisk.img"
     dd if=/dev/zero of="${RAMDISK_TEMP}" bs=1M count=0 seek=4 >/dev/null 2>&1
-    mkfs.fat -F 32 -n QAIOSRD "${RAMDISK_TEMP}" >/dev/null 2>&1
+    mkfs.fat -F 32 -n CITADELRD "${RAMDISK_TEMP}" >/dev/null 2>&1
     if compgen -G "${RAMDISK_DIR}/*" >/dev/null; then
         mcopy -s -i "${RAMDISK_TEMP}" ${RAMDISK_DIR}/* :: >/dev/null 2>&1
     fi

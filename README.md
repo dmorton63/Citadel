@@ -1,4 +1,4 @@
-# QAIOS+ Kernel
+# CITADEL Kernel
 
 <img width="975" height="645" alt="qaiosDesktop" src="https://github.com/user-attachments/assets/31138a6a-9323-4621-8ea2-d8f82a41f69c" />
 
@@ -128,7 +128,7 @@ cmake -B build -S .
 # Build
 cmake --build build
 
-# Output: build/qaios.elf, build/qaios.bin
+# Output: build/citadel.elf, build/citadel.bin
 ```
 
 ### Build Tasks (VS Code)
@@ -140,13 +140,13 @@ cmake --build build
 
 ```bash
 # Basic run
-qemu-system-x86_64 -kernel build/qaios.elf -serial stdio
+qemu-system-x86_64 -kernel build/citadel.elf -serial stdio
 
 # With USB mouse (recommended, matches real hardware)
-qemu-system-x86_64 -kernel build/qaios.elf -serial stdio -usb -device usb-mouse
+qemu-system-x86_64 -kernel build/citadel.elf -serial stdio -usb -device usb-mouse
 
 # Optional: USB tablet (absolute positioning)
-qemu-system-x86_64 -kernel build/qaios.elf -serial stdio -usb -device usb-tablet
+qemu-system-x86_64 -kernel build/citadel.elf -serial stdio -usb -device usb-tablet
 
 # Create ISO with Limine
 ./build.sh

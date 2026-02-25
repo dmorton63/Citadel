@@ -1,4 +1,4 @@
-// QAIOS Kernel Main Entry Point
+// CITADEL Kernel Main Entry Point
 // QKMain.cpp
 
 #include "QCTypes.h"
@@ -43,7 +43,7 @@ extern "C" void kernel_main()
 {
     // Initialize serial first for debug output
     QK::Debug::Serial::Init();
-    QK::Debug::Serial::Write("\r\n=== QAIOS Kernel ===\r\n");
+    QK::Debug::Serial::Write("\r\n=== CITADEL Kernel ===\r\n");
     QK::Debug::Serial::Write("Serial initialized, kernel starting...\r\n");
 
     // --- Early Boot ---
