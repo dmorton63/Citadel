@@ -2,47 +2,47 @@
   "version": 1,
   "profile": "development",
   "golden": {
-    "root": "/golden",
+    "root": "/GOLDEN",
     "hash": ""
   },
   "production": {
-    "root": "/production",
+    "root": "/PROD",
     "hash": ""
   },
   "modules": [
     {
       "id": "desktop",
-      "path": "/DESKTOP.JSN",
+      "path": "DESKTOP.JSN",
       "type": "config",
       "required": true
     },
     {
       "id": "desktop_overrides",
-      "path": "/DESKOVR.JSN",
+      "path": "DESKOVR.JSN",
       "type": "desktop_overrides",
       "required": false
     },
     {
       "id": "security",
-      "path": "/SECURITY.JSN",
+      "path": "SECURITY.JSN",
       "type": "security",
       "required": true
     },
     {
       "id": "services",
-      "path": "/SERVICES.JSN",
+      "path": "SERVICES.JSN",
       "type": "services",
       "required": true
     },
     {
       "id": "drivers",
-      "path": "/DRIVERS.JSN",
+      "path": "DRIVERS.JSN",
       "type": "drivers",
       "required": true
     },
     {
       "id": "apps",
-      "path": "/APPS.JSN",
+      "path": "APPS.JSN",
       "type": "apps",
       "required": true
     },

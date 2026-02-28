@@ -504,8 +504,54 @@ namespace
         return true;
     }
 
-    static bool SysConfigEarlyLoadPhase(QKBoot::FLogFn Log, QC::u64 ModuleRequest[], const QK::Boot::Config::SysConfig &syscfg)
+    static bool ResolveTieredModulePath(const char *tierRoot, const QK::Boot::Config::SysConfigModule &m, char outPath[], QC::usize outCap)
     {
+        if (!outPath || outCap == 0)
+            return false;
+        outPath[0] = 0;
+
+        if (m.path[0] == 0)
+            return true;
+
+        // Absolute paths bypass tiering.
+        if (m.path[0] == '/')
+        {
+            QC::String::strncpy(outPath, m.path, outCap);
+            outPath[outCap - 1] = 0;
+            return true;
+        }
+
+        if (!tierRoot || tierRoot[0] == 0)
+        {
+            QC::String::strncpy(outPath, m.path, outCap);
+            outPath[outCap - 1] = 0;
+            return true;
+        }
+
+        // tierRoot + '/' + relative
+        QC::usize rootLen = QC::String::strlen(tierRoot);
+        QC::usize relLen = QC::String::strlen(m.path);
+        const bool rootEndsWithSlash = (rootLen > 0 && tierRoot[rootLen - 1] == '/');
+        const QC::usize extraSlash = rootEndsWithSlash ? 0 : 1;
+        const QC::usize total = rootLen + extraSlash + relLen;
+
+        if (total + 1 > outCap)
+            return false;
+
+        QC::String::memcpy(outPath, tierRoot, rootLen);
+        QC::usize pos = rootLen;
+        if (!rootEndsWithSlash)
+            outPath[pos++] = '/';
+        QC::String::memcpy(outPath + pos, m.path, relLen);
+        outPath[pos + relLen] = 0;
+        return true;
+    }
+
+    static bool SysConfigEarlyLoadPhaseForRoot(QKBoot::FLogFn Log, QC::u64 ModuleRequest[], const QK::Boot::Config::SysConfig &syscfg,
+                                               const char *tierLabel, const char *tierRoot, bool &outTierOk)
+    {
+        outTierOk = true;
+
         if (!Log)
             return true;
 
@@ -515,7 +561,11 @@ namespace
             return true;
         }
 
-        Log("SysConfig: early phase begin (count=");
+        Log("SysConfig: early phase begin (tier='");
+        Log(tierLabel ? tierLabel : "(none)");
+        Log("' root='");
+        Log(tierRoot && tierRoot[0] ? tierRoot : "(none)");
+        Log("' count=");
         LogU64(Log, syscfg.earlyCount);
         Log(")\r\n");
 
@@ -536,6 +586,18 @@ namespace
                 continue;
             }
 
+            char resolvedPath[320] = {0};
+            if (!ResolveTieredModulePath(tierRoot, *m, resolvedPath, sizeof(resolvedPath)))
+            {
+                Log("SysConfig: early path resolution failed for id='");
+                Log(m->id);
+                Log("'\r\n");
+                outTierOk = false;
+                if (kProductionMode && m->required)
+                    return false;
+                continue;
+            }
+
             Log("SysConfig: early load id='");
             Log(m->id);
             Log("' type='");
@@ -543,10 +605,10 @@ namespace
             Log("' required=");
             LogBool(Log, m->required);
             Log(" path='");
-            Log(m->path);
+            Log(resolvedPath);
             Log("'\r\n");
 
-            if (m->path[0] == 0)
+            if (resolvedPath[0] == 0)
             {
                 Log("SysConfig: early module has empty path; skipping\r\n");
                 if (kProductionMode && m->required)
@@ -556,26 +618,30 @@ namespace
 
             char *buffer = nullptr;
             QC::usize len = 0;
-            if (!QK::Boot::Config::ReadFileFromLimineRamdiskModule(Log, ModuleRequest, m->path, buffer, len))
+            if (!QK::Boot::Config::ReadFileFromLimineRamdiskModule(Log, ModuleRequest, resolvedPath, buffer, len))
             {
                 Log("SysConfig: early read failed for '");
-                Log(m->path);
+                Log(resolvedPath);
                 Log("'\r\n");
+                if (m->required)
+                    outTierOk = false;
                 if (kProductionMode && m->required)
                     return false;
                 continue;
             }
 
-            if (EndsWithJsn(m->path))
+            if (EndsWithJsn(resolvedPath))
             {
                 QC::JSON::Value root;
                 const bool ok = QC::JSON::parse(buffer, root);
                 if (!ok)
                 {
                     Log("SysConfig: early JSON parse failed for '");
-                    Log(m->path);
+                    Log(resolvedPath);
                     Log("'\r\n");
                     operator delete[](buffer);
+                    if (m->required)
+                        outTierOk = false;
                     if (kProductionMode && m->required)
                         return false;
                     continue;
@@ -589,6 +655,7 @@ namespace
                         operator delete[](buffer);
 
                         // Overrides are optional, but if present they must be valid in production.
+                        outTierOk = false;
                         if (kProductionMode)
                             return false;
 
@@ -602,6 +669,7 @@ namespace
                     {
                         Log("SysConfig: security manifest validation failed\r\n");
                         operator delete[](buffer);
+                        outTierOk = false;
                         if (kProductionMode)
                             return false;
                         continue;
@@ -614,6 +682,7 @@ namespace
                     {
                         Log("SysConfig: services manifest validation failed\r\n");
                         operator delete[](buffer);
+                        outTierOk = false;
                         if (kProductionMode)
                             return false;
                         continue;
@@ -626,6 +695,7 @@ namespace
                     {
                         Log("SysConfig: drivers manifest validation failed\r\n");
                         operator delete[](buffer);
+                        outTierOk = false;
                         if (kProductionMode)
                             return false;
                         continue;
@@ -638,6 +708,7 @@ namespace
                     {
                         Log("SysConfig: apps manifest validation failed\r\n");
                         operator delete[](buffer);
+                        outTierOk = false;
                         if (kProductionMode)
                             return false;
                         continue;
@@ -655,6 +726,41 @@ namespace
         }
 
         Log("SysConfig: early phase done\r\n");
+        return true;
+    }
+
+    static bool SysConfigEarlyLoadPhase(QKBoot::FLogFn Log, QC::u64 ModuleRequest[], const QK::Boot::Config::SysConfig &syscfg)
+    {
+        if (!Log)
+            return true;
+
+        const bool haveProdRoot = syscfg.productionRoot[0] != 0;
+        const bool haveGoldenRoot = syscfg.goldenRoot[0] != 0;
+
+        // Default to production if configured; otherwise run without a tier root.
+        const char *activeLabel = haveProdRoot ? "production" : "default";
+        const char *activeRoot = haveProdRoot ? syscfg.productionRoot : "";
+
+        bool tierOk = true;
+        if (!SysConfigEarlyLoadPhaseForRoot(Log, ModuleRequest, syscfg, activeLabel, activeRoot, tierOk))
+            return false;
+
+        if (!tierOk && haveGoldenRoot)
+        {
+            Log("SysConfig: production tier invalid; falling back to golden\r\n");
+
+            bool goldenOk = true;
+            if (!SysConfigEarlyLoadPhaseForRoot(Log, ModuleRequest, syscfg, "golden", syscfg.goldenRoot, goldenOk))
+                return false;
+
+            if (!goldenOk)
+            {
+                Log("SysConfig: golden tier invalid\r\n");
+                if (kProductionMode)
+                    return false;
+            }
+        }
+
         return true;
     }
 

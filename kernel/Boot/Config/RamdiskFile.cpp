@@ -181,6 +181,75 @@ namespace QK::Boot::Config
             return false;
         }
 
+        static bool FindShortNameInDirectory(const QC::u8 *image, QC::usize imageSize, const Fat32Layout &fat, QC::u32 dirCluster,
+                                             const char short11[11], QC::u32 &outFirstCluster, QC::u32 &outFileSize, QC::u8 &outAttr)
+        {
+            outFirstCluster = 0;
+            outFileSize = 0;
+            outAttr = 0;
+
+            if (dirCluster < 2)
+                return false;
+
+            QC::u32 cluster = dirCluster;
+            const QC::usize maxClusters = static_cast<QC::usize>(imageSize / (fat.clusterSizeBytes ? fat.clusterSizeBytes : 1)) + 2;
+
+            for (QC::usize iter = 0; iter < maxClusters; ++iter)
+            {
+                QC::u64 clusterOffset = 0;
+                if (!ClusterToOffset(fat, cluster, clusterOffset))
+                    return false;
+                if (clusterOffset + fat.clusterSizeBytes > imageSize)
+                    return false;
+
+                const QC::u8 *dir = image + clusterOffset;
+                const QC::usize entries = static_cast<QC::usize>(fat.clusterSizeBytes / 32ull);
+
+                for (QC::usize e = 0; e < entries; ++e)
+                {
+                    const QC::u8 *ent = dir + e * 32;
+                    const QC::u8 name0 = ent[0];
+                    if (name0 == 0x00)
+                        return false;
+                    if (name0 == 0xE5)
+                        continue;
+
+                    const QC::u8 attr = ent[11];
+                    if (attr == 0x0F)
+                        continue;
+                    if (attr & 0x08)
+                        continue;
+
+                    if (QC::String::memcmp(ent, short11, 11) != 0)
+                        continue;
+
+                    const QC::u16 hi = ReadLe16(ent + 20);
+                    const QC::u16 lo = ReadLe16(ent + 26);
+                    const QC::u32 firstCluster = (static_cast<QC::u32>(hi) << 16) | lo;
+                    const QC::u32 fileSize = ReadLe32(ent + 28);
+
+                    if (firstCluster < 2)
+                        return false;
+
+                    outFirstCluster = firstCluster;
+                    outFileSize = fileSize;
+                    outAttr = attr;
+                    return true;
+                }
+
+                QC::u32 next = 0;
+                if (!ReadFat32Entry(image, imageSize, fat, cluster, next))
+                    return false;
+                if (next >= 0x0FFFFFF8ul)
+                    return false;
+                if (next == 0)
+                    return false;
+                cluster = next;
+            }
+
+            return false;
+        }
+
         static bool ReadFileByClusterChain(const QC::u8 *image, QC::usize imageSize, const Fat32Layout &fat, QC::u32 firstCluster,
                                            QC::u32 fileSize, char *&outBuf, QC::usize &outLen)
         {
@@ -237,19 +306,12 @@ namespace QK::Boot::Config
             return true;
         }
 
-        static bool PathToShort11(const char *Path, char out[11])
+        static bool SegmentToShort11(const char *Segment, char out[11])
         {
-            if (!Path || !out)
+            if (!Segment || !out)
                 return false;
 
-            // Find basename (after last '/').
-            const char *base = Path;
-            for (const char *p = Path; *p; ++p)
-            {
-                if (*p == '/')
-                    base = p + 1;
-            }
-
+            const char *base = Segment;
             if (!*base)
                 return false;
 
@@ -313,6 +375,72 @@ namespace QK::Boot::Config
 
             return true;
         }
+
+        static bool ReadFileBy83Path(const QC::u8 *image, QC::usize imageSize, const Fat32Layout &fat, const char *Path, char *&outBuf,
+                                     QC::usize &outLen)
+        {
+            outBuf = nullptr;
+            outLen = 0;
+
+            if (!Path)
+                return false;
+
+            const char *p = Path;
+            while (*p == '/')
+                ++p;
+
+            QC::u32 curDir = fat.rootCluster;
+
+            // Empty path means "root"; not a file.
+            if (!*p)
+                return false;
+
+            while (*p)
+            {
+                // Extract next segment.
+                char segment[32];
+                QC::usize segLen = 0;
+                while (*p && *p != '/' && segLen + 1 < sizeof(segment))
+                {
+                    segment[segLen++] = *p;
+                    ++p;
+                }
+                segment[segLen] = 0;
+
+                while (*p == '/')
+                    ++p;
+
+                if (segLen == 0)
+                    continue;
+
+                char short11[11];
+                if (!SegmentToShort11(segment, short11))
+                    return false;
+
+                const bool last = (*p == 0);
+                QC::u32 firstCluster = 0;
+                QC::u32 fileSize = 0;
+                QC::u8 attr = 0;
+                if (!FindShortNameInDirectory(image, imageSize, fat, curDir, short11, firstCluster, fileSize, attr))
+                    return false;
+
+                if (!last)
+                {
+                    if ((attr & 0x10) == 0)
+                        return false;
+                    curDir = firstCluster;
+                    continue;
+                }
+
+                // Last segment: must be a file.
+                if (attr & 0x10)
+                    return false;
+
+                return ReadFileByClusterChain(image, imageSize, fat, firstCluster, fileSize, outBuf, outLen);
+            }
+
+            return false;
+        }
     }
 
     bool ReadFileFromLimineRamdiskModule(FLogFn Log, QC::u64 ModuleRequest[], const char *Path, char *&OutBuf, QC::usize &OutLen)
@@ -324,15 +452,6 @@ namespace QK::Boot::Config
         if (!Ramdisk || !Ramdisk->address || Ramdisk->size < 512)
             return false;
 
-        char short11[11];
-        if (!PathToShort11(Path, short11))
-        {
-            LogStr(Log, "RamdiskFile: path not 8.3; cannot open: ");
-            LogStr(Log, Path ? Path : "(null)");
-            LogStr(Log, "\r\n");
-            return false;
-        }
-
         const QC::u8 *image = static_cast<const QC::u8 *>(Ramdisk->address);
         const QC::usize imageSize = static_cast<QC::usize>(Ramdisk->size);
 
@@ -340,11 +459,14 @@ namespace QK::Boot::Config
         if (!ParseFat32(image, imageSize, fat))
             return false;
 
-        QC::u32 firstCluster = 0;
-        QC::u32 fileSize = 0;
-        if (!FindShortNameInRoot(image, imageSize, fat, short11, firstCluster, fileSize))
+        if (!ReadFileBy83Path(image, imageSize, fat, Path, OutBuf, OutLen))
+        {
+            LogStr(Log, "RamdiskFile: cannot open 8.3 path: ");
+            LogStr(Log, Path ? Path : "(null)");
+            LogStr(Log, "\r\n");
             return false;
+        }
 
-        return ReadFileByClusterChain(image, imageSize, fat, firstCluster, fileSize, OutBuf, OutLen);
+        return true;
     }
 }

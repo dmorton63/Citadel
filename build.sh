@@ -198,6 +198,41 @@ if [ -d "${RAMDISK_DIR}" ]; then
         mcopy -i "${RAMDISK_TEMP}" "${PROJECT_DIR}/apps.json" ::/APPS.JSN >/dev/null 2>&1
     fi
 
+    # Two-tier config trees (8.3-only; no LFN). These enable Step 9's production vs golden selection.
+    # NOTE: today both tiers are populated identically; later, installers/updaters can diverge PROD.
+    mmd -i "${RAMDISK_TEMP}" ::/PROD >/dev/null 2>&1 || true
+    mmd -i "${RAMDISK_TEMP}" ::/GOLDEN >/dev/null 2>&1 || true
+
+    if [ -f "${PROJECT_DIR}/desktop.json" ]; then
+        mcopy -i "${RAMDISK_TEMP}" "${PROJECT_DIR}/desktop.json" ::/PROD/DESKTOP.JSN >/dev/null 2>&1
+        mcopy -i "${RAMDISK_TEMP}" "${PROJECT_DIR}/desktop.json" ::/GOLDEN/DESKTOP.JSN >/dev/null 2>&1
+    fi
+
+    if [ -f "${PROJECT_DIR}/desktop-overrides.json" ]; then
+        mcopy -i "${RAMDISK_TEMP}" "${PROJECT_DIR}/desktop-overrides.json" ::/PROD/DESKOVR.JSN >/dev/null 2>&1
+        mcopy -i "${RAMDISK_TEMP}" "${PROJECT_DIR}/desktop-overrides.json" ::/GOLDEN/DESKOVR.JSN >/dev/null 2>&1
+    fi
+
+    if [ -f "${PROJECT_DIR}/security.json" ]; then
+        mcopy -i "${RAMDISK_TEMP}" "${PROJECT_DIR}/security.json" ::/PROD/SECURITY.JSN >/dev/null 2>&1
+        mcopy -i "${RAMDISK_TEMP}" "${PROJECT_DIR}/security.json" ::/GOLDEN/SECURITY.JSN >/dev/null 2>&1
+    fi
+
+    if [ -f "${PROJECT_DIR}/services.json" ]; then
+        mcopy -i "${RAMDISK_TEMP}" "${PROJECT_DIR}/services.json" ::/PROD/SERVICES.JSN >/dev/null 2>&1
+        mcopy -i "${RAMDISK_TEMP}" "${PROJECT_DIR}/services.json" ::/GOLDEN/SERVICES.JSN >/dev/null 2>&1
+    fi
+
+    if [ -f "${PROJECT_DIR}/drivers.json" ]; then
+        mcopy -i "${RAMDISK_TEMP}" "${PROJECT_DIR}/drivers.json" ::/PROD/DRIVERS.JSN >/dev/null 2>&1
+        mcopy -i "${RAMDISK_TEMP}" "${PROJECT_DIR}/drivers.json" ::/GOLDEN/DRIVERS.JSN >/dev/null 2>&1
+    fi
+
+    if [ -f "${PROJECT_DIR}/apps.json" ]; then
+        mcopy -i "${RAMDISK_TEMP}" "${PROJECT_DIR}/apps.json" ::/PROD/APPS.JSN >/dev/null 2>&1
+        mcopy -i "${RAMDISK_TEMP}" "${PROJECT_DIR}/apps.json" ::/GOLDEN/APPS.JSN >/dev/null 2>&1
+    fi
+
     # Include startup.cfg so kernel startup-mode parsing can work from the ramdisk
     if [ -f "${PROJECT_DIR}/startup.cfg" ]; then
         mcopy -i "${RAMDISK_TEMP}" "${PROJECT_DIR}/startup.cfg" ::/STARTUP.CFG >/dev/null 2>&1
