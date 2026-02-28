@@ -43,6 +43,23 @@ namespace QD
         constexpr const char *LOG_MODULE = "QDesktop";
         constexpr float BASE_THEME_FONT_SIZE = 12.0f;
 
+        static QW::Controls::ControlId hashControlId(const char *text)
+        {
+            if (!text || !*text)
+                return QW::Controls::InvalidControlId;
+
+            // FNV-1a 32-bit
+            QC::u32 hash = 2166136261u;
+            for (const unsigned char *p = reinterpret_cast<const unsigned char *>(text); *p; ++p)
+            {
+                hash ^= static_cast<QC::u32>(*p);
+                hash *= 16777619u;
+            }
+
+            // 0 is reserved as InvalidControlId.
+            return (hash == 0) ? 1u : hash;
+        }
+
         static void onJsonSliderOpenLogin(QW::Controls::ScrollBar *slider, void *userData)
         {
             auto *desktop = static_cast<Desktop *>(userData);
@@ -1958,6 +1975,11 @@ namespace QD
             if (!created)
                 return;
 
+            if (id && *id)
+            {
+                created->setId(hashControlId(id));
+            }
+
             // Track ownership
             m_jsonControls.push_back(created);
 
@@ -2030,6 +2052,159 @@ namespace QD
 
         parseThemeOverrides(desktop->find("theme"));
         parseBackground(desktop->find("background"));
+
+        // Optional runtime overrides (validated early by BootGate if present in production).
+        // This lets production change banner/layout/palette without rebuilding the golden desktop.
+        {
+            const char *overridePaths[] = {"/desktop-overrides.json", "/DESKOVR.JSN", "/DESKOVR~1.JSO"};
+
+            QFS::File *ovrFile = nullptr;
+            const char *ovrOpenedPath = nullptr;
+            for (QC::usize i = 0; i < sizeof(overridePaths) / sizeof(overridePaths[0]); ++i)
+            {
+                ovrFile = QFS::VFS::instance().open(overridePaths[i], QFS::OpenMode::Read);
+                if (ovrFile)
+                {
+                    ovrOpenedPath = overridePaths[i];
+                    break;
+                }
+            }
+
+            if (ovrFile)
+            {
+                QC::u64 size64 = ovrFile->size();
+                if (size64 > 0 && size64 <= 1024 * 64)
+                {
+                    QC::usize size = static_cast<QC::usize>(size64);
+                    char *jsonText = static_cast<char *>(operator new[](size + 1));
+                    QC::isize readCount = ovrFile->read(jsonText, size);
+                    QFS::VFS::instance().close(ovrFile);
+                    ovrFile = nullptr;
+
+                    if (readCount > 0)
+                    {
+                        if (static_cast<QC::usize>(readCount) < size)
+                            size = static_cast<QC::usize>(readCount);
+                        jsonText[size] = '\0';
+
+                        QC::JSON::Value ovrRoot;
+                        if (QC::JSON::parse(jsonText, ovrRoot) && ovrRoot.isObject())
+                        {
+                            QC_LOG_INFO(LOG_MODULE, "Applying desktop overrides from %s\n", ovrOpenedPath ? ovrOpenedPath : "<unknown>");
+
+                            // banner_text -> headerTitle label (or hardcoded title label if present)
+                            if (const QC::JSON::Value *banner = ovrRoot.find("banner_text"); banner && banner->isString())
+                            {
+                                const char *text = banner->asString(nullptr);
+                                if (text && *text && m_titleLabel)
+                                    m_titleLabel->setText(text);
+                            }
+
+                            // colors -> light palette tweaks + a couple of obvious chrome helpers
+                            if (const QC::JSON::Value *colors = ovrRoot.find("colors"); colors && colors->isObject())
+                            {
+                                QC::Color parsed;
+
+                                if (const char *bg = stringOrNull(colors->find("background")); bg && parseColorString(bg, parsed))
+                                {
+                                    m_themeOverrides.palette.panel.set = true;
+                                    m_themeOverrides.palette.panel.value = parsed;
+                                    m_themeOverrides.active = true;
+
+                                    if (m_topBar)
+                                        m_topBar->setBackgroundColor(parsed);
+                                    if (m_sidebar)
+                                        m_sidebar->setBackgroundColor(parsed);
+                                    if (m_taskbar)
+                                        m_taskbar->setBackgroundColor(parsed);
+                                }
+
+                                if (const char *accent = stringOrNull(colors->find("accent")); accent && parseColorString(accent, parsed))
+                                {
+                                    m_themeOverrides.palette.accent.set = true;
+                                    m_themeOverrides.palette.accent.value = parsed;
+                                    m_themeOverrides.active = true;
+                                }
+
+                                if (const char *text = stringOrNull(colors->find("text")); text && parseColorString(text, parsed))
+                                {
+                                    m_themeOverrides.palette.text.set = true;
+                                    m_themeOverrides.palette.text.value = parsed;
+                                    m_themeOverrides.active = true;
+
+                                    if (m_titleLabel)
+                                        m_titleLabel->setTextColor(parsed);
+                                    if (m_clockLabel)
+                                        m_clockLabel->setTextColor(parsed);
+                                }
+                            }
+
+                            // layout -> per-control bounds overrides by id (same syntax as desktop.json)
+                            if (const QC::JSON::Value *layout = ovrRoot.find("layout"); layout && layout->isObject())
+                            {
+                                const QC::JSON::Object *layoutObj = layout->asObject();
+                                const QC::usize n = layoutObj ? layoutObj->size() : 0;
+                                for (QC::usize i = 0; i < n; ++i)
+                                {
+                                    const auto &ent = (*layoutObj)[i];
+                                    if (!ent.key || !ent.value || !ent.value->isObject())
+                                        continue;
+
+                                    QW::Controls::ControlId cid = hashControlId(ent.key);
+                                    if (cid == QW::Controls::InvalidControlId)
+                                        continue;
+
+                                    QW::Controls::IControl *ctrl = nullptr;
+                                    if (m_desktopWindow && m_desktopWindow->root())
+                                        ctrl = m_desktopWindow->root()->findChild(cid);
+
+                                    if (!ctrl)
+                                        continue;
+
+                                    QW::Rect oldB = ctrl->bounds();
+                                    QW::Controls::Panel *parent = ctrl->parent();
+                                    const QW::Rect parentB = parent ? parent->bounds() : QW::Rect{0, 0, m_screenWidth, m_screenHeight};
+                                    const QC::i32 parentW = static_cast<QC::i32>(parentB.width);
+                                    const QC::i32 parentH = static_cast<QC::i32>(parentB.height);
+
+                                    QC::i32 x = oldB.x;
+                                    QC::i32 y = oldB.y;
+                                    QC::i32 w = static_cast<QC::i32>(oldB.width);
+                                    QC::i32 h = static_cast<QC::i32>(oldB.height);
+
+                                    const QC::JSON::Value *ovr = ent.value;
+                                    if (const QC::JSON::Value *vx = ovr->find("x"))
+                                        (void)evalLayoutValue(vx, parentW, parentH, true, false, false, false, &x);
+                                    if (const QC::JSON::Value *vy = ovr->find("y"))
+                                        (void)evalLayoutValue(vy, parentW, parentH, false, true, false, false, &y);
+                                    if (const QC::JSON::Value *vw = ovr->find("width"))
+                                        (void)evalLayoutValue(vw, parentW, parentH, false, false, true, false, &w);
+                                    if (const QC::JSON::Value *vh = ovr->find("height"))
+                                        (void)evalLayoutValue(vh, parentW, parentH, false, false, false, true, &h);
+
+                                    w = clampNonNegative(w);
+                                    h = clampNonNegative(h);
+
+                                    ctrl->setBounds(QW::Rect{x, y, static_cast<QC::u32>(w), static_cast<QC::u32>(h)});
+                                    ctrl->invalidate();
+                                }
+
+                                recomputeTaskbarWindowBase();
+                            }
+                        }
+
+                        operator delete[](jsonText);
+                    }
+                    else
+                    {
+                        operator delete[](jsonText);
+                    }
+                }
+
+                if (ovrFile)
+                    QFS::VFS::instance().close(ovrFile);
+            }
+        }
 
         DesktopColors colors = currentColors();
         applyAccent(colors);
