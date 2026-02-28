@@ -1685,8 +1685,8 @@ namespace QD
 
         // NOTE: Our FAT32 layer currently does not implement Long File Name (LFN) entries.
         // build.sh copies project-root desktop.json into the ramdisk as an 8.3 name: /DESKTOP.JSN
-        // We try both paths for convenience.
-        const char *jsonPaths[] = {"/desktop.json", "/DESKTOP.JSN", "/DESKTO~1.JSO"};
+        // Step 9: prefer tiered paths first (PROD -> GOLDEN), then fall back to legacy locations.
+        const char *jsonPaths[] = {"/PROD/DESKTOP.JSN", "/GOLDEN/DESKTOP.JSN", "/desktop.json", "/DESKTOP.JSN", "/DESKTO~1.JSO"};
 
         QFS::File *file = nullptr;
         const char *openedPath = nullptr;
@@ -1701,7 +1701,8 @@ namespace QD
         }
         if (!file)
         {
-            QC_LOG_INFO(LOG_MODULE, "No desktop JSON found (/desktop.json or /DESKTOP.JSN); using hardcoded desktop\n");
+            QC_LOG_INFO(LOG_MODULE,
+                        "No desktop JSON found (/PROD/DESKTOP.JSN, /GOLDEN/DESKTOP.JSN, /desktop.json, or /DESKTOP.JSN); using hardcoded desktop\n");
             return false;
         }
 
@@ -2056,7 +2057,8 @@ namespace QD
         // Optional runtime overrides (validated early by BootGate if present in production).
         // This lets production change banner/layout/palette without rebuilding the golden desktop.
         {
-            const char *overridePaths[] = {"/desktop-overrides.json", "/DESKOVR.JSN", "/DESKOVR~1.JSO"};
+            // Step 9: prefer tiered paths first (PROD -> GOLDEN), then fall back to legacy locations.
+            const char *overridePaths[] = {"/PROD/DESKOVR.JSN", "/GOLDEN/DESKOVR.JSN", "/desktop-overrides.json", "/DESKOVR.JSN", "/DESKOVR~1.JSO"};
 
             QFS::File *ovrFile = nullptr;
             const char *ovrOpenedPath = nullptr;
