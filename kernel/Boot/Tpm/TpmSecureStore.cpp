@@ -754,6 +754,140 @@ namespace QK::Boot::Tpm
             return QC::Status::Success;
         }
 
+        static QC::Status TpmLoadExternalRsa2048RsassaSha256PublicKey(FLogFn Log, const FCrbCtx &Ctx, const QC::u8 Modulus[256], QC::u32 &OutHandle)
+        {
+            OutHandle = 0;
+            if (!Modulus)
+                return QC::Status::InvalidParam;
+
+            QC::u8 Cmd[1024];
+            FTpmBufWriter W{Cmd, sizeof(Cmd), 0};
+
+            constexpr QC::u16 TPM_ST_NO_SESSIONS = 0x8001;
+            constexpr QC::u32 TPM_CC_LoadExternal = 0x00000167u;
+            constexpr QC::u32 TPM_RH_NULL = 0x40000007u;
+
+            constexpr QC::u16 TPM_ALG_RSA = 0x0001;
+            constexpr QC::u16 TPM_ALG_SHA256 = 0x000B;
+            constexpr QC::u16 TPM_ALG_NULL = 0x0010;
+            constexpr QC::u16 TPM_ALG_RSASSA = 0x0014;
+
+            constexpr QC::u32 TPMA_USERWITHAUTH = 0x00000040u;
+            constexpr QC::u32 TPMA_SIGN_ENCRYPT = 0x00040000u;
+            constexpr QC::u32 TPMA_NODA = 0x00000400u;
+            const QC::u32 ObjectAttributes = TPMA_USERWITHAUTH | TPMA_SIGN_ENCRYPT | TPMA_NODA;
+
+            if (!W.Be16(TPM_ST_NO_SESSIONS) || !W.Be32(0) || !W.Be32(TPM_CC_LoadExternal))
+                return QC::Status::Error;
+
+            // TPM2_LoadExternal has no handle area; hierarchy is a parameter.
+            // inPrivate: TPM2B_SENSITIVE (empty)
+            if (!W.Be16(0))
+                return QC::Status::Error;
+
+            // inPublic: TPM2B_PUBLIC
+            const QC::usize InPublicSizeOffset = W.Len;
+            if (!W.Be16(0))
+                return QC::Status::Error;
+            const QC::usize InPublicStart = W.Len;
+
+            // TPMT_PUBLIC
+            if (!W.Be16(TPM_ALG_RSA) || !W.Be16(TPM_ALG_SHA256) || !W.Be32(ObjectAttributes))
+                return QC::Status::Error;
+
+            // authPolicy: TPM2B_DIGEST (empty)
+            if (!W.Be16(0))
+                return QC::Status::Error;
+
+            // parameters: TPMU_PUBLIC_PARMS -> TPMS_RSA_PARMS
+            // symmetric: TPMT_SYM_DEF_OBJECT (NULL)
+            if (!W.Be16(TPM_ALG_NULL))
+                return QC::Status::Error;
+            // scheme: TPMT_RSA_SCHEME (RSASSA + SHA256)
+            if (!W.Be16(TPM_ALG_RSASSA) || !W.Be16(TPM_ALG_SHA256))
+                return QC::Status::Error;
+            // keyBits, exponent
+            if (!W.Be16(2048) || !W.Be32(0))
+                return QC::Status::Error;
+
+            // unique: TPM2B_PUBLIC_KEY_RSA
+            if (!W.Be16(256))
+                return QC::Status::Error;
+            if (!W.Push(Modulus, 256))
+                return QC::Status::Error;
+
+            const QC::u16 InPublicSize = static_cast<QC::u16>(W.Len - InPublicStart);
+            WriteBe16(Cmd + InPublicSizeOffset, InPublicSize);
+
+            // hierarchy: TPMI_RH_HIERARCHY
+            if (!W.Be32(TPM_RH_NULL))
+                return QC::Status::Error;
+
+            WriteBe32(Cmd + 2, static_cast<QC::u32>(W.Len));
+
+            QC::u32 RspLen = 0;
+            QC::PhysAddr RspPhys = 0;
+            QC::u32 RspCode = CrbSubmitQuiet(Log, Ctx, Cmd, W.Len, RspLen, RspPhys);
+            g_TpmLastRspCode = RspCode;
+            if (RspCode != 0)
+                return QC::Status::Error;
+            if (!EnsureHhdmMapped(Log, RspPhys, RspLen))
+                return QC::Status::Error;
+
+            const QC::u8 *Rsp = reinterpret_cast<const QC::u8 *>(physToVirt(RspPhys));
+            const QC::u8 *Params = nullptr;
+            QC::u32 ParamsLen = 0;
+            if (!TpmRspParams(Rsp, RspLen, Params, ParamsLen))
+                return QC::Status::Error;
+            if (!Params || ParamsLen < 4)
+                return QC::Status::Error;
+
+            OutHandle = ReadBe32(Params);
+            g_TpmLastRspCode = 0;
+            return QC::Status::Success;
+        }
+
+        static QC::Status TpmVerifyRsa2048RsassaSha256Digest(FLogFn Log, const FCrbCtx &Ctx, QC::u32 KeyHandle, const QC::u8 Digest[32], const QC::u8 Signature[256])
+        {
+            if (!Digest || !Signature)
+                return QC::Status::InvalidParam;
+
+            QC::u8 Cmd[768];
+            FTpmBufWriter W{Cmd, sizeof(Cmd), 0};
+
+            constexpr QC::u16 TPM_ST_NO_SESSIONS = 0x8001;
+            constexpr QC::u32 TPM_CC_VerifySignature = 0x00000177u;
+            constexpr QC::u16 TPM_ALG_RSASSA = 0x0014;
+            constexpr QC::u16 TPM_ALG_SHA256 = 0x000B;
+
+            if (!W.Be16(TPM_ST_NO_SESSIONS) || !W.Be32(0) || !W.Be32(TPM_CC_VerifySignature))
+                return QC::Status::Error;
+            if (!W.Be32(KeyHandle))
+                return QC::Status::Error;
+
+            // digest: TPM2B_DIGEST
+            if (!W.Be16(32) || !W.Push(Digest, 32))
+                return QC::Status::Error;
+
+            // signature: TPMT_SIGNATURE -> RSASSA(SHA256) + TPM2B_PUBLIC_KEY_RSA
+            if (!W.Be16(TPM_ALG_RSASSA) || !W.Be16(TPM_ALG_SHA256))
+                return QC::Status::Error;
+            if (!W.Be16(256) || !W.Push(Signature, 256))
+                return QC::Status::Error;
+
+            WriteBe32(Cmd + 2, static_cast<QC::u32>(W.Len));
+
+            QC::u32 RspLen = 0;
+            QC::PhysAddr RspPhys = 0;
+            QC::u32 RspCode = CrbSubmitQuiet(Log, Ctx, Cmd, W.Len, RspLen, RspPhys);
+            g_TpmLastRspCode = RspCode;
+            if (RspCode != 0)
+                return QC::Status::Error;
+
+            g_TpmLastRspCode = 0;
+            return QC::Status::Success;
+        }
+
         static QC::Status TpmCreateSealedObject(FLogFn Log,
                                                 const FCrbCtx &Ctx,
                                                 QC::u32 ParentHandle,
@@ -1412,6 +1546,59 @@ namespace QK::Boot::Tpm
     bool IsReady()
     {
         return g_TpmSecureStore.bReady;
+    }
+
+    bool ExtendPcrSha256Digest(QC::u32 PcrIndex, const QC::u8 Digest[32], FLogFn Log)
+    {
+        if (!g_TpmSecureStore.bReady)
+            return false;
+        if (!Digest)
+            return false;
+
+        const QC::Status st = TpmPcrExtendSha256(Log, g_TpmSecureStore.Ctx, PcrIndex, Digest);
+        if (st != QC::Status::Success)
+        {
+            LogStr(Log, "TPM2: PCR_Extend failed\r\n");
+            return false;
+        }
+
+        return true;
+    }
+
+    bool VerifyRsa2048RsassaSha256Digest(const QC::u8 Modulus[256], const QC::u8 Digest[32], const QC::u8 Signature[256], FLogFn Log)
+    {
+        if (!g_TpmSecureStore.bReady)
+        {
+            LogStr(Log, "TPM2: not ready; cannot verify BOOT.JSN signature\r\n");
+            return false;
+        }
+        if (!Modulus || !Digest || !Signature)
+            return false;
+
+        QC::u32 keyHandle = 0;
+        const QC::Status loadSt = TpmLoadExternalRsa2048RsassaSha256PublicKey(Log, g_TpmSecureStore.Ctx, Modulus, keyHandle);
+        if (loadSt != QC::Status::Success)
+        {
+            LogStr(Log, "TPM2: LoadExternal failed\r\n");
+            LogStr(Log, "TPM2: rspCode 0x");
+            LogHex32Fixed(Log, g_TpmLastRspCode);
+            LogStr(Log, "\r\n");
+            return false;
+        }
+
+        const QC::Status verSt = TpmVerifyRsa2048RsassaSha256Digest(Log, g_TpmSecureStore.Ctx, keyHandle, Digest, Signature);
+        (void)TpmFlushContext(Log, g_TpmSecureStore.Ctx, keyHandle);
+
+        if (verSt != QC::Status::Success)
+        {
+            LogStr(Log, "TPM2: VerifySignature failed\r\n");
+            LogStr(Log, "TPM2: rspCode 0x");
+            LogHex32Fixed(Log, g_TpmLastRspCode);
+            LogStr(Log, "\r\n");
+            return false;
+        }
+
+        return true;
     }
 
     void RunSecureStoreSelfTests(QFS::VFS *Vfs, FLogFn Log)

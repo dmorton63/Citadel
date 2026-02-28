@@ -310,9 +310,19 @@ namespace QC
             : m_text(text),
               m_length(length),
               m_pos(0),
-              m_error(nullptr)
+                            m_error(nullptr),
+                            m_options()
         {
         }
+
+                Parser::Parser(const char *text, QC::usize length, const Options &options)
+                        : m_text(text),
+                            m_length(length),
+                            m_pos(0),
+                            m_error(nullptr),
+                            m_options(options)
+                {
+                }
 
         bool Parser::parse(Value &out)
         {
@@ -605,6 +615,11 @@ namespace QC
 
             if (!eof() && (peek() == 'e' || peek() == 'E'))
             {
+                if (m_options.forbidExponent || m_options.requireCanonicalNumbers)
+                {
+                    setError(ERROR_INVALID_NUMBER);
+                    return false;
+                }
                 get();
                 if (!eof() && (peek() == '+' || peek() == '-'))
                 {
@@ -626,6 +641,61 @@ namespace QC
             {
                 setError(ERROR_INVALID_NUMBER);
                 return false;
+            }
+
+            // Optional canonical-number enforcement (for deterministic payloads).
+            // Enforces:
+            // - no exponent (handled above)
+            // - no trailing zeros in fractional part
+            // - forbid negative zero encodings ("-0", "-0.0", "-0.000")
+            if (m_options.requireCanonicalNumbers)
+            {
+                const char *p = m_text + start;
+                const char *end = m_text + start + len;
+
+                bool negative = false;
+                if (p < end && *p == '-')
+                {
+                    negative = true;
+                    ++p;
+                }
+
+                const char *dot = nullptr;
+                for (const char *q = p; q < end; ++q)
+                {
+                    if (*q == '.')
+                    {
+                        dot = q;
+                        break;
+                    }
+                }
+
+                if (dot)
+                {
+                    if (end > dot + 1 && *(end - 1) == '0')
+                    {
+                        setError(ERROR_INVALID_NUMBER);
+                        return false;
+                    }
+                }
+
+                if (negative)
+                {
+                    bool anyNonZeroDigit = false;
+                    for (const char *q = p; q < end; ++q)
+                    {
+                        if (*q >= '1' && *q <= '9')
+                        {
+                            anyNonZeroDigit = true;
+                            break;
+                        }
+                    }
+                    if (!anyNonZeroDigit)
+                    {
+                        setError(ERROR_INVALID_NUMBER);
+                        return false;
+                    }
+                }
             }
 
             QC::Vector<char> buffer;
@@ -849,6 +919,12 @@ namespace QC
                 buffer.push_back('?');
             }
             return true;
+        }
+
+        bool parseEx(const char *text, QC::usize length, Value &out, const Parser::Options &options)
+        {
+            Parser parser(text, length, options);
+            return parser.parse(out);
         }
 
         bool parse(const char *text, Value &out)

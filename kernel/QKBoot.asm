@@ -79,6 +79,17 @@ limine_kernel_address_request:
     dq 0                     ; Revision
     dq 0                     ; Response pointer
 
+; Executable file request (kernel file buffer + cmdline)
+align 8
+global limine_executable_file_request
+limine_executable_file_request:
+    dq LIMINE_COMMON_MAGIC_0
+    dq LIMINE_COMMON_MAGIC_1
+    dq 0xad97e90e83f1ed67
+    dq 0x31eb5d1c5ff23b69
+    dq 0                     ; Revision
+    dq 0                     ; Response pointer
+
 ; Module request (initrd / ramdisk)
 align 8
 global limine_module_request

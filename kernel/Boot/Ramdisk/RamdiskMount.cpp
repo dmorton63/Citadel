@@ -130,7 +130,7 @@ namespace QK::Boot::Ramdisk
             (void)Log;
         }
 
-        static bool MountRamdiskVolume(QFS::VFS *vfs, QC::u64 ModuleRequest[], FLogFn Log)
+        static bool MountRamdiskVolume(QFS::VFS *vfs, QC::u64 ModuleRequest[], FLogFn Log, const InitOptions &Options)
         {
             if (!vfs)
                 return false;
@@ -184,16 +184,19 @@ namespace QK::Boot::Ramdisk
 
             LogStr(Log, "Ramdisk mounted at /\r\n");
 
-            // Keep the existing boot-time demos/tests as-is.
-            FileIoDemo(vfs, Log);
-            QK::Boot::Tpm::RunSecureStoreSelfTests(vfs, Log);
-            ReadHelloFileDemo(vfs, Log);
+            if (Options.runDemos)
+            {
+                // Keep the existing boot-time demos/tests as-is.
+                FileIoDemo(vfs, Log);
+                QK::Boot::Tpm::RunSecureStoreSelfTests(vfs, Log);
+                ReadHelloFileDemo(vfs, Log);
+            }
 
             return true;
         }
     } // namespace
 
-    bool InitializeFromLimineModules(QC::u64 ModuleRequest[], FLogFn Log)
+    bool InitializeFromLimineModules(QC::u64 ModuleRequest[], FLogFn Log, const InitOptions &Options)
     {
         auto *vfs = EnsureVfsReady(Log);
         if (!vfs)
@@ -204,16 +207,24 @@ namespace QK::Boot::Ramdisk
 
         if (volumeManager.isMounted(kRamdiskVolumeName))
         {
-            QK::Boot::Config::LoadFromVfs(Log);
-            ApplyStartupConfigSideEffects(Log);
+            if (Options.loadStartupConfig)
+            {
+                QK::Boot::Config::LoadFromVfs(Log);
+                if (Options.applyStartupSideEffects)
+                    ApplyStartupConfigSideEffects(Log);
+            }
             return true;
         }
 
-        if (!MountRamdiskVolume(vfs, ModuleRequest, Log))
+        if (!MountRamdiskVolume(vfs, ModuleRequest, Log, Options))
             return false;
 
-        QK::Boot::Config::LoadFromVfs(Log);
-        ApplyStartupConfigSideEffects(Log);
+        if (Options.loadStartupConfig)
+        {
+            QK::Boot::Config::LoadFromVfs(Log);
+            if (Options.applyStartupSideEffects)
+                ApplyStartupConfigSideEffects(Log);
+        }
         return true;
     }
 }

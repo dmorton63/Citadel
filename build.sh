@@ -38,6 +38,7 @@ RUN_QEMU=false
 FULLSCREEN=false
 TPM=false
 USE_TABLET=true
+PRODUCTION=false
 JOBS=$(nproc 2>/dev/null || echo 4)
 
 while [[ $# -gt 0 ]]; do
@@ -71,6 +72,10 @@ while [[ $# -gt 0 ]]; do
             USE_TABLET=false
             shift
             ;;
+        --prod)
+            PRODUCTION=true
+            shift
+            ;;
         -j*)
             JOBS="${1#-j}"
             shift
@@ -86,6 +91,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --tpm           Enable TPM2 emulation (requires swtpm)"
             echo "  --tablet        Use absolute USB tablet in QEMU (default)"
             echo "  --relmouse      Use relative USB mouse in QEMU"
+            echo "  --prod          Build production mode (fail-closed boot signature enforcement)"
             echo "  -j<N>           Use N parallel jobs (default: $(nproc))"
             echo "  -h, --help      Show this help"
             exit 0
@@ -111,8 +117,25 @@ echo -e "${YELLOW}[2/5] Configuring with CMake...${NC}"
 mkdir -p "${BUILD_DIR}"
 cd "${BUILD_DIR}"
 
+DESIRED_PROD="OFF"
+if [ "$PRODUCTION" = true ]; then
+    DESIRED_PROD="ON"
+fi
+
+NEED_CMAKE=false
 if [ ! -f "Makefile" ] || [ "$CLEAN" = true ]; then
-    cmake .. || { echo -e "${RED}CMake configuration failed!${NC}"; exit 1; }
+    NEED_CMAKE=true
+elif [ -f "CMakeCache.txt" ]; then
+    CACHED_PROD=$(grep -E '^CITADEL_PRODUCTION:BOOL=' CMakeCache.txt 2>/dev/null | cut -d= -f2)
+    if [ "${CACHED_PROD}" != "${DESIRED_PROD}" ]; then
+        NEED_CMAKE=true
+    fi
+else
+    NEED_CMAKE=true
+fi
+
+if [ "$NEED_CMAKE" = true ]; then
+    cmake .. -DCITADEL_PRODUCTION=${DESIRED_PROD} || { echo -e "${RED}CMake configuration failed!${NC}"; exit 1; }
 fi
 echo -e "${GREEN}      Done.${NC}"
 
@@ -151,9 +174,166 @@ if [ -d "${RAMDISK_DIR}" ]; then
         mcopy -i "${RAMDISK_TEMP}" "${PROJECT_DIR}/desktop.json" ::/DESKTOP.JSN >/dev/null 2>&1
     fi
 
+    # Optional production overrides for desktop presentation.
+    # Stored as DESKOVR.JSN (8.3) for early FAT32 reader compatibility.
+    if [ -f "${PROJECT_DIR}/desktop-overrides.json" ]; then
+        mcopy -i "${RAMDISK_TEMP}" "${PROJECT_DIR}/desktop-overrides.json" ::/DESKOVR.JSN >/dev/null 2>&1
+    fi
+
+    # Optional early-boot manifests / posture config.
+    # These are stored as fixed 8.3 names so the early FAT32 reader can open them.
+    if [ -f "${PROJECT_DIR}/security.json" ]; then
+        mcopy -i "${RAMDISK_TEMP}" "${PROJECT_DIR}/security.json" ::/SECURITY.JSN >/dev/null 2>&1
+    fi
+
+    if [ -f "${PROJECT_DIR}/services.json" ]; then
+        mcopy -i "${RAMDISK_TEMP}" "${PROJECT_DIR}/services.json" ::/SERVICES.JSN >/dev/null 2>&1
+    fi
+
+    if [ -f "${PROJECT_DIR}/drivers.json" ]; then
+        mcopy -i "${RAMDISK_TEMP}" "${PROJECT_DIR}/drivers.json" ::/DRIVERS.JSN >/dev/null 2>&1
+    fi
+
+    if [ -f "${PROJECT_DIR}/apps.json" ]; then
+        mcopy -i "${RAMDISK_TEMP}" "${PROJECT_DIR}/apps.json" ::/APPS.JSN >/dev/null 2>&1
+    fi
+
     # Include startup.cfg so kernel startup-mode parsing can work from the ramdisk
     if [ -f "${PROJECT_DIR}/startup.cfg" ]; then
         mcopy -i "${RAMDISK_TEMP}" "${PROJECT_DIR}/startup.cfg" ::/STARTUP.CFG >/dev/null 2>&1
+    fi
+
+    # Include boot.json (boot policy / min spec gate) as an 8.3 name.
+    # Prefer project-root boot.json, but also allow a checked-in copy under kernel/Boot/Config/.
+    BOOT_JSON_SRC=""
+    if [ -f "${PROJECT_DIR}/boot.json" ]; then
+        BOOT_JSON_SRC="${PROJECT_DIR}/boot.json"
+    elif [ -f "${PROJECT_DIR}/kernel/Boot/Config/boot.json" ]; then
+        BOOT_JSON_SRC="${PROJECT_DIR}/kernel/Boot/Config/boot.json"
+    fi
+
+    if [ -n "${BOOT_JSON_SRC}" ]; then
+        mcopy -i "${RAMDISK_TEMP}" "${BOOT_JSON_SRC}" ::/BOOT.JSN >/dev/null 2>&1
+
+        # Optional signature file for BOOT.JSN.
+        # If you provide a raw BOOT.SIG (RSA-2048 signature, 256 bytes) it will be packed as 8.3.
+        # If you provide a signing key at build/bootgate_rsa_priv.pem and have openssl installed,
+        # we will generate BOOT.SIG automatically.
+        BOOT_SIG_SRC=""
+        if [ -f "${PROJECT_DIR}/BOOT.SIG" ]; then
+            BOOT_SIG_SRC="${PROJECT_DIR}/BOOT.SIG"
+        elif [ -f "${PROJECT_DIR}/boot.sig" ]; then
+            BOOT_SIG_SRC="${PROJECT_DIR}/boot.sig"
+        else
+            BOOTGATE_PRIV_KEY=""
+            if [ -f "${PROJECT_DIR}/keys/bootgate_rsa_priv.pem" ]; then
+                BOOTGATE_PRIV_KEY="${PROJECT_DIR}/keys/bootgate_rsa_priv.pem"
+            elif [ -f "${BUILD_DIR}/bootgate_rsa_priv.pem" ]; then
+                # Legacy location (wiped by --clean); prefer keys/.
+                BOOTGATE_PRIV_KEY="${BUILD_DIR}/bootgate_rsa_priv.pem"
+            fi
+
+            if command -v openssl >/dev/null 2>&1 && [ -n "${BOOTGATE_PRIV_KEY}" ]; then
+                BOOT_SIG_GEN="${BUILD_DIR}/BOOT.SIG"
+                openssl dgst -sha256 -sign "${BOOTGATE_PRIV_KEY}" -out "${BOOT_SIG_GEN}" "${BOOT_JSON_SRC}" >/dev/null 2>&1 || true
+                if [ -f "${BOOT_SIG_GEN}" ]; then
+                    BOOT_SIG_SRC="${BOOT_SIG_GEN}"
+                fi
+            fi
+        fi
+
+        if [ "$PRODUCTION" = true ]; then
+            if [ -z "${BOOT_SIG_SRC}" ]; then
+                echo -e "${RED}Production build requires BOOT.SIG for BOOT.JSN, but none was found or generated.${NC}" >&2
+                if ! command -v openssl >/dev/null 2>&1; then
+                    echo -e "${RED}Hint: install openssl to generate BOOT.SIG automatically.${NC}" >&2
+                else
+                    echo -e "${RED}Hint: provide ${PROJECT_DIR}/BOOT.SIG or ${PROJECT_DIR}/boot.sig, or create ${PROJECT_DIR}/keys/bootgate_rsa_priv.pem.${NC}" >&2
+                fi
+                exit 1
+            fi
+
+            BOOT_SIG_SIZE=$(wc -c < "${BOOT_SIG_SRC}" 2>/dev/null || echo 0)
+            if [ "${BOOT_SIG_SIZE}" != "256" ]; then
+                echo -e "${RED}Production build: BOOT.SIG must be exactly 256 bytes (RSA-2048). Got ${BOOT_SIG_SIZE}.${NC}" >&2
+                exit 1
+            fi
+        fi
+
+        if [ -n "${BOOT_SIG_SRC}" ]; then
+            mcopy -i "${RAMDISK_TEMP}" "${BOOT_SIG_SRC}" ::/BOOT.SIG >/dev/null 2>&1
+        fi
+    fi
+
+    # Include sysconfig.json (root config index) as an 8.3 name.
+    # Prefer project-root sysconfig.json.
+    # Stored as SYSCFG.JSN because our early FAT32 reader does not support LFN yet.
+    SYSCONFIG_JSON_SRC=""
+    if [ -f "${PROJECT_DIR}/sysconfig.json" ]; then
+        SYSCONFIG_JSON_SRC="${PROJECT_DIR}/sysconfig.json"
+    fi
+
+    if [ -n "${SYSCONFIG_JSON_SRC}" ]; then
+        mcopy -i "${RAMDISK_TEMP}" "${SYSCONFIG_JSON_SRC}" ::/SYSCFG.JSN >/dev/null 2>&1
+
+        # Optional signature file for SYSCFG.JSN.
+        SYSCFG_SIG_SRC=""
+        if [ -f "${PROJECT_DIR}/SYSCFG.SIG" ]; then
+            SYSCFG_SIG_SRC="${PROJECT_DIR}/SYSCFG.SIG"
+        elif [ -f "${PROJECT_DIR}/syscfg.sig" ]; then
+            SYSCFG_SIG_SRC="${PROJECT_DIR}/syscfg.sig"
+        elif [ -f "${PROJECT_DIR}/sysconfig.sig" ]; then
+            SYSCFG_SIG_SRC="${PROJECT_DIR}/sysconfig.sig"
+        else
+            BOOTGATE_PRIV_KEY=""
+            if [ -f "${PROJECT_DIR}/keys/bootgate_rsa_priv.pem" ]; then
+                BOOTGATE_PRIV_KEY="${PROJECT_DIR}/keys/bootgate_rsa_priv.pem"
+            elif [ -f "${BUILD_DIR}/bootgate_rsa_priv.pem" ]; then
+                BOOTGATE_PRIV_KEY="${BUILD_DIR}/bootgate_rsa_priv.pem"
+            fi
+
+            if command -v openssl >/dev/null 2>&1 && [ -n "${BOOTGATE_PRIV_KEY}" ]; then
+                SYSCFG_SIG_GEN="${BUILD_DIR}/SYSCFG.SIG"
+                openssl dgst -sha256 -sign "${BOOTGATE_PRIV_KEY}" -out "${SYSCFG_SIG_GEN}" "${SYSCONFIG_JSON_SRC}" >/dev/null 2>&1 || true
+                if [ -f "${SYSCFG_SIG_GEN}" ]; then
+                    SYSCFG_SIG_SRC="${SYSCFG_SIG_GEN}"
+                fi
+            fi
+        fi
+
+        if [ "$PRODUCTION" = true ]; then
+            if [ -z "${SYSCFG_SIG_SRC}" ]; then
+                echo -e "${RED}Production build requires SYSCFG.SIG for SYSCFG.JSN, but none was found or generated.${NC}" >&2
+                if ! command -v openssl >/dev/null 2>&1; then
+                    echo -e "${RED}Hint: install openssl to generate SYSCFG.SIG automatically.${NC}" >&2
+                else
+                    echo -e "${RED}Hint: provide ${PROJECT_DIR}/SYSCFG.SIG (8.3) or ${PROJECT_DIR}/sysconfig.sig, or create ${PROJECT_DIR}/keys/bootgate_rsa_priv.pem.${NC}" >&2
+                fi
+                exit 1
+            fi
+
+            SYSCFG_SIG_SIZE=$(wc -c < "${SYSCFG_SIG_SRC}" 2>/dev/null || echo 0)
+            if [ "${SYSCFG_SIG_SIZE}" != "256" ]; then
+                echo -e "${RED}Production build: SYSCFG.SIG must be exactly 256 bytes (RSA-2048). Got ${SYSCFG_SIG_SIZE}.${NC}" >&2
+                exit 1
+            fi
+        fi
+
+        if [ -n "${SYSCFG_SIG_SRC}" ]; then
+            mcopy -i "${RAMDISK_TEMP}" "${SYSCFG_SIG_SRC}" ::/SYSCFG.SIG >/dev/null 2>&1
+        fi
+    fi
+
+    if [ "$PRODUCTION" = true ] && [ -z "${SYSCONFIG_JSON_SRC}" ]; then
+        echo -e "${RED}Production build requires sysconfig.json to package as SYSCFG.JSN.${NC}" >&2
+        echo -e "${RED}Hint: create ${PROJECT_DIR}/sysconfig.json.${NC}" >&2
+        exit 1
+    fi
+
+    if [ "$PRODUCTION" = true ] && [ -z "${BOOT_JSON_SRC}" ]; then
+        echo -e "${RED}Production build requires a boot policy file (boot.json) to package as BOOT.JSN.${NC}" >&2
+        echo -e "${RED}Hint: create ${PROJECT_DIR}/boot.json (preferred) or ${PROJECT_DIR}/kernel/Boot/Config/boot.json.${NC}" >&2
+        exit 1
     fi
     cp "${RAMDISK_TEMP}" "${RAMDISK_OUTPUT}"
     echo -e "${GREEN}      Ramdisk written to modules/ramdisk.img${NC}"
@@ -278,7 +458,7 @@ if [ "$RUN_QEMU" = true ]; then
     QEMU_ARGS=(
         -cdrom "${ISO_FILE}"
         -boot order=d
-        -m 256M
+        -m 3G
         -vga vmware
         -netdev user,id=net0
         -device e1000,netdev=net0

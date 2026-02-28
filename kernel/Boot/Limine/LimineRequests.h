@@ -27,8 +27,13 @@ namespace QK::Boot::Limine
 
     const limine_hhdm_response *GetHhdmResponse(QC::u64 HhdmRequest[]);
     const FKernelAddressResponse *GetKernelAddressResponse(QC::u64 KernelAddressRequest[]);
+    const limine_memmap_response *GetMemmapResponse(QC::u64 MemmapRequest[]);
     const limine_firmware_type_response *GetFirmwareTypeResponse(QC::u64 FirmwareTypeRequest[]);
     const limine_rsdp_response *GetRsdpResponse(QC::u64 RsdpRequest[]);
+
+    // Returns the sum of "available after reclaim" ranges in bytes.
+    // Counts: USABLE + BOOTLOADER_RECLAIMABLE + ACPI_RECLAIMABLE.
+    bool GetAvailableMemoryBytes(QC::u64 MemmapRequest[], QC::u64 &OutBytes);
 
     bool ReadKernelMapping(QC::u64 HhdmRequest[], QC::u64 KernelAddressRequest[], FKernelMapping &OutMapping);
 }

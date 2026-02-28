@@ -375,4 +375,3 @@ Stored per entry:
     }
   }
 }
-```

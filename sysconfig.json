@@ -1,0 +1,74 @@
+{
+  "version": 1,
+  "profile": "development",
+  "golden": {
+    "root": "/golden",
+    "hash": ""
+  },
+  "production": {
+    "root": "/production",
+    "hash": ""
+  },
+  "modules": [
+    {
+      "id": "desktop",
+      "path": "/DESKTOP.JSN",
+      "type": "config",
+      "required": true
+    },
+    {
+      "id": "desktop_overrides",
+      "path": "/DESKOVR.JSN",
+      "type": "desktop_overrides",
+      "required": false
+    },
+    {
+      "id": "security",
+      "path": "/SECURITY.JSN",
+      "type": "security",
+      "required": true
+    },
+    {
+      "id": "services",
+      "path": "/SERVICES.JSN",
+      "type": "services",
+      "required": true
+    },
+    {
+      "id": "drivers",
+      "path": "/DRIVERS.JSN",
+      "type": "drivers",
+      "required": true
+    },
+    {
+      "id": "apps",
+      "path": "/APPS.JSN",
+      "type": "apps",
+      "required": true
+    },
+    {
+      "id": "boot",
+      "path": "/BOOT.JSN",
+      "type": "boot",
+      "required": true
+    },
+    {
+      "id": "sysconfig",
+      "path": "/SYSCFG.JSN",
+      "type": "sysconfig",
+      "required": true
+    }
+  ],
+  "boot": {
+    "early": [
+      "boot",
+      "sysconfig",
+      "security",
+      "services",
+      "drivers",
+      "desktop",
+      "desktop_overrides",
+      "apps"
+    ]
+  }
+}

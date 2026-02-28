@@ -6,7 +6,13 @@ add_executable(citadel_kernel
     Boot/QKBoot.cpp
     Boot/Arch/ArchInit.cpp
     Boot/Acpi/AcpiTables.cpp
+    Boot/Config/BootJson.cpp
+    Boot/Config/SysConfig.cpp
     Boot/Config/StartupConfig.cpp
+    Boot/Config/RamdiskFile.cpp
+    Boot/Security/Sha256.cpp
+    Boot/Security/BootJsonSigKey.cpp
+    Boot/Security/BootJsonSignature.cpp
     Boot/Ramdisk/RamdiskMount.cpp
     Boot/Desktop/DesktopSession.cpp
     Boot/Memory/AddressMapping.cpp
@@ -36,6 +42,7 @@ target_link_libraries(citadel_kernel PRIVATE
     QEvent
     QDrivers
     QFileSystem
+    QJFunctions
     QWindowing
     QWControls
     QDesktop
@@ -43,6 +50,10 @@ target_link_libraries(citadel_kernel PRIVATE
 )
 
 target_compile_options(citadel_kernel PRIVATE ${KERNEL_COMPILE_FLAGS})
+
+target_compile_definitions(citadel_kernel PRIVATE
+    $<$<BOOL:${CITADEL_PRODUCTION}>:CITADEL_PRODUCTION=1>
+)
 
 # Linker script
 set_target_properties(citadel_kernel PROPERTIES

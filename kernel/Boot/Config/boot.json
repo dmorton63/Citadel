@@ -1,0 +1,42 @@
+{
+  "schema_version": 1,
+
+  "profile": {
+    "id": "windows_compat",
+    "description": "Windows personality with layered registry and app shims"
+  },
+
+  "min_spec": {
+    "ram_mib_required": 2048,
+    "cpu": {
+      "require_64bit": true,
+      "require_sse2": true,
+      "require_nx": true,
+      "require_longmode": true
+    },
+    "tpm": {
+      "mode": "optional",
+      "minimum_version": 2.0
+    }
+  },
+
+  "security": {
+    "require_signature": true,
+    "require_measurement": false,
+    "golden": {
+      "signed": true,
+      "measured": true
+    },
+    "production": {
+      "signed": true,
+      "measured": false
+    }
+  },
+
+  "paths": {
+    "golden_config": "/system/golden/config.json",
+    "production_config": "/system/config/config.json",
+    "registry_personality": "/system/config/personality.json",
+    "registry_overrides_dir": "/system/config/apps/"
+  }
+}

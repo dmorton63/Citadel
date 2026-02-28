@@ -44,3 +44,10 @@ Shared/citadel.txt
 backups/*.tgz
 backups/*.tar.gz
 backups/*.sha256
+
+# Local signing keys (never commit)
+keys/
+
+# Python bytecode caches
+__pycache__/
+*.pyc

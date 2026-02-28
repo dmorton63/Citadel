@@ -94,7 +94,18 @@ namespace QC
         class Parser
         {
         public:
+            struct Options
+            {
+                // When true, numeric literals using exponent notation (e/E) are rejected.
+                bool forbidExponent = false;
+
+                // When true, numeric literals must already be in canonical form.
+                // This is used for deterministic hashing/signing payloads.
+                bool requireCanonicalNumbers = false;
+            };
+
             Parser(const char *text, QC::usize length);
+            Parser(const char *text, QC::usize length, const Options &options);
 
             bool parse(Value &out);
             const char *error() const { return m_error; }
@@ -124,9 +135,14 @@ namespace QC
             QC::usize m_length;
             QC::usize m_pos;
             const char *m_error;
+
+            Options m_options;
         };
 
         bool parse(const char *text, Value &out);
+
+        // Extended parse variant for consumers that require additional constraints.
+        bool parseEx(const char *text, QC::usize length, Value &out, const Parser::Options &options);
 
     } // namespace JSON
 

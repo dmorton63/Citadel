@@ -13,6 +13,8 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_C_STANDARD 17)
 
+option(CITADEL_PRODUCTION "Enable fail-closed secure boot behavior" OFF)
+
 # Freestanding kernel flags (only for C/C++, not assembly)
 set(KERNEL_COMPILE_FLAGS
     $<$<COMPILE_LANGUAGE:CXX,C>:-ffreestanding>
@@ -43,6 +45,7 @@ add_subdirectory(QCMath)
 add_subdirectory(QCSerialization)
 add_subdirectory(QUICommon)
 add_subdirectory(QCommand)
+add_subdirectory(QJFunctions)
 
 target_link_libraries(QCommon INTERFACE
     QCCore
