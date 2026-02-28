@@ -6,7 +6,7 @@ Session: Core System Architecture – Registry, Config, Recovery
 
 ---
 
-## Roadmap status (as of 2026-02-27)
+## Roadmap status (as of 2026-02-28)
 
 1. [x] Boot minimum spec gate (RAM + CPU features) with Refusal Mode messaging
 2. [x] Reduced Memory Mode threshold + log message (recommended vs minimum)
@@ -16,8 +16,8 @@ Session: Core System Architecture – Registry, Config, Recovery
 6. [x] Development vs production enforcement posture (build-time `CITADEL_PRODUCTION`)
 7. [x] Production build fail-fast if `BOOT.JSN` / `BOOT.SIG` cannot be packaged correctly
 8. [x] Define + implement `sysconfig.json` as a signed/measured index of early config modules (drives early module load/validation)
-9. [ ] Implement two-tier config: Production config + immutable Golden config (groundwork present: sysconfig carries + parses golden/production roots/hashes; runtime selection/fallback not implemented yet)
-10. [ ] Implement recovery logic: validate production → fallback to golden → rebuild runtime registries
+9. [x] Implement two-tier config selection + fallback (current: both tiers live on the Limine ramdisk as 8.3 FAT32 roots `/PROD` and `/GOLDEN`; policy: `/GOLDEN` stays on ramdisk; `/PROD` stays on ramdisk for now)
+10. [ ] Implement recovery logic beyond selection: validate production → fallback to golden → rebuild runtime registries
 11. [ ] Define/implement runtime registries (Process/Service/Window/Resource/Security) data model + ownership rules
 12. [ ] TPM sealing for golden-config hashes (and unseal policy expectations)
 13. [ ] Measurement/event log format (structured boot measurement log beyond “PCR extended” strings)
@@ -29,6 +29,7 @@ Session: Core System Architecture – Registry, Config, Recovery
 ---
 ## Sample sysconfig.json (info only; contents TBD)
 Note: stored on the ramdisk FAT32 image as `SYSCFG.JSN` (8.3) with `SYSCFG.SIG`, verified and measured in early boot (no LFN yet).
+Current implementation uses ramdisk roots (`production.root` = `/PROD`, `golden.root` = `/GOLDEN`) and resolves relative module paths under the selected tier; the sample below illustrates the longer-term persistent-storage layout.
 ```
 json
 {
@@ -126,6 +127,12 @@ B. Golden Config (Immutable)
 - Only installer or trusted updater can modify
 - TPM‑measured for integrity
 - Used as fallback if production config is corrupted
+
+Current policy (now that two-tier selection exists):
+- `/GOLDEN` remains in the ramdisk as the immutable baseline.
+- `/PROD` remains in the ramdisk for now; a future disk-backed `/PROD` is an option once persistent storage + validation/mount semantics exist.
+- Where `/PROD` lives determines recovery semantics (ramdisk-only updates vs disk validation + fallback).
+
 Recovery Logic
 - Load production config
 - If corrupted → load golden config
