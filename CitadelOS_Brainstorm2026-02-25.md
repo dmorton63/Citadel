@@ -15,8 +15,8 @@ Session: Core System Architecture – Registry, Config, Recovery
 5. [x] Early measurement (PCR extends): cmdline, kernel image, module list, `BOOT.JSN`, `BOOT.SIG`
 6. [x] Development vs production enforcement posture (build-time `CITADEL_PRODUCTION`)
 7. [x] Production build fail-fast if `BOOT.JSN` / `BOOT.SIG` cannot be packaged correctly
-8. [ ] Define `sysconfig.json` as a real index of config modules (services/desktop/security/apps)
-9. [ ] Implement two-tier config: Production config + immutable Golden config
+8. [x] Define + implement `sysconfig.json` as a signed/measured index of early config modules (drives early module load/validation)
+9. [ ] Implement two-tier config: Production config + immutable Golden config (groundwork present: sysconfig carries + parses golden/production roots/hashes; runtime selection/fallback not implemented yet)
 10. [ ] Implement recovery logic: validate production → fallback to golden → rebuild runtime registries
 11. [ ] Define/implement runtime registries (Process/Service/Window/Resource/Security) data model + ownership rules
 12. [ ] TPM sealing for golden-config hashes (and unseal policy expectations)
@@ -24,10 +24,11 @@ Session: Core System Architecture – Registry, Config, Recovery
 14. [ ] Reduced-memory notices integrated with splash/UX + persistent logging target (e.g. `/system/logs/boot/memory_profile.log`)
 15. [ ] Compatibility registry system (JSON-backed per-app virtual registries) + merge semantics
 16. [ ] Unified sandbox “personality profiles” (Windows/Linux/macOS/Citadel) + app launch flow integration
+17. [x] Apply desktop overrides at runtime (optional `DESKOVR.JSN` merged onto golden desktop)
 
 ---
 ## Sample sysconfig.json (info only; contents TBD)
-Note: currently stored on the ramdisk FAT32 image as `SYSCFG.JSN` (8.3) for early-boot loading (no LFN yet).
+Note: stored on the ramdisk FAT32 image as `SYSCFG.JSN` (8.3) with `SYSCFG.SIG`, verified and measured in early boot (no LFN yet).
 ```
 json
 {
@@ -75,10 +76,10 @@ json
 
 Sysconfig definition checklist (turning item #8 into concrete steps):
 
-- [ ] Decide how `sysconfig.json` is located at boot (ramdisk file? limine module? compiled default?)
-- [ ] Decide what is measured/signed: `sysconfig.json` alone vs “manifest + per-module signatures”
-- [ ] Define module type contracts (`service-index`, `desktop-profile`, `security-policy`, `app-index`)
-- [ ] Implement a minimal loader: read `sysconfig.json` → load required modules → build initial runtime registries
+- [x] Decide how `sysconfig.json` is located at boot (ramdisk file/module: `SYSCFG.JSN`)
+- [x] Decide what is measured/signed: signed+measured `SYSCFG.JSN`/`SYSCFG.SIG` (modules are validated; per-module signing is a later enhancement)
+- [x] Define module type contracts (early module IDs/types validated via allowlist)
+- [x] Implement a minimal loader: read `sysconfig.json` → load ordered early modules → JSON-parse + allowlist-validate
 
 ---
 
