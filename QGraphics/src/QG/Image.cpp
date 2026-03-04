@@ -349,23 +349,47 @@ namespace QG
             }
 
             scratch.resize(target.width);
+            QC::Vector<QC::u32> srcXMap;
+            srcXMap.resize(target.width);
+
+            for (QC::u32 x = 0; x < target.width; ++x)
+            {
+                srcXMap[x] = (static_cast<QC::u64>(x) * surface.width) / target.width;
+            }
+
             const QC::u32 *source = surface.data();
 
             for (QC::u32 y = 0; y < target.height; ++y)
             {
                 QC::u32 srcY = (static_cast<QC::u64>(y) * surface.height) / target.height;
                 const QC::u32 *srcRow = source + srcY * surface.width;
+                bool rowOpaque = true;
                 for (QC::u32 x = 0; x < target.width; ++x)
                 {
-                    QC::u32 srcX = (static_cast<QC::u64>(x) * surface.width) / target.width;
-                    scratch[x] = srcRow[srcX];
+                    const QC::u32 px = srcRow[srcXMap[x]];
+                    scratch[x] = px;
+                    if (((px >> 24) & 0xFF) != 255)
+                        rowOpaque = false;
                 }
-                painter->blitAlpha(target.x,
-                                   target.y + static_cast<QC::i32>(y),
-                                   scratch.data(),
-                                   target.width,
-                                   1,
-                                   target.width);
+
+                if (rowOpaque)
+                {
+                    painter->blit(target.x,
+                                 target.y + static_cast<QC::i32>(y),
+                                 scratch.data(),
+                                 target.width,
+                                 1,
+                                 target.width);
+                }
+                else
+                {
+                    painter->blitAlpha(target.x,
+                                       target.y + static_cast<QC::i32>(y),
+                                       scratch.data(),
+                                       target.width,
+                                       1,
+                                       target.width);
+                }
             }
         }
     } // namespace

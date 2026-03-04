@@ -92,12 +92,19 @@ namespace QC
             if (a == 0)
                 return other;
 
+            // Fast divide-by-255 helper for values in [0, 65025].
+            // This avoids integer division in the hot alpha-blend path.
+            auto div255 = [](u32 x) -> u32 {
+                x += 128;
+                return (x + (x >> 8)) >> 8;
+            };
+
             u32 invAlpha = 255 - a;
             return Color(
-                static_cast<u8>((r * a + other.r * invAlpha) / 255),
-                static_cast<u8>((g * a + other.g * invAlpha) / 255),
-                static_cast<u8>((b * a + other.b * invAlpha) / 255),
-                static_cast<u8>(a + (other.a * invAlpha) / 255));
+                static_cast<u8>(div255(r * a + other.r * invAlpha)),
+                static_cast<u8>(div255(g * a + other.g * invAlpha)),
+                static_cast<u8>(div255(b * a + other.b * invAlpha)),
+                static_cast<u8>(a + div255(other.a * invAlpha)));
         }
 
         /// Linear interpolation between two colors

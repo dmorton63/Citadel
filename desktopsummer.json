@@ -2,7 +2,7 @@
     "desktop": {
         "background": {
             "type": "image",
-            "path": "/system/wallpapers/summer_beach_sky.png",
+            "path": "/system/wall/SUMMER.PNG",
             "mode": "stretch"
         },
         "theme": {

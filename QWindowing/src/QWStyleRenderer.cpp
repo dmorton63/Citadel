@@ -9,6 +9,136 @@ namespace QW
 
     namespace
     {
+        inline QC::u32 umin(QC::u32 a, QC::u32 b)
+        {
+            return a < b ? a : b;
+        }
+
+        inline QC::u32 isqrt_u32(QC::u32 x)
+        {
+            QC::u32 op = x;
+            QC::u32 res = 0;
+            QC::u32 one = 1u << 30;
+            while (one > op)
+            {
+                one >>= 2;
+            }
+            while (one != 0)
+            {
+                if (op >= res + one)
+                {
+                    op -= res + one;
+                    res += one << 1;
+                }
+                res >>= 1;
+                one >>= 2;
+            }
+            return res;
+        }
+
+        inline bool spanForRoundedRow(const QC::Rect &rect, QC::u32 radius, QC::i32 y, QC::i32 &x1, QC::i32 &x2)
+        {
+            if (rect.width == 0 || rect.height == 0)
+                return false;
+
+            const QC::i32 left = rect.x;
+            const QC::i32 right = rect.x + static_cast<QC::i32>(rect.width) - 1;
+
+            if (radius == 0)
+            {
+                x1 = left;
+                x2 = right;
+                return x1 <= x2;
+            }
+
+            const QC::u32 maxR = umin(rect.width / 2, rect.height / 2);
+            if (radius > maxR)
+                radius = maxR;
+            if (radius == 0)
+            {
+                x1 = left;
+                x2 = right;
+                return x1 <= x2;
+            }
+
+            const QC::i32 top = rect.y;
+            const QC::i32 bottom = rect.y + static_cast<QC::i32>(rect.height) - 1;
+            const QC::i32 r = static_cast<QC::i32>(radius);
+
+            const QC::i32 cyTop = top + (r - 1);
+            const QC::i32 cyBottom = bottom - (r - 1);
+
+            QC::i32 dy = 0;
+            if (y < cyTop)
+                dy = cyTop - y;
+            else if (y > cyBottom)
+                dy = y - cyBottom;
+
+            QC::i32 inset = 0;
+            if (dy > 0)
+            {
+                const QC::u32 r2 = radius * radius;
+                const QC::u32 dy2 = static_cast<QC::u32>(dy * dy);
+                const QC::u32 inside = (dy2 >= r2) ? 0 : (r2 - dy2);
+                const QC::u32 maxX = isqrt_u32(inside);
+                inset = (r - 1) - static_cast<QC::i32>(maxX);
+                if (inset < 0)
+                    inset = 0;
+                if (inset > (r - 1))
+                    inset = (r - 1);
+            }
+
+            x1 = left + inset;
+            x2 = right - inset;
+            return x1 <= x2;
+        }
+
+        inline void drawRoundedGradientV(QG::GraphicsBackend *backend,
+                                         const QC::Rect &shapeRect,
+                                         QC::u32 radius,
+                                         const QC::Rect &areaRect,
+                                         QC::Color from,
+                                         QC::Color to)
+        {
+            if (!backend)
+                return;
+            if (shapeRect.width == 0 || shapeRect.height == 0)
+                return;
+            if (areaRect.width == 0 || areaRect.height == 0)
+                return;
+
+            const QC::i32 yStart = areaRect.y;
+            const QC::i32 yEnd = areaRect.y + static_cast<QC::i32>(areaRect.height);
+            const QC::f32 denom = areaRect.height > 1 ? static_cast<QC::f32>(areaRect.height - 1) : 1.0f;
+            const QC::i32 areaLeft = areaRect.x;
+            const QC::i32 areaRight = areaRect.x + static_cast<QC::i32>(areaRect.width) - 1;
+
+            for (QC::i32 y = yStart; y < yEnd; ++y)
+            {
+                const QC::i32 rel = y - areaRect.y;
+                const QC::f32 t = denom == 0.0f ? 0.0f : static_cast<QC::f32>(rel) / denom;
+                const QC::Color color = QC::Color::lerp(from, to, t);
+                if (color.a == 0)
+                    continue;
+
+                QC::i32 x1 = 0, x2 = -1;
+                if (!spanForRoundedRow(shapeRect, radius, y, x1, x2))
+                    continue;
+
+                if (x1 < areaLeft)
+                    x1 = areaLeft;
+                if (x2 > areaRight)
+                    x2 = areaRight;
+                if (x1 > x2)
+                    continue;
+
+                backend->drawRect(QC::Rect{x1, y, static_cast<QC::u32>(x2 - x1 + 1), 1},
+                                  color,
+                                  QC::Color::transparent(),
+                                  0);
+            }
+        }
+
         inline QC::u32 roleIndex(ButtonRole role)
         {
             QC::u32 idx = static_cast<QC::u32>(role);
@@ -445,13 +575,14 @@ namespace QW
         const QC::u32 borderWidth = (spec.borderWidth > 0) ? spec.borderWidth : styleData.metrics.borderWidth;
         const bool canRound = spec.cornerRadius > 0 && caps.supportsRoundedRect;
 
+        // For material-driven glass, avoid a uniform solid border/outline.
+        // The "edge" should be conveyed by reflections (inner strokes) and transparency.
+        const bool materialGlass = spec.materialLayers.enabled && caps.supportsAlpha && !disabled;
+
         const bool hasShadow = !disabled && spec.castsShadow && caps.supportsShadows && spec.glow.a > 0 && styleData.metrics.buttonShadowSoftness > 0;
         if (hasShadow)
         {
-            QC::Rect shadowRect = buttonRect;
-            shadowRect.x += styleData.metrics.buttonShadowOffsetX;
-            shadowRect.y += styleData.metrics.buttonShadowOffsetY;
-            m_backend->drawShadow(shadowRect,
+            m_backend->drawShadow(buttonRect,
                                   {styleData.metrics.buttonShadowOffsetX, styleData.metrics.buttonShadowOffsetY},
                                   static_cast<QC::i32>(styleData.metrics.buttonShadowSoftness),
                                   spec.glow,
@@ -477,7 +608,10 @@ namespace QW
             }
         };
 
-        drawShape(buttonRect, fill, borderColor, borderWidth);
+        drawShape(buttonRect,
+              fill,
+              materialGlass ? QC::Color::transparent() : borderColor,
+              materialGlass ? 0 : borderWidth);
 
         const auto overlayColorForState = [&]() -> QC::Color
         {
@@ -505,7 +639,7 @@ namespace QW
             return spec.outline;
         };
 
-        QC::Color outlineColor = (!disabled) ? outlineColorForState() : QC::Color::transparent();
+        QC::Color outlineColor = (!disabled && !materialGlass) ? outlineColorForState() : QC::Color::transparent();
         if (outlineColor.a > 0)
         {
             drawShape(buttonRect, QC::Color::transparent(), outlineColor, 1);
@@ -518,7 +652,18 @@ namespace QW
             QC::Rect inner = insetRect(buttonRect, inset);
             if (inner.width > 0 && inner.height > 1)
             {
+                QC::u32 innerRadius = 0;
+                if (canRound && spec.cornerRadius > inset)
+                {
+                    innerRadius = spec.cornerRadius - inset;
+                }
+
                 QC::u32 glossHeight = inner.height / 2;
+                if (spec.materialLayers.enabled && inner.height >= 6)
+                {
+                    // A smaller highlight band reads more like a reflection.
+                    glossHeight = inner.height / 3;
+                }
                 if (glossHeight < 2)
                 {
                     glossHeight = inner.height;
@@ -527,36 +672,182 @@ namespace QW
                 QC::Rect glossRect = inner;
                 glossRect.height = glossHeight;
 
-                const float glossBoost = spec.glass ? (pressed ? 0.25f : 0.4f) : (pressed ? 0.08f : 0.18f);
-                const QC::u8 glossAlpha = spec.glass ? (pressed ? 140 : 190) : (pressed ? 70 : 110);
-
-                QC::Color glossTop = fill.lighter(glossBoost).withAlpha(glossAlpha);
-                QC::Color glossBottom = fill.lighter(0.02f).withAlpha(0);
-                m_backend->drawGradient(glossRect,
-                                        glossTop,
-                                        glossBottom,
-                                        QG::GradientDirection::Vertical);
-
-                if (inner.height > glossHeight)
+                if (spec.materialLayers.enabled)
                 {
-                    QC::Rect shadeRect = inner;
-                    QC::u32 shadeHeight = inner.height - glossHeight;
-                    shadeRect.y = inner.y + static_cast<QC::i32>(inner.height - shadeHeight);
-                    shadeRect.height = shadeHeight;
+                    const auto &layers = pressed ? spec.materialLayers.pressed
+                                                 : (hovered ? spec.materialLayers.hovered
+                                                            : spec.materialLayers.normal);
 
-                    const float shadeBoost = spec.glass ? 0.35f : 0.18f;
-                    QC::u8 shadeAlpha = spec.glass ? 150 : 110;
-                    if (pressed)
+                    // Edge reflections: subtle top/left highlight + bottom/right shade.
+                    // This is what usually sells the "glass" impression.
+                    auto pickMoreOpaque = [](QC::Color a, QC::Color b) -> QC::Color
                     {
-                        shadeAlpha = static_cast<QC::u8>(shadeAlpha * 0.8f);
+                        return (a.a >= b.a) ? a : b;
+                    };
+
+                    const QC::Color light = pickMoreOpaque(layers.glossTop, layers.glossBottom);
+                    const QC::Color dark = pickMoreOpaque(layers.shadeBottom, layers.shadeTop);
+
+                    if (inner.width >= 2 && inner.height >= 2)
+                    {
+                        const QC::u32 innerInset = inset;
+                        QC::u32 innerRadius = 0;
+                        if (canRound && spec.cornerRadius > innerInset)
+                        {
+                            innerRadius = spec.cornerRadius - innerInset;
+                        }
+
+                        if (light.a > 0)
+                        {
+                            const QC::i32 xStart = inner.x + static_cast<QC::i32>(innerRadius);
+                            const QC::i32 xEnd = inner.x + static_cast<QC::i32>(inner.width) - 1 - static_cast<QC::i32>(innerRadius);
+                            const QC::i32 yStart = inner.y + static_cast<QC::i32>(innerRadius);
+                            const QC::i32 yEnd = inner.y + static_cast<QC::i32>(inner.height) - 1 - static_cast<QC::i32>(innerRadius);
+
+                            if (xStart <= xEnd)
+                            {
+                                m_backend->drawRect(QC::Rect{xStart, inner.y, static_cast<QC::u32>(xEnd - xStart + 1), 1}, light, QC::Color::transparent(), 0);
+                            }
+                            if (yStart <= yEnd)
+                            {
+                                m_backend->drawRect(QC::Rect{inner.x, yStart, 1, static_cast<QC::u32>(yEnd - yStart + 1)}, light, QC::Color::transparent(), 0);
+                            }
+                        }
+                        if (dark.a > 0)
+                        {
+                            const QC::i32 xStart = inner.x + static_cast<QC::i32>(innerRadius);
+                            const QC::i32 xEnd = inner.x + static_cast<QC::i32>(inner.width) - 1 - static_cast<QC::i32>(innerRadius);
+                            const QC::i32 yStart = inner.y + static_cast<QC::i32>(innerRadius);
+                            const QC::i32 yEnd = inner.y + static_cast<QC::i32>(inner.height) - 1 - static_cast<QC::i32>(innerRadius);
+
+                            if (xStart <= xEnd)
+                            {
+                                m_backend->drawRect(QC::Rect{xStart,
+                                                            inner.y + static_cast<QC::i32>(inner.height - 1),
+                                                            static_cast<QC::u32>(xEnd - xStart + 1),
+                                                            1},
+                                                  dark,
+                                                  QC::Color::transparent(),
+                                                  0);
+                            }
+                            if (yStart <= yEnd)
+                            {
+                                m_backend->drawRect(QC::Rect{inner.x + static_cast<QC::i32>(inner.width - 1),
+                                                            yStart,
+                                                            1,
+                                                            static_cast<QC::u32>(yEnd - yStart + 1)},
+                                                  dark,
+                                                  QC::Color::transparent(),
+                                                  0);
+                            }
+                        }
                     }
 
-                    QC::Color shadeTop = fill.withAlpha(0);
-                    QC::Color shadeBottom = fill.darker(shadeBoost).withAlpha(shadeAlpha);
-                    m_backend->drawGradient(shadeRect,
-                                            shadeTop,
-                                            shadeBottom,
-                                            QG::GradientDirection::Vertical);
+                    if (layers.glossTop.a > 0 || layers.glossBottom.a > 0)
+                    {
+                        if (innerRadius > 0)
+                        {
+                            drawRoundedGradientV(m_backend,
+                                                 inner,
+                                                 innerRadius,
+                                                 glossRect,
+                                                 layers.glossTop,
+                                                 layers.glossBottom);
+                        }
+                        else
+                        {
+                            m_backend->drawGradient(glossRect,
+                                                    layers.glossTop,
+                                                    layers.glossBottom,
+                                                    QG::GradientDirection::Vertical);
+                        }
+                    }
+
+                    if (inner.height > glossHeight)
+                    {
+                        QC::Rect shadeRect = inner;
+                        QC::u32 shadeHeight = inner.height - glossHeight;
+                        shadeRect.y = inner.y + static_cast<QC::i32>(inner.height - shadeHeight);
+                        shadeRect.height = shadeHeight;
+
+                        if (layers.shadeTop.a > 0 || layers.shadeBottom.a > 0)
+                        {
+                            if (innerRadius > 0)
+                            {
+                                drawRoundedGradientV(m_backend,
+                                                     inner,
+                                                     innerRadius,
+                                                     shadeRect,
+                                                     layers.shadeTop,
+                                                     layers.shadeBottom);
+                            }
+                            else
+                            {
+                                m_backend->drawGradient(shadeRect,
+                                                        layers.shadeTop,
+                                                        layers.shadeBottom,
+                                                        QG::GradientDirection::Vertical);
+                            }
+                        }
+                    }
+                }
+                else
+                {
+                    const float glossBoost = spec.glass ? (pressed ? 0.25f : 0.4f) : (pressed ? 0.08f : 0.18f);
+                    const QC::u8 glossAlpha = spec.glass ? (pressed ? 140 : 190) : (pressed ? 70 : 110);
+
+                    QC::Color glossTop = fill.lighter(glossBoost).withAlpha(glossAlpha);
+                    QC::Color glossBottom = fill.lighter(0.02f).withAlpha(0);
+                    if (innerRadius > 0)
+                    {
+                        drawRoundedGradientV(m_backend,
+                                             inner,
+                                             innerRadius,
+                                             glossRect,
+                                             glossTop,
+                                             glossBottom);
+                    }
+                    else
+                    {
+                        m_backend->drawGradient(glossRect,
+                                                glossTop,
+                                                glossBottom,
+                                                QG::GradientDirection::Vertical);
+                    }
+
+                    if (inner.height > glossHeight)
+                    {
+                        QC::Rect shadeRect = inner;
+                        QC::u32 shadeHeight = inner.height - glossHeight;
+                        shadeRect.y = inner.y + static_cast<QC::i32>(inner.height - shadeHeight);
+                        shadeRect.height = shadeHeight;
+
+                        const float shadeBoost = spec.glass ? 0.35f : 0.18f;
+                        QC::u8 shadeAlpha = spec.glass ? 150 : 110;
+                        if (pressed)
+                        {
+                            shadeAlpha = static_cast<QC::u8>(shadeAlpha * 0.8f);
+                        }
+
+                        QC::Color shadeTop = fill.withAlpha(0);
+                        QC::Color shadeBottom = fill.darker(shadeBoost).withAlpha(shadeAlpha);
+                        if (innerRadius > 0)
+                        {
+                            drawRoundedGradientV(m_backend,
+                                                 inner,
+                                                 innerRadius,
+                                                 shadeRect,
+                                                 shadeTop,
+                                                 shadeBottom);
+                        }
+                        else
+                        {
+                            m_backend->drawGradient(shadeRect,
+                                                    shadeTop,
+                                                    shadeBottom,
+                                                    QG::GradientDirection::Vertical);
+                        }
+                    }
                 }
             }
         }

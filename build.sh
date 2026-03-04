@@ -40,6 +40,8 @@ TPM=false
 USE_TABLET=true
 PRODUCTION=false
 JOBS=$(nproc 2>/dev/null || echo 4)
+RUN_FOR_SECONDS=0
+HEADLESS=false
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -53,6 +55,16 @@ while [[ $# -gt 0 ]]; do
             ;;
         -r|--run)
             RUN_QEMU=true
+            shift
+            ;;
+        --run-for)
+            RUN_QEMU=true
+            shift
+            RUN_FOR_SECONDS="$1"
+            shift
+            ;;
+        --headless)
+            HEADLESS=true
             shift
             ;;
         -f|--fullscreen)
@@ -87,6 +99,8 @@ while [[ $# -gt 0 ]]; do
             echo "  -c, --clean     Clean build (remove build directory)"
             echo "  -v, --verbose   Verbose build output"
             echo "  -r, --run       Run in QEMU after building"
+            echo "  --run-for <s>   Run QEMU, auto-stop after <s> seconds (best for scripted/CI runs)"
+            echo "  --headless      Run QEMU without a GUI window (serial still logs to build/serial.log)"
             echo "  -f, --fullscreen Start QEMU fullscreen"
             echo "  --tpm           Enable TPM2 emulation (requires swtpm)"
             echo "  --tablet        Use absolute USB tablet in QEMU (default)"
@@ -161,11 +175,31 @@ if [ -d "${RAMDISK_DIR}" ]; then
     echo -e "${YELLOW}      Building ramdisk image...${NC}"
     mkdir -p "${ISO_DIR}/modules"
     RAMDISK_TEMP="${BUILD_DIR}/ramdisk.img"
-    dd if=/dev/zero of="${RAMDISK_TEMP}" bs=1M count=0 seek=4 >/dev/null 2>&1
-    mkfs.fat -F 32 -n CITADELRD "${RAMDISK_TEMP}" >/dev/null 2>&1
-    if compgen -G "${RAMDISK_DIR}/*" >/dev/null; then
-        mcopy -s -i "${RAMDISK_TEMP}" ${RAMDISK_DIR}/* :: >/dev/null 2>&1
+    # Size ramdisk based on source tree size. The previous fixed 4MB image can fill up
+    # quickly once wallpapers/assets are added, causing silent mcopy failures.
+    RAMDISK_SRC_MB=$(du -sm "${RAMDISK_DIR}" | awk '{print $1}')
+    RAMDISK_MB=$((RAMDISK_SRC_MB + 8))
+    if [ "${RAMDISK_MB}" -lt 16 ]; then
+        RAMDISK_MB=16
     fi
+
+    echo -e "${CYAN}      Ramdisk size: ${RAMDISK_MB}MB (src=${RAMDISK_SRC_MB}MB + 8MB)${NC}"
+    RAMDISK_T0=$(date +%s)
+    dd if=/dev/zero of="${RAMDISK_TEMP}" bs=1M count=0 seek="${RAMDISK_MB}" status=none
+    # Use a larger cluster size to reduce FAT traversal overhead when reading large assets
+    # (e.g., wallpapers). Default formatting can choose 512B clusters, which is very slow.
+    mkfs.fat -F 32 -s 8 -n CITADELRD "${RAMDISK_TEMP}" >/dev/null
+    if compgen -G "${RAMDISK_DIR}/*" >/dev/null; then
+        echo -e "${CYAN}      Copying ramdisk/ contents into image...${NC}"
+        if ! mcopy -s -i "${RAMDISK_TEMP}" ${RAMDISK_DIR}/* :: >/dev/null 2>&1; then
+            echo -e "${RED}mcopy failed while populating ramdisk image (size=${RAMDISK_MB}MB).${NC}"
+            echo -e "${RED}Tip: check for 'Disk full' or filename collisions under ${RAMDISK_DIR}.${NC}"
+            exit 1
+        fi
+    fi
+
+    RAMDISK_T1=$(date +%s)
+    echo -e "${GREEN}      Ramdisk build done in $((RAMDISK_T1 - RAMDISK_T0))s.${NC}"
 
     # Also include the project-root desktop.json (if present)
     if [ -f "${PROJECT_DIR}/desktop.json" ]; then
@@ -206,6 +240,43 @@ if [ -d "${RAMDISK_DIR}" ]; then
     if [ -f "${PROJECT_DIR}/desktop.json" ]; then
         mcopy -i "${RAMDISK_TEMP}" "${PROJECT_DIR}/desktop.json" ::/PROD/DESKTOP.JSN >/dev/null 2>&1
         mcopy -i "${RAMDISK_TEMP}" "${PROJECT_DIR}/desktop.json" ::/GOLDEN/DESKTOP.JSN >/dev/null 2>&1
+    fi
+
+    # Negative test hook: intentionally corrupt only the production tier desktop JSON so
+    # boot-time tier selection must fall back to GOLDEN.
+    # Usage: CITADEL_NEGTEST_PROD_DESKTOP=1 ./build.sh -r
+    if [ "${CITADEL_NEGTEST_PROD_DESKTOP}" = "1" ]; then
+        echo -e "${YELLOW}      NEGTEST: corrupting /PROD/DESKTOP.JSN to force GOLDEN fallback...${NC}"
+        NEGTEST_BAD_DESKTOP="${BUILD_DIR}/NEGTEST_DESKTOP_BAD.JSN"
+        printf '{"desktop":{}}' > "${NEGTEST_BAD_DESKTOP}" 2>/dev/null || true
+        mcopy -i "${RAMDISK_TEMP}" "${NEGTEST_BAD_DESKTOP}" ::/PROD/DESKTOP.JSN >/dev/null 2>&1 || true
+    fi
+
+    # Optional seasonal desktop presets (theme-only switching). Stored as fixed 8.3 names.
+    # These are consumed by QDesktop when desktop-overrides.json includes: { "season": "spring" } (etc).
+    if [ -f "${PROJECT_DIR}/desktopspring.json" ]; then
+        mcopy -i "${RAMDISK_TEMP}" "${PROJECT_DIR}/desktopspring.json" ::/DSPRING.JSN >/dev/null 2>&1
+        mcopy -i "${RAMDISK_TEMP}" "${PROJECT_DIR}/desktopspring.json" ::/PROD/DSPRING.JSN >/dev/null 2>&1
+        mcopy -i "${RAMDISK_TEMP}" "${PROJECT_DIR}/desktopspring.json" ::/GOLDEN/DSPRING.JSN >/dev/null 2>&1
+    fi
+
+    if [ -f "${PROJECT_DIR}/desktopsummer.json" ]; then
+        mcopy -i "${RAMDISK_TEMP}" "${PROJECT_DIR}/desktopsummer.json" ::/DSUMMER.JSN >/dev/null 2>&1
+        mcopy -i "${RAMDISK_TEMP}" "${PROJECT_DIR}/desktopsummer.json" ::/PROD/DSUMMER.JSN >/dev/null 2>&1
+        mcopy -i "${RAMDISK_TEMP}" "${PROJECT_DIR}/desktopsummer.json" ::/GOLDEN/DSUMMER.JSN >/dev/null 2>&1
+    fi
+
+    # Note: file is named desktopAutum.json in-repo (typo kept for compatibility).
+    if [ -f "${PROJECT_DIR}/desktopAutum.json" ]; then
+        mcopy -i "${RAMDISK_TEMP}" "${PROJECT_DIR}/desktopAutum.json" ::/DAUTUMN.JSN >/dev/null 2>&1
+        mcopy -i "${RAMDISK_TEMP}" "${PROJECT_DIR}/desktopAutum.json" ::/PROD/DAUTUMN.JSN >/dev/null 2>&1
+        mcopy -i "${RAMDISK_TEMP}" "${PROJECT_DIR}/desktopAutum.json" ::/GOLDEN/DAUTUMN.JSN >/dev/null 2>&1
+    fi
+
+    if [ -f "${PROJECT_DIR}/desktopWinter.json" ]; then
+        mcopy -i "${RAMDISK_TEMP}" "${PROJECT_DIR}/desktopWinter.json" ::/DWINTER.JSN >/dev/null 2>&1
+        mcopy -i "${RAMDISK_TEMP}" "${PROJECT_DIR}/desktopWinter.json" ::/PROD/DWINTER.JSN >/dev/null 2>&1
+        mcopy -i "${RAMDISK_TEMP}" "${PROJECT_DIR}/desktopWinter.json" ::/GOLDEN/DWINTER.JSN >/dev/null 2>&1
     fi
 
     if [ -f "${PROJECT_DIR}/desktop-overrides.json" ]; then
@@ -503,6 +574,10 @@ if [ "$RUN_QEMU" = true ]; then
         "${INPUT_DEVICE[@]}"
         -serial file:"${SERIAL_LOG}"
     )
+
+    if [ "$HEADLESS" = true ]; then
+        QEMU_ARGS+=( -display none )
+    fi
     if [ "$FULLSCREEN" = true ]; then
         QEMU_ARGS+=( -full-screen )
     fi
@@ -519,8 +594,21 @@ if [ "$RUN_QEMU" = true ]; then
 
     #QEMU_CMD = "qemu-system-x86_64 "${QEMU_ARGS[@]}" "${TPM_ARGS[@]}" ${SHARED_ARGS[@]}  
     echo "${QEMU_BIN} ${QEMU_ARGS[@]} ${TPM_ARGS[@]} ${SHARED_ARGS[@]}"
-    "${QEMU_BIN}" "${QEMU_ARGS[@]}" "${TPM_ARGS[@]}" ${SHARED_ARGS[@]}
+    if [ "${RUN_FOR_SECONDS}" -gt 0 ]; then
+        if command -v timeout >/dev/null 2>&1; then
+            echo -e "${YELLOW}Auto-stopping QEMU after ${RUN_FOR_SECONDS}s (use Ctrl+Q in guest for clean exit).${NC}"
+            timeout --preserve-status "${RUN_FOR_SECONDS}" "${QEMU_BIN}" "${QEMU_ARGS[@]}" "${TPM_ARGS[@]}" "${SHARED_ARGS[@]}" || true
+        else
+            echo -e "${YELLOW}timeout(1) not found; running QEMU normally.${NC}"
+            "${QEMU_BIN}" "${QEMU_ARGS[@]}" "${TPM_ARGS[@]}" "${SHARED_ARGS[@]}"
+        fi
+    else
+        "${QEMU_BIN}" "${QEMU_ARGS[@]}" "${TPM_ARGS[@]}" "${SHARED_ARGS[@]}"
+    fi
     echo ""
     echo -e "${CYAN}=== Serial output (last 30 lines) ===${NC}"
     tail -30 "${SERIAL_LOG}"
+else
+    echo -e "${YELLOW}Note: QEMU was not launched (use -r/--run to run after building).${NC}"
+    echo -e "${YELLOW}Example: ./build.sh -r${NC}"
 fi

@@ -79,6 +79,22 @@ namespace QW
 
         struct ButtonStyle
         {
+            struct MaterialLayerSet
+            {
+                QC::Color glossTop = QC::Color::transparent();
+                QC::Color glossBottom = QC::Color::transparent();
+                QC::Color shadeTop = QC::Color::transparent();
+                QC::Color shadeBottom = QC::Color::transparent();
+            };
+
+            struct MaterialLayers
+            {
+                bool enabled = false;
+                MaterialLayerSet normal;
+                MaterialLayerSet hovered;
+                MaterialLayerSet pressed;
+            } materialLayers;
+
             QC::Color fillNormal = QC::Color::buttonFace();
             QC::Color fillHover = QC::Color::buttonFace().lighter(0.15f);
             QC::Color fillPressed = QC::Color::buttonFace().darker(0.2f);

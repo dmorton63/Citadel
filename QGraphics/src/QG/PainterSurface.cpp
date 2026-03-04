@@ -1,6 +1,7 @@
 #include "QG/PainterSurface.h"
 
 #include <algorithm>
+#include <cstring>
 
 namespace QG
 {
@@ -359,7 +360,16 @@ namespace QG
         if (!inClip(x, y))
             return;
 
-        m_pixels[y * m_pitch + x] = color.value;
+        QC::u32 &dstPixel = m_pixels[y * m_pitch + x];
+        if (color.a == 255)
+        {
+            dstPixel = color.value;
+        }
+        else if (color.a != 0)
+        {
+            QC::Color dstColor(dstPixel);
+            dstPixel = color.blend(dstColor).value;
+        }
     }
 
     QC::Color PainterSurface::pixel(QC::i32 x, QC::i32 y) const
@@ -458,9 +468,18 @@ namespace QG
             return;
 
         QC::u32 *row = m_pixels + y * m_pitch;
-        for (QC::i32 px = x1; px < x2; ++px)
+        if (color.a == 255)
         {
-            row[px] = color.value;
+            for (QC::i32 px = x1; px < x2; ++px)
+                row[px] = color.value;
+        }
+        else if (color.a != 0)
+        {
+            for (QC::i32 px = x1; px < x2; ++px)
+            {
+                QC::Color dstColor(row[px]);
+                row[px] = color.blend(dstColor).value;
+            }
         }
     }
 
@@ -504,9 +523,19 @@ namespace QG
         if (y1 >= y2)
             return;
 
-        for (QC::i32 py = y1; py < y2; ++py)
+        if (color.a == 255)
         {
-            m_pixels[py * m_pitch + x] = color.value;
+            for (QC::i32 py = y1; py < y2; ++py)
+                m_pixels[py * m_pitch + x] = color.value;
+        }
+        else if (color.a != 0)
+        {
+            for (QC::i32 py = y1; py < y2; ++py)
+            {
+                QC::u32 &dstPixel = m_pixels[py * m_pitch + x];
+                QC::Color dstColor(dstPixel);
+                dstPixel = color.blend(dstColor).value;
+            }
         }
     }
 
@@ -550,12 +579,25 @@ namespace QG
         if (brush.style() == BrushStyle::Solid)
         {
             QC::Color color = brush.color();
-            for (QC::i32 yy = y1; yy < y2; ++yy)
+            if (color.a == 255)
             {
-                QC::u32 *row = m_pixels + yy * m_pitch;
-                for (QC::i32 xx = x1; xx < x2; ++xx)
+                for (QC::i32 yy = y1; yy < y2; ++yy)
                 {
-                    row[xx] = color.value;
+                    QC::u32 *row = m_pixels + yy * m_pitch;
+                    for (QC::i32 xx = x1; xx < x2; ++xx)
+                        row[xx] = color.value;
+                }
+            }
+            else if (color.a != 0)
+            {
+                for (QC::i32 yy = y1; yy < y2; ++yy)
+                {
+                    QC::u32 *row = m_pixels + yy * m_pitch;
+                    for (QC::i32 xx = x1; xx < x2; ++xx)
+                    {
+                        QC::Color dstColor(row[xx]);
+                        row[xx] = color.blend(dstColor).value;
+                    }
                 }
             }
             return;
@@ -683,9 +725,20 @@ namespace QG
         {
             QC::Color color = segments > 0 ? gradientColor(top, bottom, step, segments) : top;
             QC::u32 *row = m_pixels + y * m_pitch;
-            for (QC::i32 x = x1; x < x2; ++x)
+            if (color.a == 255)
             {
-                row[x] = color.value;
+                for (QC::i32 x = x1; x < x2; ++x)
+                {
+                    row[x] = color.value;
+                }
+            }
+            else if (color.a != 0)
+            {
+                for (QC::i32 x = x1; x < x2; ++x)
+                {
+                    QC::Color dstColor(row[x]);
+                    row[x] = color.blend(dstColor).value;
+                }
             }
         }
     }
@@ -739,7 +792,15 @@ namespace QG
             for (QC::i32 x = x1; x < x2; ++x, ++step)
             {
                 QC::Color color = segments > 0 ? gradientColor(left, right, step, segments) : left;
-                row[x] = color.value;
+                if (color.a == 255)
+                {
+                    row[x] = color.value;
+                }
+                else if (color.a != 0)
+                {
+                    QC::Color dstColor(row[x]);
+                    row[x] = color.blend(dstColor).value;
+                }
             }
         }
     }
@@ -902,7 +963,7 @@ namespace QG
 
         for (QC::u32 row = 0; row < height; ++row)
         {
-            QC::i32 destY = y + static_cast<QC::i32>(row);
+            const QC::i32 destY = y + static_cast<QC::i32>(row);
             if (destY < 0 || static_cast<QC::u32>(destY) >= m_height)
                 continue;
 
@@ -917,22 +978,33 @@ namespace QG
             const QC::u32 *srcRow = pixels + row * stride;
             QC::u32 *destRow = m_pixels + destY * m_pitch;
 
-            for (QC::u32 col = 0; col < width; ++col)
+            // Compute visible X span once per row.
+            QC::i32 destX1 = x;
+            QC::i32 destX2 = x + static_cast<QC::i32>(width);
+            if (destX2 <= 0 || destX1 >= static_cast<QC::i32>(m_width))
+                continue;
+
+            if (destX1 < 0)
+                destX1 = 0;
+            if (destX2 > static_cast<QC::i32>(m_width))
+                destX2 = static_cast<QC::i32>(m_width);
+
+            if (m_hasClip)
             {
-                QC::i32 destX = x + static_cast<QC::i32>(col);
-                if (destX < 0 || static_cast<QC::u32>(destX) >= m_width)
-                    continue;
-
-                if (m_hasClip)
-                {
-                    QC::i32 clipLeft = m_clip.x;
-                    QC::i32 clipRight = m_clip.x + static_cast<QC::i32>(m_clip.width);
-                    if (destX < clipLeft || destX >= clipRight)
-                        continue;
-                }
-
-                destRow[destX] = srcRow[col];
+                const QC::i32 clipLeft = m_clip.x;
+                const QC::i32 clipRight = m_clip.x + static_cast<QC::i32>(m_clip.width);
+                if (destX1 < clipLeft)
+                    destX1 = clipLeft;
+                if (destX2 > clipRight)
+                    destX2 = clipRight;
             }
+
+            if (destX1 >= destX2)
+                continue;
+
+            const QC::u32 srcOffset = static_cast<QC::u32>(destX1 - x);
+            const QC::usize count = static_cast<QC::usize>(destX2 - destX1);
+            std::memcpy(destRow + destX1, srcRow + srcOffset, count * sizeof(QC::u32));
         }
     }
 
@@ -951,14 +1023,14 @@ namespace QG
 
         for (QC::u32 row = 0; row < height; ++row)
         {
-            QC::i32 destY = y + static_cast<QC::i32>(row);
+            const QC::i32 destY = y + static_cast<QC::i32>(row);
             if (destY < 0 || static_cast<QC::u32>(destY) >= m_height)
                 continue;
 
             if (m_hasClip)
             {
-                QC::i32 clipTop = m_clip.y;
-                QC::i32 clipBottom = m_clip.y + static_cast<QC::i32>(m_clip.height);
+                const QC::i32 clipTop = m_clip.y;
+                const QC::i32 clipBottom = m_clip.y + static_cast<QC::i32>(m_clip.height);
                 if (destY < clipTop || destY >= clipBottom)
                     continue;
             }
@@ -966,21 +1038,46 @@ namespace QG
             const QC::u32 *srcRow = pixels + row * stride;
             QC::u32 *destRow = m_pixels + destY * m_pitch;
 
-            for (QC::u32 col = 0; col < width; ++col)
-            {
-                QC::i32 destX = x + static_cast<QC::i32>(col);
-                if (destX < 0 || static_cast<QC::u32>(destX) >= m_width)
-                    continue;
+            // Compute visible X span once per row (avoid per-pixel bounds checks).
+            QC::i32 destX1 = x;
+            QC::i32 destX2 = x + static_cast<QC::i32>(width);
+            if (destX2 <= 0 || destX1 >= static_cast<QC::i32>(m_width))
+                continue;
 
-                if (m_hasClip)
+            if (destX1 < 0)
+                destX1 = 0;
+            if (destX2 > static_cast<QC::i32>(m_width))
+                destX2 = static_cast<QC::i32>(m_width);
+
+            if (m_hasClip)
+            {
+                const QC::i32 clipLeft = m_clip.x;
+                const QC::i32 clipRight = m_clip.x + static_cast<QC::i32>(m_clip.width);
+                if (destX1 < clipLeft)
+                    destX1 = clipLeft;
+                if (destX2 > clipRight)
+                    destX2 = clipRight;
+            }
+
+            if (destX1 >= destX2)
+                continue;
+
+            QC::u32 srcCol = static_cast<QC::u32>(destX1 - x);
+            QC::i32 destX = destX1;
+            const QC::u32 srcEnd = static_cast<QC::u32>(destX2 - x);
+            for (; srcCol < srcEnd; ++srcCol, ++destX)
+            {
+                const QC::u32 srcPixel = srcRow[srcCol];
+                const QC::u8 alpha = static_cast<QC::u8>((srcPixel >> 24) & 0xFF);
+                if (alpha == 0)
+                    continue;
+                if (alpha == 255)
                 {
-                    QC::i32 clipLeft = m_clip.x;
-                    QC::i32 clipRight = m_clip.x + static_cast<QC::i32>(m_clip.width);
-                    if (destX < clipLeft || destX >= clipRight)
-                        continue;
+                    destRow[destX] = srcPixel;
+                    continue;
                 }
 
-                QC::Color src(srcRow[col]);
+                QC::Color src(srcPixel);
                 QC::Color dst(destRow[destX]);
                 destRow[destX] = src.blend(dst).value;
             }

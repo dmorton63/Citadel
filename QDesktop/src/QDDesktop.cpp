@@ -8,6 +8,7 @@
 #include "QDCommandProcessor.h"
 #include "QCLogger.h"
 #include "QCString.h"
+#include "QCBuiltins.h"
 #include "QFSVFS.h"
 #include "QFSFile.h"
 #include "QWStyleSystem.h"
@@ -20,6 +21,10 @@
 #include "QGPainter.h"
 #include "QG/Image.h"
 #include "QWControls/Leaf/ImageView.h"
+
+#include "QKBootConfigTier.h"
+
+#include "QDrvTimer.h"
 #include "QWControls/Leaf/ScrollBar.h"
 
 namespace QD
@@ -134,6 +139,265 @@ namespace QD
                 ++b;
             }
             return *a == '\0' && *b == '\0';
+        }
+
+        enum class Season
+        {
+            Unknown,
+            Spring,
+            Summer,
+            Autumn,
+            Winter,
+        };
+
+        struct RtcDateTime
+        {
+            QC::u8 second = 0;
+            QC::u8 minute = 0;
+            QC::u8 hour = 0;
+            QC::u8 day = 0;
+            QC::u8 month = 0;
+            QC::u8 year = 0;
+            QC::u8 statusB = 0;
+        };
+
+        static inline void ioWait()
+        {
+            // Classic ISA "wait" port.
+            QC::outb(0x80, 0);
+        }
+
+        static QC::u8 cmosRead(QC::u8 reg)
+        {
+            // Disable NMI (bit 7) during access.
+            QC::outb(0x70, static_cast<QC::u8>(0x80u | reg));
+            ioWait();
+            return QC::inb(0x71);
+        }
+
+        static inline bool rtcUpdateInProgress()
+        {
+            return (cmosRead(0x0A) & 0x80u) != 0;
+        }
+
+        static inline QC::u8 bcdToBin(QC::u8 v)
+        {
+            return static_cast<QC::u8>((v & 0x0Fu) + ((v >> 4) * 10u));
+        }
+
+        static bool tryReadRtcStable(RtcDateTime &out)
+        {
+            for (int attempt = 0; attempt < 5; ++attempt)
+            {
+                while (rtcUpdateInProgress())
+                {
+                }
+
+                RtcDateTime a{};
+                a.second = cmosRead(0x00);
+                a.minute = cmosRead(0x02);
+                a.hour = cmosRead(0x04);
+                a.day = cmosRead(0x07);
+                a.month = cmosRead(0x08);
+                a.year = cmosRead(0x09);
+                a.statusB = cmosRead(0x0B);
+
+                while (rtcUpdateInProgress())
+                {
+                }
+
+                RtcDateTime b{};
+                b.second = cmosRead(0x00);
+                b.minute = cmosRead(0x02);
+                b.hour = cmosRead(0x04);
+                b.day = cmosRead(0x07);
+                b.month = cmosRead(0x08);
+                b.year = cmosRead(0x09);
+                b.statusB = cmosRead(0x0B);
+
+                const bool same = (a.second == b.second) && (a.minute == b.minute) && (a.hour == b.hour) &&
+                                  (a.day == b.day) && (a.month == b.month) && (a.year == b.year) &&
+                                  (a.statusB == b.statusB);
+                if (same)
+                {
+                    out = a;
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        static bool normalizeRtcToBinaryAnd24h(RtcDateTime &dt)
+        {
+            // Status B:
+            // - bit 1 (0x02): 24-hour mode when set
+            // - bit 2 (0x04): binary mode when set; BCD when clear
+            const bool is24h = (dt.statusB & 0x02u) != 0;
+            const bool isBinary = (dt.statusB & 0x04u) != 0;
+
+            QC::u8 hour = dt.hour;
+            const bool pm = (!is24h && (hour & 0x80u) != 0);
+            if (!is24h)
+            {
+                hour &= 0x7Fu;
+            }
+
+            if (!isBinary)
+            {
+                dt.second = bcdToBin(dt.second);
+                dt.minute = bcdToBin(dt.minute);
+                hour = bcdToBin(hour);
+                dt.day = bcdToBin(dt.day);
+                dt.month = bcdToBin(dt.month);
+                dt.year = bcdToBin(dt.year);
+            }
+
+            if (!is24h)
+            {
+                // Convert 12-hour -> 24-hour.
+                // 12:xx AM => 00:xx; 12:xx PM stays 12:xx.
+                if (hour == 12)
+                    hour = 0;
+                if (pm)
+                    hour = static_cast<QC::u8>((hour + 12) % 24);
+            }
+
+            dt.hour = hour;
+
+            if (dt.month < 1 || dt.month > 12)
+                return false;
+            if (dt.day < 1 || dt.day > 31)
+                return false;
+            if (dt.hour > 23 || dt.minute > 59 || dt.second > 59)
+                return false;
+
+            return true;
+        }
+
+        static bool tryGetRtcMonthDay(QC::u8 &outMonth, QC::u8 &outDay)
+        {
+            RtcDateTime dt{};
+            if (!tryReadRtcStable(dt))
+                return false;
+            if (!normalizeRtcToBinaryAnd24h(dt))
+                return false;
+            outMonth = dt.month;
+            outDay = dt.day;
+            return true;
+        }
+
+        static Season seasonFromMonth(QC::u8 month)
+        {
+            if (month >= 3 && month <= 5)
+                return Season::Spring;
+            if (month >= 6 && month <= 8)
+                return Season::Summer;
+            if (month >= 9 && month <= 11)
+                return Season::Autumn;
+            return Season::Winter;
+        }
+
+        static const char *seasonToken(Season season)
+        {
+            switch (season)
+            {
+            case Season::Spring:
+                return "spring";
+            case Season::Summer:
+                return "summer";
+            case Season::Autumn:
+                return "autumn";
+            case Season::Winter:
+                return "winter";
+            default:
+                return "unknown";
+            }
+        }
+
+        static Season parseSeasonToken(const char *s)
+        {
+            if (!s || !*s)
+                return Season::Unknown;
+            if (equalsIgnoreCase(s, "spring"))
+                return Season::Spring;
+            if (equalsIgnoreCase(s, "summer"))
+                return Season::Summer;
+            if (equalsIgnoreCase(s, "autumn") || equalsIgnoreCase(s, "fall"))
+                return Season::Autumn;
+            if (equalsIgnoreCase(s, "winter"))
+                return Season::Winter;
+            return Season::Unknown;
+        }
+
+        static void seasonCandidatePaths(Season season, const char **outPaths, QC::usize outCap, QC::usize *outCount)
+        {
+            if (!outPaths || !outCount || outCap == 0)
+                return;
+            *outCount = 0;
+
+            const bool forceGolden = (QK::Boot::Config::GetActiveConfigTier() == QK::Boot::Config::ConfigTier::Golden);
+
+            switch (season)
+            {
+            case Season::Spring:
+            {
+                static const char *kPathsProdFirst[] = {"/PROD/DSPRING.JSN", "/GOLDEN/DSPRING.JSN", "/DSPRING.JSN"};
+                static const char *kPathsGoldenOnly[] = {"/GOLDEN/DSPRING.JSN", "/DSPRING.JSN"};
+
+                const char **paths = forceGolden ? kPathsGoldenOnly : kPathsProdFirst;
+                const QC::usize n = forceGolden ? (sizeof(kPathsGoldenOnly) / sizeof(kPathsGoldenOnly[0]))
+                                                : (sizeof(kPathsProdFirst) / sizeof(kPathsProdFirst[0]));
+                for (QC::usize i = 0; i < n && *outCount < outCap; ++i)
+                    outPaths[(*outCount)++] = paths[i];
+                break;
+            }
+            case Season::Summer:
+            {
+                static const char *kPathsProdFirst[] = {"/PROD/DSUMMER.JSN", "/GOLDEN/DSUMMER.JSN", "/DSUMMER.JSN"};
+                static const char *kPathsGoldenOnly[] = {"/GOLDEN/DSUMMER.JSN", "/DSUMMER.JSN"};
+
+                const char **paths = forceGolden ? kPathsGoldenOnly : kPathsProdFirst;
+                const QC::usize n = forceGolden ? (sizeof(kPathsGoldenOnly) / sizeof(kPathsGoldenOnly[0]))
+                                                : (sizeof(kPathsProdFirst) / sizeof(kPathsProdFirst[0]));
+                for (QC::usize i = 0; i < n && *outCount < outCap; ++i)
+                    outPaths[(*outCount)++] = paths[i];
+                break;
+            }
+            case Season::Autumn:
+            {
+                static const char *kPathsProdFirst[] = {"/PROD/DAUTUMN.JSN", "/GOLDEN/DAUTUMN.JSN", "/DAUTUMN.JSN"};
+                static const char *kPathsGoldenOnly[] = {"/GOLDEN/DAUTUMN.JSN", "/DAUTUMN.JSN"};
+
+                const char **paths = forceGolden ? kPathsGoldenOnly : kPathsProdFirst;
+                const QC::usize n = forceGolden ? (sizeof(kPathsGoldenOnly) / sizeof(kPathsGoldenOnly[0]))
+                                                : (sizeof(kPathsProdFirst) / sizeof(kPathsProdFirst[0]));
+                for (QC::usize i = 0; i < n && *outCount < outCap; ++i)
+                    outPaths[(*outCount)++] = paths[i];
+                break;
+            }
+            case Season::Winter:
+            {
+                static const char *kPathsProdFirst[] = {"/PROD/DWINTER.JSN", "/GOLDEN/DWINTER.JSN", "/DWINTER.JSN"};
+                static const char *kPathsGoldenOnly[] = {"/GOLDEN/DWINTER.JSN", "/DWINTER.JSN"};
+
+                const char **paths = forceGolden ? kPathsGoldenOnly : kPathsProdFirst;
+                const QC::usize n = forceGolden ? (sizeof(kPathsGoldenOnly) / sizeof(kPathsGoldenOnly[0]))
+                                                : (sizeof(kPathsProdFirst) / sizeof(kPathsProdFirst[0]));
+                for (QC::usize i = 0; i < n && *outCount < outCap; ++i)
+                    outPaths[(*outCount)++] = paths[i];
+                break;
+            }
+            default:
+                break;
+            }
+        }
+
+        static bool looksLikeFullThemeDefinition(const QC::JSON::Value *themeValue)
+        {
+            if (!themeValue || !themeValue->isObject())
+                return false;
+            return themeValue->find("base") || themeValue->find("overrides") || themeValue->find("file") || themeValue->find("path") ||
+                   themeValue->find("definition") || themeValue->find("colors") || themeValue->find("effects") || themeValue->find("animations");
         }
 
         inline QW::ButtonRole roleForJsonButton(const char *id, const QC::JSON::Value *controlValue)
@@ -378,6 +642,7 @@ namespace QD
           m_taskbar(nullptr),
           m_jsonStartButton(nullptr),
           m_jsonShutdownButton(nullptr),
+          m_jsonWallpaperView(nullptr),
           m_logoButton(nullptr),
           m_titleLabel(nullptr),
           m_clockLabel(nullptr),
@@ -715,6 +980,7 @@ namespace QD
         m_clockLabel = nullptr;
         m_jsonStartButton = nullptr;
         m_jsonShutdownButton = nullptr;
+        m_jsonWallpaperView = nullptr;
         m_taskbarWindowBaseX = 4;
 
         m_jsonDriven = false;
@@ -728,6 +994,55 @@ namespace QD
     {
         m_themeOverrides = ThemeOverrides{};
         m_themeLoaded = false;
+        installDefaultMaterials();
+    }
+
+    void Desktop::installDefaultMaterials()
+    {
+        m_themeOverrides.materialCount = 0;
+
+        // Built-in baseline material: cool blue / steel neutral glass.
+        // This lets JSON overrides reference "glass.default" without needing to define it.
+        if (m_themeOverrides.materialCount >= MAX_THEME_MATERIALS)
+            return;
+
+        auto &mat = m_themeOverrides.materials[m_themeOverrides.materialCount++];
+        mat = ButtonMaterialDefinition{};
+        mat.used = true;
+        QC::String::strncpy(mat.name, "glass.default", sizeof(mat.name) - 1);
+        mat.name[sizeof(mat.name) - 1] = '\0';
+
+        auto setColor = [](ColorOverride &dst, QC::Color c)
+        {
+            dst.set = true;
+            dst.value = c;
+        };
+
+        // Base button colors (mostly transparent steel)
+        setColor(mat.style.fillNormal, QC::Color(52, 74, 92, 92));
+        setColor(mat.style.fillHover, QC::Color(66, 92, 114, 112));
+        setColor(mat.style.fillPressed, QC::Color(40, 58, 74, 132));
+        setColor(mat.style.text, QC::Color(255, 255, 255, 255));
+        // Avoid a uniform border line; glass should read as edge reflections.
+        setColor(mat.style.border, QC::Color(255, 255, 255, 0));
+        mat.style.glassSet = true;
+        mat.style.glass = true;
+
+        // Explicit layer recipe (normal/hover/pressed)
+        setColor(mat.layers.normal.glossTop, QC::Color(235, 248, 255, 96));
+        setColor(mat.layers.normal.glossBottom, QC::Color(235, 248, 255, 0));
+        setColor(mat.layers.normal.shadeTop, QC::Color(0, 0, 0, 0));
+        setColor(mat.layers.normal.shadeBottom, QC::Color(0, 0, 0, 92));
+
+        setColor(mat.layers.hover.glossTop, QC::Color(245, 252, 255, 112));
+        setColor(mat.layers.hover.glossBottom, QC::Color(245, 252, 255, 0));
+        setColor(mat.layers.hover.shadeTop, QC::Color(0, 0, 0, 0));
+        setColor(mat.layers.hover.shadeBottom, QC::Color(0, 0, 0, 104));
+
+        setColor(mat.layers.pressed.glossTop, QC::Color(225, 242, 255, 84));
+        setColor(mat.layers.pressed.glossBottom, QC::Color(225, 242, 255, 0));
+        setColor(mat.layers.pressed.shadeTop, QC::Color(0, 0, 0, 0));
+        setColor(mat.layers.pressed.shadeBottom, QC::Color(0, 0, 0, 120));
     }
 
     void Desktop::resetBackgroundConfig()
@@ -798,9 +1113,33 @@ namespace QD
         if (ImageAsset *cached = findImageAsset(path))
             return cached;
 
+        auto isWallpaperPath = [](const char *p) -> bool {
+            if (!p)
+                return false;
+            const char *prefix = "/system/wall/";
+            for (QC::usize i = 0; prefix[i] != '\0'; ++i)
+            {
+                if (p[i] == '\0' || p[i] != prefix[i])
+                    return false;
+            }
+            return true;
+        };
+
+        const bool timing = isWallpaperPath(path);
+        const QC::u64 t0 = timing ? QDrv::Timer::instance().milliseconds() : 0;
+
         QC::Vector<QC::u8> buffer;
         if (!readFileBytes(path, buffer))
             return nullptr;
+
+        const QC::u64 t1 = timing ? QDrv::Timer::instance().milliseconds() : 0;
+        if (timing)
+        {
+            QC_LOG_INFO(LOG_MODULE, "Wallpaper IO %s bytes=%u dt=%llums\n",
+                        path ? path : "<null>",
+                        static_cast<unsigned>(buffer.size()),
+                        static_cast<unsigned long long>(t1 - t0));
+        }
 
         auto *asset = new ImageAsset();
         asset->path[0] = '\0';
@@ -810,11 +1149,26 @@ namespace QD
             asset->path[sizeof(asset->path) - 1] = '\0';
         }
 
+        const QC::u64 t2 = timing ? QDrv::Timer::instance().milliseconds() : 0;
         if (!QG::decodePNG(buffer, asset->surface))
         {
             delete asset;
             QC_LOG_WARN(LOG_MODULE, "Failed to decode PNG %s", path ? path : "<null>");
             return nullptr;
+        }
+
+        const QC::u64 t3 = timing ? QDrv::Timer::instance().milliseconds() : 0;
+        if (timing)
+        {
+            QC_LOG_INFO(LOG_MODULE, "Wallpaper decode %s dt=%llums\n",
+                        path ? path : "<null>",
+                        static_cast<unsigned long long>(t3 - t2));
+        }
+
+        if (isWallpaperPath(path))
+        {
+            QC_LOG_INFO(LOG_MODULE, "Loaded wallpaper %s (%ux%u)\n", path ? path : "<null>",
+                        static_cast<unsigned>(asset->surface.width), static_cast<unsigned>(asset->surface.height));
         }
 
         m_imageAssets.push_back(asset);
@@ -919,6 +1273,22 @@ namespace QD
         {
             out.shineSet = true;
             out.shineIntensity = static_cast<float>(shine->asNumber(out.shineIntensity));
+            changed = true;
+        }
+
+        if (const QC::JSON::Value *material = value->find("material"); material && material->isString())
+        {
+            const char *matName = material->asString(nullptr);
+            out.materialSet = true;
+            if (matName)
+            {
+                QC::String::strncpy(out.material, matName, sizeof(out.material) - 1);
+                out.material[sizeof(out.material) - 1] = '\0';
+            }
+            else
+            {
+                out.material[0] = '\0';
+            }
             changed = true;
         }
 
@@ -1109,9 +1479,431 @@ namespace QD
         if (!themeValue->isObject())
             return;
 
+        // Support a compact palette-only form:
+        // { "accent": "#...", "panel": "#...", ... }
+        // This is used by seasonal desktop presets.
+        {
+            bool changed = false;
+            changed |= parseColorOverride(themeValue, "accent", m_themeOverrides.palette.accent);
+            changed |= parseColorOverride(themeValue, "accentLight", m_themeOverrides.palette.accentLight);
+            changed |= parseColorOverride(themeValue, "accentDark", m_themeOverrides.palette.accentDark);
+            changed |= parseColorOverride(themeValue, "panel", m_themeOverrides.palette.panel);
+            changed |= parseColorOverride(themeValue, "panelBorder", m_themeOverrides.palette.panelBorder);
+            changed |= parseColorOverride(themeValue, "text", m_themeOverrides.palette.text);
+            changed |= parseColorOverride(themeValue, "textSecondary", m_themeOverrides.palette.textSecondary);
+            if (changed)
+                m_themeOverrides.active = true;
+        }
+
         const QC::JSON::Value *overrides = themeValue->find("overrides");
         if (!overrides || !overrides->isObject())
             return;
+
+        if (const QC::JSON::Value *materials = overrides->find("materials"); materials && materials->isObject())
+        {
+            const QC::JSON::Object *mats = materials->asObject();
+            const QC::usize mn = mats ? mats->size() : 0;
+
+            auto findIndexByName = [&](const char *name) -> QC::i32
+            {
+                if (!name || !*name)
+                    return -1;
+                for (QC::u32 i = 0; i < m_themeOverrides.materialCount && i < MAX_THEME_MATERIALS; ++i)
+                {
+                    if (!m_themeOverrides.materials[i].used)
+                        continue;
+                    if (QC::String::strcmp(m_themeOverrides.materials[i].name, name) == 0)
+                        return static_cast<QC::i32>(i);
+                }
+                return -1;
+            };
+
+            auto parseLayerSet = [&](const QC::JSON::Value *layerObj, ButtonMaterialLayerSet &outSet) -> bool
+            {
+                if (!layerObj || !layerObj->isObject())
+                    return false;
+                bool any = false;
+                any |= parseColorOverride(layerObj, "glossTop", outSet.glossTop);
+                any |= parseColorOverride(layerObj, "glossBottom", outSet.glossBottom);
+                any |= parseColorOverride(layerObj, "shadeTop", outSet.shadeTop);
+                any |= parseColorOverride(layerObj, "shadeBottom", outSet.shadeBottom);
+                return any;
+            };
+
+            for (QC::usize i = 0; i < mn; ++i)
+            {
+                const auto &ent = (*mats)[i];
+                if (!ent.key || !ent.value || !ent.value->isObject())
+                    continue;
+
+                ButtonMaterialDefinition parsed;
+                parsed.used = true;
+                QC::String::strncpy(parsed.name, ent.key, sizeof(parsed.name) - 1);
+                parsed.name[sizeof(parsed.name) - 1] = '\0';
+
+                bool changed = false;
+                changed |= parseColorOverride(ent.value, "fillNormal", parsed.style.fillNormal);
+                changed |= parseColorOverride(ent.value, "fillHover", parsed.style.fillHover);
+                changed |= parseColorOverride(ent.value, "fillPressed", parsed.style.fillPressed);
+                changed |= parseColorOverride(ent.value, "text", parsed.style.text);
+                changed |= parseColorOverride(ent.value, "border", parsed.style.border);
+
+                bool glass = false;
+                if (parseBoolOverride(ent.value, "glass", glass))
+                {
+                    parsed.style.glassSet = true;
+                    parsed.style.glass = glass;
+                    changed = true;
+                }
+
+                const QC::JSON::Value *shine = ent.value->find("shineIntensity");
+                if (shine && shine->isNumber())
+                {
+                    parsed.style.shineSet = true;
+                    parsed.style.shineIntensity = static_cast<float>(shine->asNumber(parsed.style.shineIntensity));
+                    changed = true;
+                }
+
+                if (const QC::JSON::Value *layers = ent.value->find("layers"); layers && layers->isObject())
+                {
+                    changed |= parseLayerSet(layers->find("normal"), parsed.layers.normal);
+                    changed |= parseLayerSet(layers->find("hover"), parsed.layers.hover);
+                    changed |= parseLayerSet(layers->find("pressed"), parsed.layers.pressed);
+                }
+
+                if (!changed)
+                    continue;
+
+                const QC::i32 existing = findIndexByName(parsed.name);
+                if (existing >= 0)
+                {
+                    m_themeOverrides.materials[static_cast<QC::u32>(existing)] = parsed;
+                }
+                else if (m_themeOverrides.materialCount < MAX_THEME_MATERIALS)
+                {
+                    m_themeOverrides.materials[m_themeOverrides.materialCount++] = parsed;
+                }
+
+                m_themeOverrides.active = true;
+            }
+        }
+
+        if (const QC::JSON::Value *palette = overrides->find("palette"))
+        {
+            bool changed = false;
+            changed |= parseColorOverride(palette, "accent", m_themeOverrides.palette.accent);
+            changed |= parseColorOverride(palette, "accentLight", m_themeOverrides.palette.accentLight);
+            changed |= parseColorOverride(palette, "accentDark", m_themeOverrides.palette.accentDark);
+            changed |= parseColorOverride(palette, "panel", m_themeOverrides.palette.panel);
+            changed |= parseColorOverride(palette, "panelBorder", m_themeOverrides.palette.panelBorder);
+            changed |= parseColorOverride(palette, "text", m_themeOverrides.palette.text);
+            changed |= parseColorOverride(palette, "textSecondary", m_themeOverrides.palette.textSecondary);
+            if (changed)
+                m_themeOverrides.active = true;
+        }
+
+        if (const QC::JSON::Value *metrics = overrides->find("metrics"))
+        {
+            QC::u32 value = 0;
+            if (parseUnsignedOverride(metrics, "cornerRadius", value))
+            {
+                m_themeOverrides.metrics.cornerRadiusSet = true;
+                m_themeOverrides.metrics.cornerRadius = value;
+                m_themeOverrides.active = true;
+            }
+
+            value = 0;
+            if (parseUnsignedOverride(metrics, "buttonCornerRadius", value))
+            {
+                m_themeOverrides.metrics.buttonCornerRadiusSet = true;
+                m_themeOverrides.metrics.buttonCornerRadius = value;
+                m_themeOverrides.active = true;
+            }
+
+            value = 0;
+            if (parseUnsignedOverride(metrics, "borderWidth", value))
+            {
+                m_themeOverrides.metrics.borderWidthSet = true;
+                m_themeOverrides.metrics.borderWidth = value;
+                m_themeOverrides.active = true;
+            }
+        }
+
+        if (const QC::JSON::Value *buttons = overrides->find("button"))
+        {
+            auto assign = [&](const char *key, QW::ButtonRole role)
+            {
+                if (parseButtonStyleOverride(buttons, key, m_themeOverrides.button[static_cast<QC::u32>(role)]))
+                {
+                    m_themeOverrides.active = true;
+                }
+            };
+
+            assign("sidebar", QW::ButtonRole::Sidebar);
+            assign("accent", QW::ButtonRole::Accent);
+            assign("destructive", QW::ButtonRole::Destructive);
+        }
+
+        if (const QC::JSON::Value *effects = overrides->find("effects"))
+        {
+            if (const QC::JSON::Value *border = effects->find("border"))
+            {
+                bool changed = false;
+                changed |= parseColorOverride(border, "color", m_themeOverrides.effects.borderColor);
+
+                QC::u32 value = 0;
+                if (parseUnsignedOverride(border, "width", value))
+                {
+                    m_themeOverrides.metrics.borderWidthSet = true;
+                    m_themeOverrides.metrics.borderWidth = value;
+                    changed = true;
+                }
+
+                value = 0;
+                if (parseUnsignedOverride(border, "radius", value))
+                {
+                    m_themeOverrides.metrics.cornerRadiusSet = true;
+                    m_themeOverrides.metrics.cornerRadius = value;
+                    m_themeOverrides.metrics.buttonCornerRadiusSet = true;
+                    m_themeOverrides.metrics.buttonCornerRadius = value;
+                    changed = true;
+                }
+
+                if (changed)
+                    m_themeOverrides.active = true;
+            }
+
+            if (const QC::JSON::Value *shadow = effects->find("shadow"))
+            {
+                bool changed = false;
+                QC::i32 signedValue = 0;
+                if (parseSignedOverride(shadow, "offsetX", signedValue))
+                {
+                    m_themeOverrides.effects.shadow.offsetXSet = true;
+                    m_themeOverrides.effects.shadow.offsetX = signedValue;
+                    changed = true;
+                }
+
+                signedValue = 0;
+                if (parseSignedOverride(shadow, "offsetY", signedValue))
+                {
+                    m_themeOverrides.effects.shadow.offsetYSet = true;
+                    m_themeOverrides.effects.shadow.offsetY = signedValue;
+                    changed = true;
+                }
+
+                QC::u32 blur = 0;
+                if (parseUnsignedOverride(shadow, "blur", blur))
+                {
+                    m_themeOverrides.effects.shadow.blurSet = true;
+                    m_themeOverrides.effects.shadow.blurRadius = blur;
+                    changed = true;
+                }
+
+                if (parseColorOverride(shadow, "color", m_themeOverrides.effects.shadow.color))
+                {
+                    changed = true;
+                }
+
+                if (changed)
+                    m_themeOverrides.active = true;
+            }
+
+            if (const QC::JSON::Value *glow = effects->find("glow"))
+            {
+                bool changed = false;
+                QC::u32 value = 0;
+                if (parseUnsignedOverride(glow, "radius", value))
+                {
+                    m_themeOverrides.effects.glow.radiusSet = true;
+                    m_themeOverrides.effects.glow.radius = value;
+                    changed = true;
+                }
+
+                value = 0;
+                if (parseUnsignedOverride(glow, "intensity", value))
+                {
+                    m_themeOverrides.effects.glow.intensitySet = true;
+                    m_themeOverrides.effects.glow.intensity = value;
+                    changed = true;
+                }
+
+                if (parseColorOverride(glow, "color", m_themeOverrides.effects.glow.color))
+                {
+                    changed = true;
+                }
+
+                if (changed)
+                    m_themeOverrides.active = true;
+            }
+
+            if (const QC::JSON::Value *transparency = effects->find("transparency"))
+            {
+                bool changed = false;
+                QC::u32 value = 0;
+                if (parseUnsignedOverride(transparency, "windowOpacity", value))
+                {
+                    m_themeOverrides.transparency.windowOpacitySet = true;
+                    m_themeOverrides.transparency.windowOpacity = clampToByte(value);
+                    changed = true;
+                }
+
+                value = 0;
+                if (parseUnsignedOverride(transparency, "panelOpacity", value))
+                {
+                    m_themeOverrides.transparency.panelOpacitySet = true;
+                    m_themeOverrides.transparency.panelOpacity = clampToByte(value);
+                    changed = true;
+                }
+
+                if (changed)
+                    m_themeOverrides.active = true;
+            }
+        }
+
+        if (const QC::JSON::Value *font = overrides->find("font"))
+        {
+            bool changed = false;
+            if (const char *family = stringOrNull(font->find("family")))
+            {
+                m_themeOverrides.font.familySet = true;
+                QC::String::strncpy(m_themeOverrides.font.family, family, sizeof(m_themeOverrides.font.family) - 1);
+                m_themeOverrides.font.family[sizeof(m_themeOverrides.font.family) - 1] = '\0';
+                changed = true;
+            }
+
+            QC::u32 sizeValue = m_themeOverrides.font.size;
+            if (parseUnsignedOverride(font, "size", sizeValue))
+            {
+                if (sizeValue == 0)
+                {
+                    sizeValue = 1;
+                }
+                if (sizeValue > 255)
+                {
+                    sizeValue = 255;
+                }
+                m_themeOverrides.font.sizeSet = true;
+                m_themeOverrides.font.size = static_cast<QC::u8>(sizeValue);
+                changed = true;
+            }
+
+            if (changed)
+                m_themeOverrides.active = true;
+        }
+    }
+
+    void Desktop::parseThemeOverridesMerge(const QC::JSON::Value *themeValue)
+    {
+        if (!themeValue || !themeValue->isObject())
+            return;
+
+        // Merge-only: do not reset, do not load theme definitions.
+        {
+            bool changed = false;
+            changed |= parseColorOverride(themeValue, "accent", m_themeOverrides.palette.accent);
+            changed |= parseColorOverride(themeValue, "accentLight", m_themeOverrides.palette.accentLight);
+            changed |= parseColorOverride(themeValue, "accentDark", m_themeOverrides.palette.accentDark);
+            changed |= parseColorOverride(themeValue, "panel", m_themeOverrides.palette.panel);
+            changed |= parseColorOverride(themeValue, "panelBorder", m_themeOverrides.palette.panelBorder);
+            changed |= parseColorOverride(themeValue, "text", m_themeOverrides.palette.text);
+            changed |= parseColorOverride(themeValue, "textSecondary", m_themeOverrides.palette.textSecondary);
+            if (changed)
+                m_themeOverrides.active = true;
+        }
+
+        const QC::JSON::Value *overrides = themeValue->find("overrides");
+        if (!overrides || !overrides->isObject())
+            return;
+
+        if (const QC::JSON::Value *materials = overrides->find("materials"); materials && materials->isObject())
+        {
+            const QC::JSON::Object *mats = materials->asObject();
+            const QC::usize mn = mats ? mats->size() : 0;
+
+            auto findIndexByName = [&](const char *name) -> QC::i32
+            {
+                if (!name || !*name)
+                    return -1;
+                for (QC::u32 i = 0; i < m_themeOverrides.materialCount && i < MAX_THEME_MATERIALS; ++i)
+                {
+                    if (!m_themeOverrides.materials[i].used)
+                        continue;
+                    if (QC::String::strcmp(m_themeOverrides.materials[i].name, name) == 0)
+                        return static_cast<QC::i32>(i);
+                }
+                return -1;
+            };
+
+            auto parseLayerSet = [&](const QC::JSON::Value *layerObj, ButtonMaterialLayerSet &outSet) -> bool
+            {
+                if (!layerObj || !layerObj->isObject())
+                    return false;
+                bool any = false;
+                any |= parseColorOverride(layerObj, "glossTop", outSet.glossTop);
+                any |= parseColorOverride(layerObj, "glossBottom", outSet.glossBottom);
+                any |= parseColorOverride(layerObj, "shadeTop", outSet.shadeTop);
+                any |= parseColorOverride(layerObj, "shadeBottom", outSet.shadeBottom);
+                return any;
+            };
+
+            for (QC::usize i = 0; i < mn; ++i)
+            {
+                const auto &ent = (*mats)[i];
+                if (!ent.key || !ent.value || !ent.value->isObject())
+                    continue;
+
+                ButtonMaterialDefinition parsed;
+                parsed.used = true;
+                QC::String::strncpy(parsed.name, ent.key, sizeof(parsed.name) - 1);
+                parsed.name[sizeof(parsed.name) - 1] = '\0';
+
+                bool changed = false;
+                changed |= parseColorOverride(ent.value, "fillNormal", parsed.style.fillNormal);
+                changed |= parseColorOverride(ent.value, "fillHover", parsed.style.fillHover);
+                changed |= parseColorOverride(ent.value, "fillPressed", parsed.style.fillPressed);
+                changed |= parseColorOverride(ent.value, "text", parsed.style.text);
+                changed |= parseColorOverride(ent.value, "border", parsed.style.border);
+
+                bool glass = false;
+                if (parseBoolOverride(ent.value, "glass", glass))
+                {
+                    parsed.style.glassSet = true;
+                    parsed.style.glass = glass;
+                    changed = true;
+                }
+
+                const QC::JSON::Value *shine = ent.value->find("shineIntensity");
+                if (shine && shine->isNumber())
+                {
+                    parsed.style.shineSet = true;
+                    parsed.style.shineIntensity = static_cast<float>(shine->asNumber(parsed.style.shineIntensity));
+                    changed = true;
+                }
+
+                if (const QC::JSON::Value *layers = ent.value->find("layers"); layers && layers->isObject())
+                {
+                    changed |= parseLayerSet(layers->find("normal"), parsed.layers.normal);
+                    changed |= parseLayerSet(layers->find("hover"), parsed.layers.hover);
+                    changed |= parseLayerSet(layers->find("pressed"), parsed.layers.pressed);
+                }
+
+                if (!changed)
+                    continue;
+
+                const QC::i32 existing = findIndexByName(parsed.name);
+                if (existing >= 0)
+                {
+                    m_themeOverrides.materials[static_cast<QC::u32>(existing)] = parsed;
+                }
+                else if (m_themeOverrides.materialCount < MAX_THEME_MATERIALS)
+                {
+                    m_themeOverrides.materials[m_themeOverrides.materialCount++] = parsed;
+                }
+
+                m_themeOverrides.active = true;
+            }
+        }
 
         if (const QC::JSON::Value *palette = overrides->find("palette"))
         {
@@ -1322,7 +2114,14 @@ namespace QD
     {
         resetBackgroundConfig();
         if (!backgroundValue || !backgroundValue->isObject())
+        {
+            if (m_jsonDriven && m_jsonWallpaperView)
+            {
+                m_jsonWallpaperView->setVisible(false);
+                m_jsonWallpaperView->setImage(nullptr);
+            }
             return;
+        }
 
         const char *type = stringOrNull(backgroundValue->find("type"));
 
@@ -1350,6 +2149,18 @@ namespace QD
                     else
                         m_backgroundConfig.scaleMode = QG::ImageScaleMode::Stretch;
                 }
+
+                if (m_jsonDriven && m_jsonWallpaperView)
+                {
+                    m_jsonWallpaperView->setVisible(true);
+                    m_jsonWallpaperView->setScaleMode(m_backgroundConfig.scaleMode);
+                    m_jsonWallpaperView->setImage(&asset->surface);
+                }
+            }
+            else if (m_jsonDriven && m_jsonWallpaperView)
+            {
+                m_jsonWallpaperView->setVisible(false);
+                m_jsonWallpaperView->setImage(nullptr);
             }
             return;
         }
@@ -1373,6 +2184,12 @@ namespace QD
                 m_backgroundConfig.bottomColor = c;
                 m_backgroundConfig.bottomOverride = true;
             }
+        }
+
+        if (m_jsonDriven && m_jsonWallpaperView)
+        {
+            m_jsonWallpaperView->setVisible(false);
+            m_jsonWallpaperView->setImage(nullptr);
         }
     }
 
@@ -1553,6 +2370,90 @@ namespace QD
                 return;
 
             auto &spec = snapshot.buttonStyles[idx];
+
+            auto findMaterial = [&](const char *name) -> const ButtonMaterialDefinition *
+            {
+                if (!name || !*name)
+                    return nullptr;
+                for (QC::u32 mi = 0; mi < m_themeOverrides.materialCount && mi < MAX_THEME_MATERIALS; ++mi)
+                {
+                    const auto &mat = m_themeOverrides.materials[mi];
+                    if (!mat.used)
+                        continue;
+                    if (QC::String::strcmp(mat.name, name) == 0)
+                        return &mat;
+                }
+                return nullptr;
+            };
+
+            auto applyShine = [&](float intensity)
+            {
+                const float amount = clamp01(intensity);
+                const QC::u8 alpha = static_cast<QC::u8>(amount * 255.0f);
+                spec.glow = spec.fillNormal.withAlpha(alpha);
+                spec.overlayHover = QC::Color(255, 255, 255, alpha);
+                spec.overlayPressed = spec.fillPressed.withAlpha(static_cast<QC::u8>(alpha * 0.7f));
+            };
+
+            auto applyMaterial = [&](const ButtonMaterialDefinition &mat)
+            {
+                if (mat.style.fillNormal.set)
+                    spec.fillNormal = mat.style.fillNormal.value;
+                if (mat.style.fillHover.set)
+                    spec.fillHover = mat.style.fillHover.value;
+                if (mat.style.fillPressed.set)
+                    spec.fillPressed = mat.style.fillPressed.value;
+                if (mat.style.text.set)
+                    spec.text = mat.style.text.value;
+                if (mat.style.border.set)
+                    spec.border = mat.style.border.value;
+                if (mat.style.glassSet)
+                    spec.glass = mat.style.glass;
+                if (mat.style.shineSet)
+                    applyShine(mat.style.shineIntensity);
+
+                if (mat.layers.hasAny())
+                {
+                    spec.materialLayers.enabled = true;
+
+                    QW::StyleSnapshot::ButtonStyle::MaterialLayerSet normal;
+                    if (mat.layers.normal.glossTop.set)
+                        normal.glossTop = mat.layers.normal.glossTop.value;
+                    if (mat.layers.normal.glossBottom.set)
+                        normal.glossBottom = mat.layers.normal.glossBottom.value;
+                    if (mat.layers.normal.shadeTop.set)
+                        normal.shadeTop = mat.layers.normal.shadeTop.value;
+                    if (mat.layers.normal.shadeBottom.set)
+                        normal.shadeBottom = mat.layers.normal.shadeBottom.value;
+                    spec.materialLayers.normal = normal;
+
+                    auto buildDerived = [&](const ButtonMaterialLayerSet &src) -> QW::StyleSnapshot::ButtonStyle::MaterialLayerSet
+                    {
+                        auto derived = normal;
+                        if (src.glossTop.set)
+                            derived.glossTop = src.glossTop.value;
+                        if (src.glossBottom.set)
+                            derived.glossBottom = src.glossBottom.value;
+                        if (src.shadeTop.set)
+                            derived.shadeTop = src.shadeTop.value;
+                        if (src.shadeBottom.set)
+                            derived.shadeBottom = src.shadeBottom.value;
+                        return derived;
+                    };
+
+                    spec.materialLayers.hovered = buildDerived(mat.layers.hover);
+                    spec.materialLayers.pressed = buildDerived(mat.layers.pressed);
+                }
+            };
+
+            if (data.materialSet && data.material[0] != '\0')
+            {
+                if (const ButtonMaterialDefinition *mat = findMaterial(data.material))
+                {
+                    applyMaterial(*mat);
+                }
+            }
+
             if (data.fillNormal.set)
                 spec.fillNormal = data.fillNormal.value;
             if (data.fillHover.set)
@@ -1567,11 +2468,7 @@ namespace QD
                 spec.glass = data.glass;
             if (data.shineSet)
             {
-                const float amount = clamp01(data.shineIntensity);
-                const QC::u8 alpha = static_cast<QC::u8>(amount * 255.0f);
-                spec.glow = spec.fillNormal.withAlpha(alpha);
-                spec.overlayHover = QC::Color(255, 255, 255, alpha);
-                spec.overlayPressed = spec.fillPressed.withAlpha(static_cast<QC::u8>(alpha * 0.7f));
+                applyShine(data.shineIntensity);
             }
         };
 
@@ -1685,85 +2582,122 @@ namespace QD
 
         // NOTE: Our FAT32 layer currently does not implement Long File Name (LFN) entries.
         // build.sh copies project-root desktop.json into the ramdisk as an 8.3 name: /DESKTOP.JSN
-        // Step 9: prefer tiered paths first (PROD -> GOLDEN), then fall back to legacy locations.
-        const char *jsonPaths[] = {"/PROD/DESKTOP.JSN", "/GOLDEN/DESKTOP.JSN", "/desktop.json", "/DESKTOP.JSN", "/DESKTO~1.JSO"};
 
-        QFS::File *file = nullptr;
-        const char *openedPath = nullptr;
-        for (QC::usize i = 0; i < sizeof(jsonPaths) / sizeof(jsonPaths[0]); ++i)
-        {
-            file = QFS::VFS::instance().open(jsonPaths[i], QFS::OpenMode::Read);
-            if (file)
-            {
-                openedPath = jsonPaths[i];
-                break;
-            }
-        }
-        if (!file)
-        {
-            QC_LOG_INFO(LOG_MODULE,
-                        "No desktop JSON found (/PROD/DESKTOP.JSN, /GOLDEN/DESKTOP.JSN, /desktop.json, or /DESKTOP.JSN); using hardcoded desktop\n");
-            return false;
-        }
+        const bool forceGolden = (QK::Boot::Config::GetActiveConfigTier() == QK::Boot::Config::ConfigTier::Golden);
 
-        if (openedPath)
-        {
-            QC_LOG_INFO(LOG_MODULE, "Loading desktop definition from %s\n", openedPath);
-        }
+        // If boot-time tier validation selected GOLDEN, do not load from /PROD.
+        const char *jsonPathsProdFirst[] = {"/PROD/DESKTOP.JSN", "/GOLDEN/DESKTOP.JSN", "/desktop.json", "/DESKTOP.JSN", "/DESKTO~1.JSO"};
+        const char *jsonPathsGoldenOnly[] = {"/GOLDEN/DESKTOP.JSN", "/desktop.json", "/DESKTOP.JSN", "/DESKTO~1.JSO"};
 
-        QC::u64 size64 = file->size();
-        if (size64 == 0 || size64 > 1024 * 256)
-        {
-            QFS::VFS::instance().close(file);
-            QC_LOG_WARN(LOG_MODULE, "desktop.json has invalid size (%llu); using hardcoded desktop\n", static_cast<unsigned long long>(size64));
-            return false;
-        }
-
-        QC::usize size = static_cast<QC::usize>(size64);
-        char *jsonText = static_cast<char *>(operator new[](size + 1));
-        QC::isize readCount = file->read(jsonText, size);
-        QFS::VFS::instance().close(file);
-
-        if (readCount <= 0)
-        {
-            operator delete[](jsonText);
-            QC_LOG_WARN(LOG_MODULE, "Failed to read /desktop.json; using hardcoded desktop\n");
-            return false;
-        }
-
-        if (static_cast<QC::usize>(readCount) < size)
-        {
-            size = static_cast<QC::usize>(readCount);
-        }
-        jsonText[size] = '\0';
+        const char **jsonPaths = forceGolden ? jsonPathsGoldenOnly : jsonPathsProdFirst;
+        const QC::usize jsonPathCount = forceGolden ? (sizeof(jsonPathsGoldenOnly) / sizeof(jsonPathsGoldenOnly[0]))
+                                                    : (sizeof(jsonPathsProdFirst) / sizeof(jsonPathsProdFirst[0]));
 
         QC::JSON::Value root;
-        bool ok = QC::JSON::parse(jsonText, root);
-        operator delete[](jsonText);
+        const QC::JSON::Value *desktop = nullptr;
+        const QC::JSON::Value *layout = nullptr;
+        const QC::JSON::Value *controls = nullptr;
+        const char *openedPath = nullptr;
 
-        if (!ok)
+        for (QC::usize i = 0; i < jsonPathCount; ++i)
         {
-            QC_LOG_WARN(LOG_MODULE, "Failed to parse /desktop.json; using hardcoded desktop\n");
+            const char *path = jsonPaths[i];
+            QFS::File *file = QFS::VFS::instance().open(path, QFS::OpenMode::Read);
+            if (!file)
+                continue;
+
+            QC::u64 size64 = file->size();
+            if (size64 == 0 || size64 > 1024 * 256)
+            {
+                QFS::VFS::instance().close(file);
+                QC_LOG_WARN(LOG_MODULE, "Desktop JSON %s has invalid size (%llu); skipping\n", path, static_cast<unsigned long long>(size64));
+                continue;
+            }
+
+            QC::usize size = static_cast<QC::usize>(size64);
+            char *jsonText = static_cast<char *>(operator new[](size + 1));
+            QC::isize readCount = file->read(jsonText, size);
+            QFS::VFS::instance().close(file);
+
+            if (readCount <= 0)
+            {
+                operator delete[](jsonText);
+                QC_LOG_WARN(LOG_MODULE, "Failed to read desktop JSON %s; skipping\n", path);
+                continue;
+            }
+
+            if (static_cast<QC::usize>(readCount) < size)
+                size = static_cast<QC::usize>(readCount);
+            jsonText[size] = '\0';
+
+            root = QC::JSON::Value{};
+            const bool ok = QC::JSON::parse(jsonText, root);
+            operator delete[](jsonText);
+
+            if (!ok)
+            {
+                QC_LOG_WARN(LOG_MODULE, "Failed to parse desktop JSON %s; skipping\n", path);
+                continue;
+            }
+
+            desktop = root.find("desktop");
+            if (!desktop || !desktop->isObject())
+            {
+                QC_LOG_WARN(LOG_MODULE, "Desktop JSON %s missing 'desktop' object; skipping\n", path);
+                continue;
+            }
+
+            layout = desktop->find("layout");
+            controls = layout ? layout->find("controls") : nullptr;
+            if (!controls || !controls->isArray())
+            {
+                QC_LOG_WARN(LOG_MODULE, "Desktop JSON %s missing layout.controls array; skipping\n", path);
+                continue;
+            }
+
+            openedPath = path;
+            break;
+        }
+
+        if (!openedPath)
+        {
+            QC_LOG_INFO(LOG_MODULE, "No valid desktop JSON found; using hardcoded desktop\n");
             return false;
         }
 
-        const QC::JSON::Value *desktop = root.find("desktop");
-        if (!desktop || !desktop->isObject())
-        {
-            QC_LOG_WARN(LOG_MODULE, "desktop.json missing 'desktop' object; using hardcoded desktop\n");
-            return false;
-        }
+        QC_LOG_INFO(LOG_MODULE, "Loading desktop definition from %s\n", openedPath);
 
-        const QC::JSON::Value *layout = desktop->find("layout");
-        const QC::JSON::Value *controls = layout ? layout->find("controls") : nullptr;
-        if (!controls || !controls->isArray())
+        // Apply theme first. Background selection is deferred until after optional overrides
+        // (e.g. seasonal presets) to avoid decoding a wallpaper that will immediately be replaced.
+        parseThemeOverrides(desktop->find("theme"));
+
+        bool backgroundApplied = false;
+        auto hasCustomBackground = [&]() -> bool
         {
-            QC_LOG_WARN(LOG_MODULE, "desktop.json missing layout.controls array; using hardcoded desktop\n");
-            return false;
-        }
+            if (m_backgroundConfig.mode == BackgroundMode::Image)
+                return true;
+            return m_backgroundConfig.topOverride || m_backgroundConfig.bottomOverride;
+        };
 
         // Build controls
         m_jsonDriven = true;
+
+        // JSON mode wallpaper: paint it as a root ImageView behind all controls.
+        // It starts hidden and will be populated by parseBackground() once we pick the final background.
+        if (m_desktopWindow && m_desktopWindow->root())
+        {
+            QW::Rect bounds = {0, 0, m_screenWidth, m_screenHeight};
+            auto *wall = new QW::Controls::ImageView(m_desktopWindow, bounds);
+            wall->setScaleMode(QG::ImageScaleMode::Stretch);
+            wall->setImage(nullptr);
+            wall->setVisible(false);
+            wall->setId(hashControlId("wallpaper"));
+
+            m_jsonWallpaperView = wall;
+            m_jsonControls.push_back(wall);
+            m_jsonRootControls.push_back(wall);
+            m_desktopWindow->root()->addChild(wall);
+        }
 
         auto buildControl = [&](auto &&self, const QC::JSON::Value *controlValue, QW::Controls::Panel *parentPanel, QC::i32 parentW, QC::i32 parentH) -> void
         {
@@ -1788,9 +2722,9 @@ namespace QD
 
                 if (const char *bg = stringOrNull(controlValue->find("background")))
                 {
-                    QW::Color c;
-                    if (parseHexColor(bg, &c))
-                        panel->setBackgroundColor(c);
+                    QC::Color parsed;
+                    if (parseColorString(bg, parsed))
+                        panel->setBackgroundColor(parsed);
                 }
 
                 // Any border hint -> simple flat border
@@ -1802,11 +2736,11 @@ namespace QD
                 const char *borderAny = border ? border : (borderTop ? borderTop : (borderBottom ? borderBottom : (borderLeft ? borderLeft : borderRight)));
                 if (borderAny)
                 {
-                    QW::Color c;
-                    if (parseHexColor(borderAny, &c))
+                    QC::Color parsed;
+                    if (parseColorString(borderAny, parsed))
                     {
                         panel->setBorderStyle(QW::Controls::BorderStyle::Flat);
-                        panel->setBorderColor(c);
+                        panel->setBorderColor(parsed);
                         panel->setBorderWidth(1);
                         panel->setFrameVisible(true);
                     }
@@ -1821,9 +2755,9 @@ namespace QD
                 label->setTransparent(true);
                 if (const char *color = stringOrNull(controlValue->find("color")))
                 {
-                    QW::Color c;
-                    if (parseHexColor(color, &c))
-                        label->setTextColor(c);
+                    QC::Color parsed;
+                    if (parseColorString(color, parsed))
+                        label->setTextColor(parsed);
                 }
                 created = label;
             }
@@ -2051,167 +2985,327 @@ namespace QD
 
         recomputeTaskbarWindowBase();
 
-        parseThemeOverrides(desktop->find("theme"));
-        parseBackground(desktop->find("background"));
-
         // Optional runtime overrides (validated early by BootGate if present in production).
         // This lets production change banner/layout/palette without rebuilding the golden desktop.
         {
-            // Step 9: prefer tiered paths first (PROD -> GOLDEN), then fall back to legacy locations.
-            const char *overridePaths[] = {"/PROD/DESKOVR.JSN", "/GOLDEN/DESKOVR.JSN", "/desktop-overrides.json", "/DESKOVR.JSN", "/DESKOVR~1.JSO"};
+            const bool forceGoldenOverrides = (QK::Boot::Config::GetActiveConfigTier() == QK::Boot::Config::ConfigTier::Golden);
 
-            QFS::File *ovrFile = nullptr;
+            // If boot-time tier validation selected GOLDEN, do not load overrides from /PROD.
+            const char *overridePathsProdFirst[] = {"/PROD/DESKOVR.JSN", "/GOLDEN/DESKOVR.JSN", "/desktop-overrides.json", "/DESKOVR.JSN", "/DESKOVR~1.JSO"};
+            const char *overridePathsGoldenOnly[] = {"/GOLDEN/DESKOVR.JSN", "/desktop-overrides.json", "/DESKOVR.JSN", "/DESKOVR~1.JSO"};
+
+            const char **overridePaths = forceGoldenOverrides ? overridePathsGoldenOnly : overridePathsProdFirst;
+            const QC::usize overridePathCount = forceGoldenOverrides ? (sizeof(overridePathsGoldenOnly) / sizeof(overridePathsGoldenOnly[0]))
+                                                                     : (sizeof(overridePathsProdFirst) / sizeof(overridePathsProdFirst[0]));
+
+            QC::JSON::Value ovrRoot;
             const char *ovrOpenedPath = nullptr;
-            for (QC::usize i = 0; i < sizeof(overridePaths) / sizeof(overridePaths[0]); ++i)
+
+            for (QC::usize i = 0; i < overridePathCount; ++i)
             {
-                ovrFile = QFS::VFS::instance().open(overridePaths[i], QFS::OpenMode::Read);
-                if (ovrFile)
+                const char *path = overridePaths[i];
+                QFS::File *ovrFile = QFS::VFS::instance().open(path, QFS::OpenMode::Read);
+                if (!ovrFile)
+                    continue;
+
+                QC::u64 size64 = ovrFile->size();
+                if (size64 == 0 || size64 > 1024 * 64)
                 {
-                    ovrOpenedPath = overridePaths[i];
-                    break;
+                    QFS::VFS::instance().close(ovrFile);
+                    QC_LOG_WARN(LOG_MODULE, "Desktop overrides %s has invalid size (%llu); skipping\n", path, static_cast<unsigned long long>(size64));
+                    continue;
                 }
+
+                QC::usize size = static_cast<QC::usize>(size64);
+                char *jsonText = static_cast<char *>(operator new[](size + 1));
+                QC::isize readCount = ovrFile->read(jsonText, size);
+                QFS::VFS::instance().close(ovrFile);
+
+                if (readCount <= 0)
+                {
+                    operator delete[](jsonText);
+                    QC_LOG_WARN(LOG_MODULE, "Failed to read desktop overrides %s; skipping\n", path);
+                    continue;
+                }
+
+                if (static_cast<QC::usize>(readCount) < size)
+                    size = static_cast<QC::usize>(readCount);
+                jsonText[size] = '\0';
+
+                ovrRoot = QC::JSON::Value{};
+                const bool ok = QC::JSON::parse(jsonText, ovrRoot);
+                operator delete[](jsonText);
+
+                if (!ok || !ovrRoot.isObject())
+                {
+                    QC_LOG_WARN(LOG_MODULE, "Failed to parse desktop overrides %s; skipping\n", path);
+                    continue;
+                }
+
+                ovrOpenedPath = path;
+                break;
             }
 
-            if (ovrFile)
+            if (ovrOpenedPath)
             {
-                QC::u64 size64 = ovrFile->size();
-                if (size64 > 0 && size64 <= 1024 * 64)
+                QC_LOG_INFO(LOG_MODULE, "Applying desktop overrides from %s\n", ovrOpenedPath);
+
+                // Optional: season-based theme-only switching.
+                // If present, loads one of the fixed seasonal desktop presets and applies only
+                // its background + theme palette (layout remains from the primary desktop JSON).
+                if (const QC::JSON::Value *seasonV = ovrRoot.find("season"); seasonV)
                 {
-                    QC::usize size = static_cast<QC::usize>(size64);
-                    char *jsonText = static_cast<char *>(operator new[](size + 1));
-                    QC::isize readCount = ovrFile->read(jsonText, size);
-                    QFS::VFS::instance().close(ovrFile);
-                    ovrFile = nullptr;
-
-                    if (readCount > 0)
+                    if (!seasonV->isString())
                     {
-                        if (static_cast<QC::usize>(readCount) < size)
-                            size = static_cast<QC::usize>(readCount);
-                        jsonText[size] = '\0';
-
-                        QC::JSON::Value ovrRoot;
-                        if (QC::JSON::parse(jsonText, ovrRoot) && ovrRoot.isObject())
-                        {
-                            QC_LOG_INFO(LOG_MODULE, "Applying desktop overrides from %s\n", ovrOpenedPath ? ovrOpenedPath : "<unknown>");
-
-                            // banner_text -> headerTitle label (or hardcoded title label if present)
-                            if (const QC::JSON::Value *banner = ovrRoot.find("banner_text"); banner && banner->isString())
-                            {
-                                const char *text = banner->asString(nullptr);
-                                if (text && *text && m_titleLabel)
-                                    m_titleLabel->setText(text);
-                            }
-
-                            // colors -> light palette tweaks + a couple of obvious chrome helpers
-                            if (const QC::JSON::Value *colors = ovrRoot.find("colors"); colors && colors->isObject())
-                            {
-                                QC::Color parsed;
-
-                                if (const char *bg = stringOrNull(colors->find("background")); bg && parseColorString(bg, parsed))
-                                {
-                                    m_themeOverrides.palette.panel.set = true;
-                                    m_themeOverrides.palette.panel.value = parsed;
-                                    m_themeOverrides.active = true;
-
-                                    if (m_topBar)
-                                        m_topBar->setBackgroundColor(parsed);
-                                    if (m_sidebar)
-                                        m_sidebar->setBackgroundColor(parsed);
-                                    if (m_taskbar)
-                                        m_taskbar->setBackgroundColor(parsed);
-                                }
-
-                                if (const char *accent = stringOrNull(colors->find("accent")); accent && parseColorString(accent, parsed))
-                                {
-                                    m_themeOverrides.palette.accent.set = true;
-                                    m_themeOverrides.palette.accent.value = parsed;
-                                    m_themeOverrides.active = true;
-                                }
-
-                                if (const char *text = stringOrNull(colors->find("text")); text && parseColorString(text, parsed))
-                                {
-                                    m_themeOverrides.palette.text.set = true;
-                                    m_themeOverrides.palette.text.value = parsed;
-                                    m_themeOverrides.active = true;
-
-                                    if (m_titleLabel)
-                                        m_titleLabel->setTextColor(parsed);
-                                    if (m_clockLabel)
-                                        m_clockLabel->setTextColor(parsed);
-                                }
-                            }
-
-                            // layout -> per-control bounds overrides by id (same syntax as desktop.json)
-                            if (const QC::JSON::Value *layout = ovrRoot.find("layout"); layout && layout->isObject())
-                            {
-                                const QC::JSON::Object *layoutObj = layout->asObject();
-                                const QC::usize n = layoutObj ? layoutObj->size() : 0;
-                                for (QC::usize i = 0; i < n; ++i)
-                                {
-                                    const auto &ent = (*layoutObj)[i];
-                                    if (!ent.key || !ent.value || !ent.value->isObject())
-                                        continue;
-
-                                    QW::Controls::ControlId cid = hashControlId(ent.key);
-                                    if (cid == QW::Controls::InvalidControlId)
-                                        continue;
-
-                                    QW::Controls::IControl *ctrl = nullptr;
-                                    if (m_desktopWindow && m_desktopWindow->root())
-                                        ctrl = m_desktopWindow->root()->findChild(cid);
-
-                                    if (!ctrl)
-                                        continue;
-
-                                    QW::Rect oldB = ctrl->bounds();
-                                    QW::Controls::Panel *parent = ctrl->parent();
-                                    const QW::Rect parentB = parent ? parent->bounds() : QW::Rect{0, 0, m_screenWidth, m_screenHeight};
-                                    const QC::i32 parentW = static_cast<QC::i32>(parentB.width);
-                                    const QC::i32 parentH = static_cast<QC::i32>(parentB.height);
-
-                                    QC::i32 x = oldB.x;
-                                    QC::i32 y = oldB.y;
-                                    QC::i32 w = static_cast<QC::i32>(oldB.width);
-                                    QC::i32 h = static_cast<QC::i32>(oldB.height);
-
-                                    const QC::JSON::Value *ovr = ent.value;
-                                    if (const QC::JSON::Value *vx = ovr->find("x"))
-                                        (void)evalLayoutValue(vx, parentW, parentH, true, false, false, false, &x);
-                                    if (const QC::JSON::Value *vy = ovr->find("y"))
-                                        (void)evalLayoutValue(vy, parentW, parentH, false, true, false, false, &y);
-                                    if (const QC::JSON::Value *vw = ovr->find("width"))
-                                        (void)evalLayoutValue(vw, parentW, parentH, false, false, true, false, &w);
-                                    if (const QC::JSON::Value *vh = ovr->find("height"))
-                                        (void)evalLayoutValue(vh, parentW, parentH, false, false, false, true, &h);
-
-                                    w = clampNonNegative(w);
-                                    h = clampNonNegative(h);
-
-                                    ctrl->setBounds(QW::Rect{x, y, static_cast<QC::u32>(w), static_cast<QC::u32>(h)});
-                                    ctrl->invalidate();
-                                }
-
-                                recomputeTaskbarWindowBase();
-                            }
-                        }
-
-                        operator delete[](jsonText);
+                        QC_LOG_WARN(LOG_MODULE, "desktop-overrides.json: season must be a string\n");
                     }
                     else
                     {
-                        operator delete[](jsonText);
+                        const char *seasonText = seasonV->asString(nullptr);
+
+                        auto applySeasonalPreset = [&](Season season, const char *label) -> bool
+                        {
+                            const char *paths[4] = {};
+                            QC::usize pathCount = 0;
+                            seasonCandidatePaths(season, paths, sizeof(paths) / sizeof(paths[0]), &pathCount);
+
+                            const char *appliedPath = nullptr;
+
+                            for (QC::usize i = 0; i < pathCount; ++i)
+                            {
+                                QFS::File *seasonFile = QFS::VFS::instance().open(paths[i], QFS::OpenMode::Read);
+                                if (!seasonFile)
+                                    continue;
+
+                                QC::u64 size64 = seasonFile->size();
+                                if (size64 == 0 || size64 > 1024 * 256)
+                                {
+                                    QFS::VFS::instance().close(seasonFile);
+                                    continue;
+                                }
+
+                                QC::usize size2 = static_cast<QC::usize>(size64);
+                                char *seasonJson = static_cast<char *>(operator new[](size2 + 1));
+                                QC::isize rc = seasonFile->read(seasonJson, size2);
+                                QFS::VFS::instance().close(seasonFile);
+
+                                if (rc <= 0)
+                                {
+                                    operator delete[](seasonJson);
+                                    continue;
+                                }
+
+                                if (static_cast<QC::usize>(rc) < size2)
+                                    size2 = static_cast<QC::usize>(rc);
+                                seasonJson[size2] = '\0';
+
+                                QC::JSON::Value seasonRoot;
+                                const bool ok = QC::JSON::parse(seasonJson, seasonRoot);
+                                operator delete[](seasonJson);
+                                if (!ok || !seasonRoot.isObject())
+                                    continue;
+
+                                const QC::JSON::Value *seasonDesktop = seasonRoot.find("desktop");
+                                if (!seasonDesktop || !seasonDesktop->isObject())
+                                    continue;
+
+                                parseBackground(seasonDesktop->find("background"));
+                                backgroundApplied = hasCustomBackground();
+
+                                if (const QC::JSON::Value *theme = seasonDesktop->find("theme"); theme)
+                                {
+                                    if (looksLikeFullThemeDefinition(theme))
+                                    {
+                                        parseThemeOverrides(theme);
+                                    }
+                                    else if (theme->isObject())
+                                    {
+                                        bool changed = false;
+                                        changed |= parseColorOverride(theme, "accent", m_themeOverrides.palette.accent);
+                                        changed |= parseColorOverride(theme, "accentLight", m_themeOverrides.palette.accentLight);
+                                        changed |= parseColorOverride(theme, "accentDark", m_themeOverrides.palette.accentDark);
+                                        changed |= parseColorOverride(theme, "panel", m_themeOverrides.palette.panel);
+                                        changed |= parseColorOverride(theme, "panelBorder", m_themeOverrides.palette.panelBorder);
+                                        changed |= parseColorOverride(theme, "text", m_themeOverrides.palette.text);
+                                        changed |= parseColorOverride(theme, "textSecondary", m_themeOverrides.palette.textSecondary);
+                                        if (changed)
+                                            m_themeOverrides.active = true;
+                                    }
+                                }
+
+                                appliedPath = paths[i];
+                                break;
+                            }
+
+                            if (appliedPath)
+                            {
+                                QC_LOG_INFO(LOG_MODULE, "Applied seasonal theme '%s' from %s\n",
+                                            label ? label : "<unknown>",
+                                            appliedPath ? appliedPath : "<unknown>");
+                                return true;
+                            }
+
+                            QC_LOG_WARN(LOG_MODULE, "Season '%s' requested, but no seasonal preset found\n",
+                                        label ? label : "<unknown>");
+                            return false;
+                        };
+
+                        if (seasonText && equalsIgnoreCase(seasonText, "auto"))
+                        {
+                            QC::u8 month = 0;
+                            QC::u8 day = 0;
+                            if (!tryGetRtcMonthDay(month, day))
+                            {
+                                QC_LOG_WARN(LOG_MODULE, "desktop-overrides.json: season=auto requested, but RTC date is unavailable\n");
+                            }
+                            else
+                            {
+                                const Season derived = seasonFromMonth(month);
+                                if (derived == Season::Unknown)
+                                {
+                                    QC_LOG_WARN(LOG_MODULE, "desktop-overrides.json: season=auto could not derive season (month=%u day=%u)\n",
+                                                static_cast<unsigned>(month), static_cast<unsigned>(day));
+                                }
+                                else
+                                {
+                                    QC_LOG_INFO(LOG_MODULE, "desktop-overrides.json: season=auto -> %s (month=%u day=%u)\n",
+                                                seasonToken(derived), static_cast<unsigned>(month), static_cast<unsigned>(day));
+                                    applySeasonalPreset(derived, seasonToken(derived));
+                                }
+                            }
+                        }
+                        else
+                        {
+                            const Season season = parseSeasonToken(seasonText);
+                            if (season == Season::Unknown)
+                            {
+                                QC_LOG_WARN(LOG_MODULE, "desktop-overrides.json: unknown season '%s'\n", seasonText ? seasonText : "<null>");
+                            }
+                            else
+                            {
+                                applySeasonalPreset(season, seasonText);
+                            }
+                        }
                     }
                 }
 
-                if (ovrFile)
-                    QFS::VFS::instance().close(ovrFile);
+                // banner_text -> headerTitle label (or hardcoded title label if present)
+                if (const QC::JSON::Value *banner = ovrRoot.find("banner_text"); banner && banner->isString())
+                {
+                    const char *text = banner->asString(nullptr);
+                    if (text && *text && m_titleLabel)
+                        m_titleLabel->setText(text);
+                }
+
+                // colors -> light palette tweaks + a couple of obvious chrome helpers
+                if (const QC::JSON::Value *colors = ovrRoot.find("colors"); colors && colors->isObject())
+                {
+                    QC::Color parsed;
+
+                    if (const char *bg = stringOrNull(colors->find("background")); bg && parseColorString(bg, parsed))
+                    {
+                        m_themeOverrides.palette.panel.set = true;
+                        m_themeOverrides.palette.panel.value = parsed;
+                        m_themeOverrides.active = true;
+
+                        if (m_topBar)
+                            m_topBar->setBackgroundColor(parsed);
+                        if (m_sidebar)
+                            m_sidebar->setBackgroundColor(parsed);
+                        if (m_taskbar)
+                            m_taskbar->setBackgroundColor(parsed);
+                    }
+
+                    if (const char *accent = stringOrNull(colors->find("accent")); accent && parseColorString(accent, parsed))
+                    {
+                        m_themeOverrides.palette.accent.set = true;
+                        m_themeOverrides.palette.accent.value = parsed;
+                        m_themeOverrides.active = true;
+                    }
+
+                    if (const char *text = stringOrNull(colors->find("text")); text && parseColorString(text, parsed))
+                    {
+                        m_themeOverrides.palette.text.set = true;
+                        m_themeOverrides.palette.text.value = parsed;
+                        m_themeOverrides.active = true;
+
+                        if (m_titleLabel)
+                            m_titleLabel->setTextColor(parsed);
+                        if (m_clockLabel)
+                            m_clockLabel->setTextColor(parsed);
+                    }
+                }
+
+                // theme -> optional theme overrides (merged on top of desktop.json theme).
+                // This is intentionally merge-only to avoid resetting the base theme.
+                if (const QC::JSON::Value *theme = ovrRoot.find("theme"); theme && theme->isObject())
+                {
+                    parseThemeOverridesMerge(theme);
+                }
+
+                // layout -> per-control bounds overrides by id (same syntax as desktop.json)
+                if (const QC::JSON::Value *layout = ovrRoot.find("layout"); layout && layout->isObject())
+                {
+                    const QC::JSON::Object *layoutObj = layout->asObject();
+                    const QC::usize n = layoutObj ? layoutObj->size() : 0;
+                    for (QC::usize i = 0; i < n; ++i)
+                    {
+                        const auto &ent = (*layoutObj)[i];
+                        if (!ent.key || !ent.value || !ent.value->isObject())
+                            continue;
+
+                        QW::Controls::ControlId cid = hashControlId(ent.key);
+                        if (cid == QW::Controls::InvalidControlId)
+                            continue;
+
+                        QW::Controls::IControl *ctrl = nullptr;
+                        if (m_desktopWindow && m_desktopWindow->root())
+                            ctrl = m_desktopWindow->root()->findChild(cid);
+
+                        if (!ctrl)
+                            continue;
+
+                        QW::Rect oldB = ctrl->bounds();
+                        QW::Controls::Panel *parent = ctrl->parent();
+                        const QW::Rect parentB = parent ? parent->bounds() : QW::Rect{0, 0, m_screenWidth, m_screenHeight};
+                        const QC::i32 parentW = static_cast<QC::i32>(parentB.width);
+                        const QC::i32 parentH = static_cast<QC::i32>(parentB.height);
+
+                        QC::i32 x = oldB.x;
+                        QC::i32 y = oldB.y;
+                        QC::i32 w = static_cast<QC::i32>(oldB.width);
+                        QC::i32 h = static_cast<QC::i32>(oldB.height);
+
+                        const QC::JSON::Value *ovr = ent.value;
+                        if (const QC::JSON::Value *vx = ovr->find("x"))
+                            (void)evalLayoutValue(vx, parentW, parentH, true, false, false, false, &x);
+                        if (const QC::JSON::Value *vy = ovr->find("y"))
+                            (void)evalLayoutValue(vy, parentW, parentH, false, true, false, false, &y);
+                        if (const QC::JSON::Value *vw = ovr->find("width"))
+                            (void)evalLayoutValue(vw, parentW, parentH, false, false, true, false, &w);
+                        if (const QC::JSON::Value *vh = ovr->find("height"))
+                            (void)evalLayoutValue(vh, parentW, parentH, false, false, false, true, &h);
+
+                        w = clampNonNegative(w);
+                        h = clampNonNegative(h);
+
+                        ctrl->setBounds(QW::Rect{x, y, static_cast<QC::u32>(w), static_cast<QC::u32>(h)});
+                        ctrl->invalidate();
+                    }
+
+                    recomputeTaskbarWindowBase();
+                }
             }
         }
 
-        DesktopColors colors = currentColors();
-        applyAccent(colors);
-        applyThemeToDesktopColors(colors);
-        publishStyleSnapshot(colors);
+        if (!backgroundApplied)
+        {
+            parseBackground(desktop->find("background"));
+            backgroundApplied = true;
+        }
+
+        // Apply final theme/background selection to the JSON-driven chrome.
+        applyColors();
 
         QC_LOG_INFO(LOG_MODULE, "Desktop initialized from /desktop.json (%u controls)\n", static_cast<unsigned>(m_jsonControls.size()));
         return true;

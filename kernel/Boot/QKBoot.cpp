@@ -7,6 +7,8 @@
 #include "Boot/Config/BootJson.h"
 #include "Boot/Config/RamdiskFile.h"
 #include "Boot/Config/SysConfig.h"
+#include "QKBootConfigTier.h"
+#include "QKBootStagedConfig.h"
 
 #include "Boot/Security/BootJsonSignature.h"
 
@@ -183,12 +185,534 @@ namespace
             return true;
         }
 
+        // Accept CSS-ish: rgba(r, g, b, a)
+        {
+            auto toLowerAscii = [](char c) -> char
+            {
+                return (c >= 'A' && c <= 'Z') ? static_cast<char>(c + 32) : c;
+            };
+
+            auto startsWithIgnoreCaseAscii = [&](const char *text, const char *prefix) -> bool
+            {
+                if (!text || !prefix)
+                    return false;
+                while (*prefix)
+                {
+                    if (*text == 0)
+                        return false;
+                    if (toLowerAscii(*text) != toLowerAscii(*prefix))
+                        return false;
+                    ++text;
+                    ++prefix;
+                }
+                return true;
+            };
+
+            auto isSpace = [](char c) -> bool
+            {
+                return c == ' ' || c == '\t' || c == '\n' || c == '\r';
+            };
+
+            auto skipSpaces = [&](const char *&p) -> void
+            {
+                while (p && *p && isSpace(*p))
+                    ++p;
+            };
+
+            auto parseUInt = [&](const char *&p, QC::u32 &out) -> bool
+            {
+                skipSpaces(p);
+                if (!p || *p < '0' || *p > '9')
+                    return false;
+                QC::u32 v = 0;
+                while (*p >= '0' && *p <= '9')
+                {
+                    v = v * 10 + static_cast<QC::u32>(*p - '0');
+                    ++p;
+                    if (v > 1000000)
+                        return false;
+                }
+                out = v;
+                return true;
+            };
+
+            auto expectChar = [&](const char *&p, char ch) -> bool
+            {
+                skipSpaces(p);
+                if (!p || *p != ch)
+                    return false;
+                ++p;
+                return true;
+            };
+
+            auto parseAlphaToken = [&](const char *&p) -> bool
+            {
+                skipSpaces(p);
+                if (!p || (!(*p >= '0' && *p <= '9') && *p != '.'))
+                    return false;
+
+                bool hasDigits = false;
+                bool hasDot = false;
+                QC::u32 intPart = 0;
+                while (*p >= '0' && *p <= '9')
+                {
+                    hasDigits = true;
+                    intPart = intPart * 10 + static_cast<QC::u32>(*p - '0');
+                    ++p;
+                    if (intPart > 1000000)
+                        return false;
+                }
+
+                QC::u32 frac = 0;
+                if (*p == '.')
+                {
+                    hasDot = true;
+                    ++p;
+                    while (*p >= '0' && *p <= '9')
+                    {
+                        hasDigits = true;
+                        frac = frac * 10 + static_cast<QC::u32>(*p - '0');
+                        ++p;
+                        if (frac > 1000000)
+                            return false;
+                    }
+                }
+
+                if (!hasDigits)
+                    return false;
+
+                skipSpaces(p);
+
+                if (hasDot)
+                {
+                    if (intPart > 1)
+                        return false;
+                    if (intPart == 1 && frac > 0)
+                        return false;
+                    return true;
+                }
+
+                // int form: allow 0..255 (or 0/1 for 0..1 style)
+                return intPart <= 255;
+            };
+
+            if (startsWithIgnoreCaseAscii(s, "rgba("))
+            {
+                const char *p = s + 5;
+                QC::u32 r = 0;
+                QC::u32 g = 0;
+                QC::u32 b = 0;
+                if (!parseUInt(p, r) || r > 255)
+                    return false;
+                if (!expectChar(p, ','))
+                    return false;
+                if (!parseUInt(p, g) || g > 255)
+                    return false;
+                if (!expectChar(p, ','))
+                    return false;
+                if (!parseUInt(p, b) || b > 255)
+                    return false;
+                if (!expectChar(p, ','))
+                    return false;
+                if (!parseAlphaToken(p))
+                    return false;
+                if (!expectChar(p, ')'))
+                    return false;
+                skipSpaces(p);
+                return *p == 0;
+            }
+        }
+
         // Also allow a short token (for future theme tokens), but keep it very constrained.
         for (QC::usize i = 0; i < n; ++i)
         {
             if (!IsSafeTokenChar(s[i]))
                 return false;
         }
+        return true;
+    }
+
+    static bool ValidateThemeButtonOverrideObject(QKBoot::FLogFn Log, const QC::JSON::Value &v)
+    {
+        if (!v.isObject())
+        {
+            if (Log)
+                Log("DesktopOverrides: theme.overrides.button entry must be an object\r\n");
+            return false;
+        }
+
+        const QC::JSON::Object *obj = v.asObject();
+        const QC::usize n = obj ? obj->size() : 0;
+        for (QC::usize i = 0; i < n; ++i)
+        {
+            const auto &ent = (*obj)[i];
+            if (!ent.key || !ent.value)
+                return false;
+
+            const char *k = ent.key;
+            const QC::JSON::Value *val = ent.value;
+
+            const bool isColorKey = (QC::String::strcmp(k, "fillNormal") == 0) || (QC::String::strcmp(k, "fillHover") == 0) ||
+                                    (QC::String::strcmp(k, "fillPressed") == 0) || (QC::String::strcmp(k, "text") == 0) ||
+                                    (QC::String::strcmp(k, "border") == 0);
+            if (isColorKey)
+            {
+                if (!val->isString() || !ValidateColorString(val->asString(nullptr)))
+                {
+                    if (Log)
+                        Log("DesktopOverrides: invalid theme button color\r\n");
+                    return false;
+                }
+                continue;
+            }
+
+            if (QC::String::strcmp(k, "glass") == 0)
+            {
+                if (!val->isBool())
+                {
+                    if (Log)
+                        Log("DesktopOverrides: theme button glass must be bool\r\n");
+                    return false;
+                }
+                continue;
+            }
+
+            if (QC::String::strcmp(k, "shineIntensity") == 0)
+            {
+                if (!val->isNumber())
+                {
+                    if (Log)
+                        Log("DesktopOverrides: theme button shineIntensity must be number\r\n");
+                    return false;
+                }
+                continue;
+            }
+
+            if (QC::String::strcmp(k, "material") == 0)
+            {
+                if (!val->isString())
+                {
+                    if (Log)
+                        Log("DesktopOverrides: theme button material must be string\r\n");
+                    return false;
+                }
+
+                const char *s = val->asString(nullptr);
+                const QC::usize len = s ? static_cast<QC::usize>(QC::String::strlen(s)) : 0;
+                if (len == 0 || len >= 48)
+                {
+                    if (Log)
+                        Log("DesktopOverrides: theme button material invalid length\r\n");
+                    return false;
+                }
+                for (QC::usize j = 0; j < len; ++j)
+                {
+                    if (!IsSafeTokenChar(s[j]))
+                    {
+                        if (Log)
+                            Log("DesktopOverrides: theme button material contains invalid characters\r\n");
+                        return false;
+                    }
+                }
+                continue;
+            }
+
+            if (Log)
+            {
+                Log("DesktopOverrides: unknown theme button key: ");
+                Log(k);
+                Log("\r\n");
+            }
+            return false;
+        }
+
+        return true;
+    }
+
+    static bool ValidateThemeMaterialLayerSet(QKBoot::FLogFn Log, const QC::JSON::Value &v)
+    {
+        if (!v.isObject())
+        {
+            if (Log)
+                Log("DesktopOverrides: theme material layer set must be object\r\n");
+            return false;
+        }
+
+        const QC::JSON::Object *obj = v.asObject();
+        const QC::usize n = obj ? obj->size() : 0;
+        for (QC::usize i = 0; i < n; ++i)
+        {
+            const auto &ent = (*obj)[i];
+            if (!ent.key || !ent.value)
+                return false;
+
+            const char *k = ent.key;
+            const QC::JSON::Value *val = ent.value;
+
+            const bool allowed = (QC::String::strcmp(k, "glossTop") == 0) || (QC::String::strcmp(k, "glossBottom") == 0) ||
+                                 (QC::String::strcmp(k, "shadeTop") == 0) || (QC::String::strcmp(k, "shadeBottom") == 0);
+            if (!allowed)
+            {
+                if (Log)
+                {
+                    Log("DesktopOverrides: unknown theme material layer key: ");
+                    Log(k);
+                    Log("\r\n");
+                }
+                return false;
+            }
+
+            if (!val->isString() || !ValidateColorString(val->asString(nullptr)))
+            {
+                if (Log)
+                    Log("DesktopOverrides: invalid theme material layer color\r\n");
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    static bool ValidateThemeMaterialObject(QKBoot::FLogFn Log, const QC::JSON::Value &v)
+    {
+        if (!v.isObject())
+        {
+            if (Log)
+                Log("DesktopOverrides: theme material must be object\r\n");
+            return false;
+        }
+
+        const QC::JSON::Object *obj = v.asObject();
+        const QC::usize n = obj ? obj->size() : 0;
+        for (QC::usize i = 0; i < n; ++i)
+        {
+            const auto &ent = (*obj)[i];
+            if (!ent.key || !ent.value)
+                return false;
+
+            const char *k = ent.key;
+            const QC::JSON::Value *val = ent.value;
+
+            const bool isColorKey = (QC::String::strcmp(k, "fillNormal") == 0) || (QC::String::strcmp(k, "fillHover") == 0) ||
+                                    (QC::String::strcmp(k, "fillPressed") == 0) || (QC::String::strcmp(k, "text") == 0) ||
+                                    (QC::String::strcmp(k, "border") == 0);
+            if (isColorKey)
+            {
+                if (!val->isString() || !ValidateColorString(val->asString(nullptr)))
+                {
+                    if (Log)
+                        Log("DesktopOverrides: invalid theme material color\r\n");
+                    return false;
+                }
+                continue;
+            }
+
+            if (QC::String::strcmp(k, "glass") == 0)
+            {
+                if (!val->isBool())
+                {
+                    if (Log)
+                        Log("DesktopOverrides: theme material glass must be bool\r\n");
+                    return false;
+                }
+                continue;
+            }
+
+            if (QC::String::strcmp(k, "shineIntensity") == 0)
+            {
+                if (!val->isNumber())
+                {
+                    if (Log)
+                        Log("DesktopOverrides: theme material shineIntensity must be number\r\n");
+                    return false;
+                }
+                continue;
+            }
+
+            if (QC::String::strcmp(k, "layers") == 0)
+            {
+                if (!val->isObject())
+                {
+                    if (Log)
+                        Log("DesktopOverrides: theme material layers must be object\r\n");
+                    return false;
+                }
+
+                const QC::JSON::Object *layersObj = val->asObject();
+                const QC::usize ln = layersObj ? layersObj->size() : 0;
+                for (QC::usize li = 0; li < ln; ++li)
+                {
+                    const auto &lent = (*layersObj)[li];
+                    if (!lent.key || !lent.value)
+                        return false;
+
+                    const bool allowedState = (QC::String::strcmp(lent.key, "normal") == 0) || (QC::String::strcmp(lent.key, "hover") == 0) ||
+                                              (QC::String::strcmp(lent.key, "pressed") == 0);
+                    if (!allowedState)
+                    {
+                        if (Log)
+                        {
+                            Log("DesktopOverrides: unknown theme material layer state: ");
+                            Log(lent.key);
+                            Log("\r\n");
+                        }
+                        return false;
+                    }
+
+                    if (!ValidateThemeMaterialLayerSet(Log, *lent.value))
+                        return false;
+                }
+                continue;
+            }
+
+            if (Log)
+            {
+                Log("DesktopOverrides: unknown theme material key: ");
+                Log(k);
+                Log("\r\n");
+            }
+            return false;
+        }
+
+        return true;
+    }
+
+    static bool ValidateThemeOverrides(QKBoot::FLogFn Log, const QC::JSON::Value &theme)
+    {
+        if (!theme.isObject())
+        {
+            if (Log)
+                Log("DesktopOverrides: theme must be an object\r\n");
+            return false;
+        }
+
+        const QC::JSON::Object *themeObj = theme.asObject();
+        const QC::usize tn = themeObj ? themeObj->size() : 0;
+        for (QC::usize i = 0; i < tn; ++i)
+        {
+            const auto &ent = (*themeObj)[i];
+            if (!ent.key || !ent.value)
+                return false;
+            if (QC::String::strcmp(ent.key, "overrides") != 0)
+            {
+                if (Log)
+                {
+                    Log("DesktopOverrides: unknown theme key: ");
+                    Log(ent.key);
+                    Log("\r\n");
+                }
+                return false;
+            }
+        }
+
+        const QC::JSON::Value *overrides = theme.find("overrides");
+        if (!overrides)
+            return true;
+
+        if (!overrides->isObject())
+        {
+            if (Log)
+                Log("DesktopOverrides: theme.overrides must be an object\r\n");
+            return false;
+        }
+
+        const QC::JSON::Object *ovrObj = overrides->asObject();
+        const QC::usize on = ovrObj ? ovrObj->size() : 0;
+        for (QC::usize i = 0; i < on; ++i)
+        {
+            const auto &ent = (*ovrObj)[i];
+            if (!ent.key || !ent.value)
+                return false;
+
+            const bool allowed = (QC::String::strcmp(ent.key, "materials") == 0) || (QC::String::strcmp(ent.key, "button") == 0);
+            if (!allowed)
+            {
+                if (Log)
+                {
+                    Log("DesktopOverrides: unknown theme.overrides key: ");
+                    Log(ent.key);
+                    Log("\r\n");
+                }
+                return false;
+            }
+        }
+
+        if (const QC::JSON::Value *mats = overrides->find("materials"); mats)
+        {
+            if (!mats->isObject())
+            {
+                if (Log)
+                    Log("DesktopOverrides: theme.overrides.materials must be an object\r\n");
+                return false;
+            }
+
+            const QC::JSON::Object *matsObj = mats->asObject();
+            const QC::usize mn = matsObj ? matsObj->size() : 0;
+            for (QC::usize i = 0; i < mn; ++i)
+            {
+                const auto &ent = (*matsObj)[i];
+                if (!ent.key || !ent.value)
+                    return false;
+
+                const QC::usize len = static_cast<QC::usize>(QC::String::strlen(ent.key));
+                if (len == 0 || len >= 48)
+                {
+                    if (Log)
+                        Log("DesktopOverrides: theme material name invalid length\r\n");
+                    return false;
+                }
+                for (QC::usize j = 0; j < len; ++j)
+                {
+                    if (!IsSafeTokenChar(ent.key[j]))
+                    {
+                        if (Log)
+                            Log("DesktopOverrides: theme material name contains invalid characters\r\n");
+                        return false;
+                    }
+                }
+
+                if (!ValidateThemeMaterialObject(Log, *ent.value))
+                    return false;
+            }
+        }
+
+        if (const QC::JSON::Value *buttons = overrides->find("button"); buttons)
+        {
+            if (!buttons->isObject())
+            {
+                if (Log)
+                    Log("DesktopOverrides: theme.overrides.button must be an object\r\n");
+                return false;
+            }
+
+            const QC::JSON::Object *btnObj = buttons->asObject();
+            const QC::usize bn = btnObj ? btnObj->size() : 0;
+            for (QC::usize i = 0; i < bn; ++i)
+            {
+                const auto &ent = (*btnObj)[i];
+                if (!ent.key || !ent.value)
+                    return false;
+
+                const bool roleAllowed = (QC::String::strcmp(ent.key, "default") == 0) || (QC::String::strcmp(ent.key, "accent") == 0) ||
+                                         (QC::String::strcmp(ent.key, "sidebar") == 0) || (QC::String::strcmp(ent.key, "sidebarSelected") == 0) ||
+                                         (QC::String::strcmp(ent.key, "taskbar") == 0) || (QC::String::strcmp(ent.key, "taskbarActive") == 0) ||
+                                         (QC::String::strcmp(ent.key, "destructive") == 0);
+                if (!roleAllowed)
+                {
+                    if (Log)
+                    {
+                        Log("DesktopOverrides: unknown theme button role: ");
+                        Log(ent.key);
+                        Log("\r\n");
+                    }
+                    return false;
+                }
+
+                if (!ValidateThemeButtonOverrideObject(Log, *ent.value))
+                    return false;
+            }
+        }
+
         return true;
     }
 
@@ -221,6 +745,25 @@ namespace
         return true;
     }
 
+    static char ToLowerAscii(char c)
+    {
+        return (c >= 'A' && c <= 'Z') ? static_cast<char>(c + 32) : c;
+    }
+
+    static bool EqualsIgnoreCaseAscii(const char *a, const char *b)
+    {
+        if (!a || !b)
+            return false;
+        while (*a && *b)
+        {
+            if (ToLowerAscii(*a) != ToLowerAscii(*b))
+                return false;
+            ++a;
+            ++b;
+        }
+        return *a == '\0' && *b == '\0';
+    }
+
     static bool ValidateDesktopOverridesJson(QKBoot::FLogFn Log, const QC::JSON::Value &root)
     {
         if (!root.isObject())
@@ -243,7 +786,8 @@ namespace
                 return false;
 
             const bool allowed = (QC::String::strcmp(k, "version") == 0) || (QC::String::strcmp(k, "layout") == 0) ||
-                                 (QC::String::strcmp(k, "colors") == 0) || (QC::String::strcmp(k, "banner_text") == 0);
+                                 (QC::String::strcmp(k, "colors") == 0) || (QC::String::strcmp(k, "banner_text") == 0) ||
+                                 (QC::String::strcmp(k, "season") == 0) || (QC::String::strcmp(k, "theme") == 0);
             if (!allowed)
             {
                 if (Log)
@@ -277,6 +821,44 @@ namespace
             {
                 if (Log)
                     Log("DesktopOverrides: banner_text too long\r\n");
+                return false;
+            }
+        }
+
+        if (const QC::JSON::Value *season = root.find("season"); season)
+        {
+            if (!season->isString())
+            {
+                if (Log)
+                    Log("DesktopOverrides: season must be a string\r\n");
+                return false;
+            }
+
+            const char *s = season->asString(nullptr);
+            const QC::usize len = s ? static_cast<QC::usize>(QC::String::strlen(s)) : 0;
+            if (len == 0 || len > 16)
+            {
+                if (Log)
+                    Log("DesktopOverrides: season invalid length\r\n");
+                return false;
+            }
+
+            for (QC::usize i = 0; i < len; ++i)
+            {
+                if (!IsSafeTokenChar(s[i]))
+                {
+                    if (Log)
+                        Log("DesktopOverrides: season contains invalid characters\r\n");
+                    return false;
+                }
+            }
+
+            const bool ok = EqualsIgnoreCaseAscii(s, "spring") || EqualsIgnoreCaseAscii(s, "summer") || EqualsIgnoreCaseAscii(s, "autumn") ||
+                            EqualsIgnoreCaseAscii(s, "fall") || EqualsIgnoreCaseAscii(s, "winter") || EqualsIgnoreCaseAscii(s, "auto");
+            if (!ok)
+            {
+                if (Log)
+                    Log("DesktopOverrides: unknown season token\r\n");
                 return false;
             }
         }
@@ -359,6 +941,12 @@ namespace
                     return false;
                 }
             }
+        }
+
+        if (const QC::JSON::Value *theme = root.find("theme"); theme)
+        {
+            if (!ValidateThemeOverrides(Log, *theme))
+                return false;
         }
 
         return true;
@@ -547,10 +1135,88 @@ namespace
         return true;
     }
 
-    static bool SysConfigEarlyLoadPhaseForRoot(QKBoot::FLogFn Log, QC::u64 ModuleRequest[], const QK::Boot::Config::SysConfig &syscfg,
-                                               const char *tierLabel, const char *tierRoot, bool &outTierOk)
+    static bool ValidateDesktopConfigJson(QKBoot::FLogFn Log, const QC::JSON::Value &root)
+    {
+        if (!root.isObject())
+        {
+            if (Log)
+                Log("DesktopConfig: root is not an object\r\n");
+            return false;
+        }
+
+        const QC::JSON::Value *desktop = root.find("desktop");
+        if (!desktop || !desktop->isObject())
+        {
+            if (Log)
+                Log("DesktopConfig: missing 'desktop' object\r\n");
+            return false;
+        }
+
+        const QC::JSON::Value *layout = desktop->find("layout");
+        const QC::JSON::Value *controls = layout ? layout->find("controls") : nullptr;
+        if (!controls || !controls->isArray())
+        {
+            if (Log)
+                Log("DesktopConfig: missing layout.controls array\r\n");
+            return false;
+        }
+
+        return true;
+    }
+
+    static void SetFirstFailureReason(char outReason[], QC::usize outCap, const char *prefix, const char *id, const char *path)
+    {
+        if (!outReason || outCap == 0)
+            return;
+        if (outReason[0] != 0)
+            return;
+
+        outReason[0] = 0;
+
+        auto append = [&](const char *s) -> void
+        {
+            if (!s)
+                return;
+            QC::usize cur = QC::String::strlen(outReason);
+            if (cur + 1 >= outCap)
+                return;
+            QC::String::strncpy(outReason + cur, s, outCap - cur);
+            outReason[outCap - 1] = 0;
+        };
+
+        append(prefix);
+        if (id && id[0])
+        {
+            append(" id='");
+            append(id);
+            append("'");
+        }
+        if (path && path[0])
+        {
+            append(" path='");
+            append(path);
+            append("'");
+        }
+    }
+
+    static bool SysConfigEarlyStageForRoot(QKBoot::FLogFn Log, QC::u64 ModuleRequest[], const QK::Boot::Config::SysConfig &syscfg,
+                                           const char *tierLabel, const char *tierRoot,
+                                           bool &outTierOk,
+                                           char outFirstFailure[], QC::usize outFirstFailureCap,
+                                           QK::Boot::Config::StagedEarlyConfig &outStage)
     {
         outTierOk = true;
+
+        outStage.clear();
+        outStage.tier = QK::Boot::Config::ConfigTier::Unknown;
+        if (tierRoot && tierRoot[0])
+        {
+            QC::String::strncpy(outStage.root, tierRoot, sizeof(outStage.root));
+            outStage.root[sizeof(outStage.root) - 1] = 0;
+        }
+
+        if (outFirstFailure && outFirstFailureCap)
+            outFirstFailure[0] = 0;
 
         if (!Log)
             return true;
@@ -575,14 +1241,17 @@ namespace
             if (!id || id[0] == 0)
                 continue;
 
+            bool stagedThisModule = false;
+            QC::u32 stagedIndex = 0;
+
             const auto *m = FindSysConfigModuleById(syscfg, id);
             if (!m)
             {
                 Log("SysConfig: early missing module id='");
                 Log(id);
                 Log("'\r\n");
-                if (kProductionMode)
-                    return false;
+                SetFirstFailureReason(outFirstFailure, outFirstFailureCap, "missing module", id, nullptr);
+                outTierOk = false;
                 continue;
             }
 
@@ -593,8 +1262,7 @@ namespace
                 Log(m->id);
                 Log("'\r\n");
                 outTierOk = false;
-                if (kProductionMode && m->required)
-                    return false;
+                SetFirstFailureReason(outFirstFailure, outFirstFailureCap, "path resolution failed", m->id, nullptr);
                 continue;
             }
 
@@ -611,8 +1279,9 @@ namespace
             if (resolvedPath[0] == 0)
             {
                 Log("SysConfig: early module has empty path; skipping\r\n");
-                if (kProductionMode && m->required)
-                    return false;
+                SetFirstFailureReason(outFirstFailure, outFirstFailureCap, "empty path", m->id, nullptr);
+                if (m->required)
+                    outTierOk = false;
                 continue;
             }
 
@@ -625,9 +1294,23 @@ namespace
                 Log("'\r\n");
                 if (m->required)
                     outTierOk = false;
-                if (kProductionMode && m->required)
-                    return false;
+                SetFirstFailureReason(outFirstFailure, outFirstFailureCap, "read failed", m->id, resolvedPath);
                 continue;
+            }
+
+            // Stage metadata (even for non-JSON modules) for deterministic commit.
+            if (outStage.moduleCount < 16)
+            {
+                stagedIndex = outStage.moduleCount;
+                auto &dst = outStage.modules[outStage.moduleCount++];
+                QC::String::strncpy(dst.id, m->id, sizeof(dst.id));
+                dst.id[sizeof(dst.id) - 1] = 0;
+                QC::String::strncpy(dst.type, m->type, sizeof(dst.type));
+                dst.type[sizeof(dst.type) - 1] = 0;
+                QC::String::strncpy(dst.resolvedPath, resolvedPath, sizeof(dst.resolvedPath));
+                dst.resolvedPath[sizeof(dst.resolvedPath) - 1] = 0;
+                dst.required = m->required;
+                stagedThisModule = true;
             }
 
             if (EndsWithJsn(resolvedPath))
@@ -642,9 +1325,21 @@ namespace
                     operator delete[](buffer);
                     if (m->required)
                         outTierOk = false;
-                    if (kProductionMode && m->required)
-                        return false;
+                    SetFirstFailureReason(outFirstFailure, outFirstFailureCap, "JSON parse failed", m->id, resolvedPath);
                     continue;
+                }
+
+                // Minimal desktop config validation is required for tier selection.
+                if (QC::String::strcmp(m->id, "desktop") == 0 && QC::String::strcmp(m->type, "config") == 0)
+                {
+                    if (!ValidateDesktopConfigJson(Log, root))
+                    {
+                        Log("SysConfig: desktop config validation failed\r\n");
+                        operator delete[](buffer);
+                        outTierOk = false;
+                        SetFirstFailureReason(outFirstFailure, outFirstFailureCap, "desktop config invalid", m->id, resolvedPath);
+                        continue;
+                    }
                 }
 
                 if (QC::String::strcmp(m->type, "desktop_overrides") == 0)
@@ -656,9 +1351,7 @@ namespace
 
                         // Overrides are optional, but if present they must be valid in production.
                         outTierOk = false;
-                        if (kProductionMode)
-                            return false;
-
+                        SetFirstFailureReason(outFirstFailure, outFirstFailureCap, "desktop overrides invalid", m->id, resolvedPath);
                         continue;
                     }
                 }
@@ -670,8 +1363,7 @@ namespace
                         Log("SysConfig: security manifest validation failed\r\n");
                         operator delete[](buffer);
                         outTierOk = false;
-                        if (kProductionMode)
-                            return false;
+                        SetFirstFailureReason(outFirstFailure, outFirstFailureCap, "security invalid", m->id, resolvedPath);
                         continue;
                     }
                 }
@@ -683,8 +1375,7 @@ namespace
                         Log("SysConfig: services manifest validation failed\r\n");
                         operator delete[](buffer);
                         outTierOk = false;
-                        if (kProductionMode)
-                            return false;
+                        SetFirstFailureReason(outFirstFailure, outFirstFailureCap, "services invalid", m->id, resolvedPath);
                         continue;
                     }
                 }
@@ -696,8 +1387,7 @@ namespace
                         Log("SysConfig: drivers manifest validation failed\r\n");
                         operator delete[](buffer);
                         outTierOk = false;
-                        if (kProductionMode)
-                            return false;
+                        SetFirstFailureReason(outFirstFailure, outFirstFailureCap, "drivers invalid", m->id, resolvedPath);
                         continue;
                     }
                 }
@@ -709,10 +1399,17 @@ namespace
                         Log("SysConfig: apps manifest validation failed\r\n");
                         operator delete[](buffer);
                         outTierOk = false;
-                        if (kProductionMode)
-                            return false;
+                        SetFirstFailureReason(outFirstFailure, outFirstFailureCap, "apps invalid", m->id, resolvedPath);
                         continue;
                     }
+                }
+
+                // Commit parsed JSON into the stage snapshot.
+                if (stagedThisModule)
+                {
+                    auto &dst = outStage.modules[stagedIndex];
+                    dst.hasJson = true;
+                    dst.json = static_cast<QC::JSON::Value &&>(root);
                 }
             }
 
@@ -729,35 +1426,114 @@ namespace
         return true;
     }
 
-    static bool SysConfigEarlyLoadPhase(QKBoot::FLogFn Log, QC::u64 ModuleRequest[], const QK::Boot::Config::SysConfig &syscfg)
+    static bool SysConfigSelectActiveTier(QKBoot::FLogFn Log, QC::u64 ModuleRequest[], const QK::Boot::Config::SysConfig &syscfg,
+                                          QK::Boot::Config::ConfigTier &outTier, const char *&outRoot)
     {
+        outTier = QK::Boot::Config::ConfigTier::Unknown;
+        outRoot = "";
+
         if (!Log)
             return true;
+
+        // Clear any previous committed snapshot before selecting a tier.
+        QK::Boot::Config::ClearCommittedEarlyConfig();
 
         const bool haveProdRoot = syscfg.productionRoot[0] != 0;
         const bool haveGoldenRoot = syscfg.goldenRoot[0] != 0;
 
-        // Default to production if configured; otherwise run without a tier root.
-        const char *activeLabel = haveProdRoot ? "production" : "default";
-        const char *activeRoot = haveProdRoot ? syscfg.productionRoot : "";
-
-        bool tierOk = true;
-        if (!SysConfigEarlyLoadPhaseForRoot(Log, ModuleRequest, syscfg, activeLabel, activeRoot, tierOk))
-            return false;
-
-        if (!tierOk && haveGoldenRoot)
+        // Default to production if configured; otherwise golden if configured.
+        if (haveProdRoot)
         {
-            Log("SysConfig: production tier invalid; falling back to golden\r\n");
+            bool prodOk = true;
+            char prodReason[192] = {0};
+            QK::Boot::Config::StagedEarlyConfig prodStage{};
+            if (!SysConfigEarlyStageForRoot(Log, ModuleRequest, syscfg, "production", syscfg.productionRoot, prodOk, prodReason, sizeof(prodReason),
+                                            prodStage))
+                return false;
 
+            if (prodOk)
+            {
+                outTier = QK::Boot::Config::ConfigTier::Production;
+                outRoot = syscfg.productionRoot;
+                prodStage.tier = QK::Boot::Config::ConfigTier::Production;
+                QK::Boot::Config::CommitEarlyConfig(static_cast<QK::Boot::Config::StagedEarlyConfig &&>(prodStage));
+                return true;
+            }
+
+            if (haveGoldenRoot)
+            {
+                Log("SysConfig: production tier invalid");
+                if (prodReason[0])
+                {
+                    Log(": ");
+                    Log(prodReason);
+                }
+                Log("; falling back to golden\r\n");
+
+                bool goldenOk = true;
+                char goldenReason[192] = {0};
+                QK::Boot::Config::StagedEarlyConfig goldenStage{};
+                if (!SysConfigEarlyStageForRoot(Log, ModuleRequest, syscfg, "golden", syscfg.goldenRoot, goldenOk, goldenReason, sizeof(goldenReason),
+                                                goldenStage))
+                    return false;
+
+                if (!goldenOk)
+                {
+                    Log("SysConfig: golden tier invalid");
+                    if (goldenReason[0])
+                    {
+                        Log(": ");
+                        Log(goldenReason);
+                    }
+                    Log("\r\n");
+                    if (kProductionMode)
+                        return false;
+                }
+
+                outTier = QK::Boot::Config::ConfigTier::Golden;
+                outRoot = syscfg.goldenRoot;
+                if (goldenOk)
+                {
+                    goldenStage.tier = QK::Boot::Config::ConfigTier::Golden;
+                    QK::Boot::Config::CommitEarlyConfig(static_cast<QK::Boot::Config::StagedEarlyConfig &&>(goldenStage));
+                }
+                return true;
+            }
+
+            // No golden tier configured; continue in dev with production selected.
+            outTier = QK::Boot::Config::ConfigTier::Production;
+            outRoot = syscfg.productionRoot;
+            return true;
+        }
+
+        if (haveGoldenRoot)
+        {
             bool goldenOk = true;
-            if (!SysConfigEarlyLoadPhaseForRoot(Log, ModuleRequest, syscfg, "golden", syscfg.goldenRoot, goldenOk))
+            char goldenReason[192] = {0};
+            QK::Boot::Config::StagedEarlyConfig goldenStage{};
+            if (!SysConfigEarlyStageForRoot(Log, ModuleRequest, syscfg, "golden", syscfg.goldenRoot, goldenOk, goldenReason, sizeof(goldenReason),
+                                            goldenStage))
                 return false;
 
             if (!goldenOk)
             {
-                Log("SysConfig: golden tier invalid\r\n");
+                Log("SysConfig: golden tier invalid");
+                if (goldenReason[0])
+                {
+                    Log(": ");
+                    Log(goldenReason);
+                }
+                Log("\r\n");
                 if (kProductionMode)
                     return false;
+            }
+
+            outTier = QK::Boot::Config::ConfigTier::Golden;
+            outRoot = syscfg.goldenRoot;
+            if (goldenOk)
+            {
+                goldenStage.tier = QK::Boot::Config::ConfigTier::Golden;
+                QK::Boot::Config::CommitEarlyConfig(static_cast<QK::Boot::Config::StagedEarlyConfig &&>(goldenStage));
             }
         }
 
@@ -859,6 +1635,9 @@ namespace QKBoot
         QK::Boot::Config::SysConfig syscfg{};
         const bool syscfgLoaded = QK::Boot::Config::LoadSysConfigFromLimineRamdiskModule(g_Log, g_Req.modules, syscfg);
 
+        // Default until proven otherwise.
+        QK::Boot::Config::SetActiveConfigTier(QK::Boot::Config::ConfigTier::Unknown, "");
+
         const auto &cpuReq = policy.requirements.cpu;
         if (cpuReq.requireSse2 && !CpuHasSse2())
         {
@@ -948,7 +1727,9 @@ namespace QKBoot
 
         if (syscfgLoaded)
         {
-            if (!SysConfigEarlyLoadPhase(g_Log, g_Req.modules, syscfg))
+            QK::Boot::Config::ConfigTier activeTier = QK::Boot::Config::ConfigTier::Unknown;
+            const char *activeRoot = "";
+            if (!SysConfigSelectActiveTier(g_Log, g_Req.modules, syscfg, activeTier, activeRoot))
             {
                 if (g_Log)
                 {
@@ -957,6 +1738,16 @@ namespace QKBoot
                 }
                 for (;;)
                     asm volatile("hlt");
+            }
+
+            QK::Boot::Config::SetActiveConfigTier(activeTier, activeRoot);
+            if (g_Log)
+            {
+                g_Log("SysConfig: active tier = '");
+                g_Log(QK::Boot::Config::GetActiveConfigTierName());
+                g_Log("' root='");
+                g_Log(QK::Boot::Config::GetActiveConfigTierRoot());
+                g_Log("'\r\n");
             }
         }
 

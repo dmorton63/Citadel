@@ -8,6 +8,8 @@ add_executable(citadel_kernel
     Boot/Acpi/AcpiTables.cpp
     Boot/Config/BootJson.cpp
     Boot/Config/SysConfig.cpp
+    Boot/Config/ActiveConfigTier.cpp
+    Boot/Config/StagedConfig.cpp
     Boot/Config/StartupConfig.cpp
     Boot/Config/RamdiskFile.cpp
     Boot/Security/Sha256.cpp

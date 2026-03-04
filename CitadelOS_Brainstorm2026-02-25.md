@@ -26,6 +26,24 @@ Session: Core System Architecture – Registry, Config, Recovery
 16. [ ] Unified sandbox “personality profiles” (Windows/Linux/macOS/Citadel) + app launch flow integration
 17. [x] Apply desktop overrides at runtime (optional `DESKOVR.JSN` merged onto golden desktop)
 
+### Implementation readiness (note: checkboxes above are implementation status)
+
+As of 2026-03-02, items #10–#16 have MVP implementation notes drafted in this document, but are not implemented yet.
+
+Ready to implement now (works with current ramdisk-only `/PROD` + `/GOLDEN`)
+- #10 Recovery validation + deterministic rebuild of runtime registries
+- #11 Runtime registry structs + ownership/mutation rules (kernel-only)
+- #13 Structured boot event log (ring buffer + serial one-line form)
+- #14 Reduced-memory splash notice + emit structured event (persistence is optional)
+
+Blocked/partially blocked on “writable persistent storage exists”
+- #12 TPM sealing persistence (you can compute/log/measure the digest now; sealing needs somewhere to store the blob)
+- #14 Persistent log target path (can buffer + flush later)
+
+Incremental/parallelizable (core merge logic can land early)
+- #15 JSON layering + merge engine + validation can be implemented before full compat execution
+- #16 Sandbox personality selection + staging/commit config build can be implemented before app shims exist
+
 ---
 ## Sample sysconfig.json (info only; contents TBD)
 Note: stored on the ramdisk FAT32 image as `SYSCFG.JSN` (8.3) with `SYSCFG.SIG`, verified and measured in early boot (no LFN yet).
@@ -99,6 +117,24 @@ They are not user‑accessible.
 They are not monolithic.
 This is the architectural leap Windows never made.
 
+### MVP data model + ownership rules (Roadmap item #11)
+
+Design intent: registries are kernel-owned runtime truth. JSON modules seed policy/defaults, but registries are not “a reflection of config files”.
+
+Common rules (all registries)
+- Ownership: kernel owns all registry memory.
+- Mutation: only privileged kernel subsystems (or a trusted system service via narrow syscalls) may propose changes.
+- Atomicity: boot-time config applies via staging + commit; no partial state in live registries.
+- Identity: every object has a stable ID within a boot session (opaque handle or monotonic integer).
+- Lifetime: explicit create/update/destroy; stale handles fail safely.
+
+Registry definitions (MVP)
+- Process Registry: keyed by `pid`; tracks state, parent, image identity, sandbox id, capabilities.
+- Service Registry: keyed by `service_id`; tracks desired state, deps, capabilities, entrypoint.
+- Window Registry: keyed by `window_id`; tracks owner pid, z-order/focus, bounds, flags.
+- Resource Registry: keyed by `resource_id`; tracks type, owner, refcount, residency.
+- Security Registry: global posture + policy objects; TPM availability, enforcement mode, measured artifacts summary.
+
 2. Persistent Configuration (JSON‑based)
 Citadel’s persistent configuration is modular, human‑readable, and versionable.
 Key principles
@@ -139,6 +175,31 @@ Recovery Logic
 - Rebuild runtime registry
 - Continue booting
 This gives Citadel self‑healing, something Windows never achieved.
+
+### MVP implementation notes (Roadmap item #10)
+
+Goal: make `/PROD` safe to use without risking partial/invalid state.
+
+Recovery algorithm (high level)
+- Attempt `/PROD` first; if it fails validation, fall back to `/GOLDEN`.
+- Validate selected tier in a staging area (do not mutate live registries during validation):
+  - open/read succeeds for all required modules
+  - JSON parses successfully
+  - module `type` allowlist + module `id` allowlist
+  - required fields exist with correct types
+  - optional: signature/measurement checks (when enabled)
+- On `/PROD` failure: emit one clear log line with the first failure reason; discard staging; retry with `/GOLDEN`.
+- On success: commit by rebuilding runtime registries from staged config (deterministic reset + repopulate).
+
+Definition of “corrupted” (MVP)
+- missing file, read error, invalid size bounds
+- JSON parse failure
+- invalid schema/type for any required module
+
+Acceptance (MVP)
+- Malformed or missing required `/PROD/*` module triggers fallback to `/GOLDEN`.
+- No registry contains partially-applied `/PROD` state after fallback.
+- Serial log reports selected tier and fallback reason.
 
 4. Boot Sequence and Minimum Spec Gate
 Citadel OS – Minimum Hardware Gate Behavior
@@ -219,6 +280,50 @@ TPM policy model (boot + SKU)
 - boot.json / boot profile may tighten (e.g., “Secure Mode requires TPM”), but must never weaken the compiled floor.
 - TPM‑dependent features should activate only when TPM is present and the selected profile requires/permits them.
 
+### MVP sealing plan (Roadmap item #12)
+
+Goal: make `/GOLDEN` integrity tamper-evident across boots by sealing a known-good digest set to the TPM.
+
+What is sealed (MVP)
+- A single `golden_manifest_digest = sha256(SYSCFG.JSN + required module digests + ordering)`.
+- The manifest digest is derived deterministically (stable module ordering; canonical serialization rules if needed).
+
+Where it lives
+- A TPM-sealed blob stored on disk/firmware-backed storage when available.
+- Until persistent storage exists, treat this as “design-ready”: you can still compute and log the manifest digest and extend PCRs, but sealing cannot persist across reboots without somewhere to store the blob.
+
+Unseal policy expectations
+- The sealed blob unseals only when:
+  - boot measurements match expected PCR policy (kernel + cmdline + module list + boot policy)
+  - the runtime recomputed `golden_manifest_digest` matches what was sealed
+- If unseal fails:
+  - production build: fail closed (Refusal Mode or controlled halt)
+  - development build: log loudly and continue (policy choice), but never “silently trust”
+
+Acceptance (MVP)
+- If any `/GOLDEN/*` required config changes, unseal fails (or digest mismatch is logged before seal exists).
+- If kernel/boot policy measurement changes, unseal fails per PCR policy.
+
+### Structured measurement/event log (Roadmap item #13)
+
+Goal: replace ad-hoc “PCR extended …” strings with machine-parseable boot events.
+
+Event record (MVP fields)
+- `seq`: monotonic event index
+- `t_ms`: milliseconds since boot (or since logger init)
+- `stage`: `early|bootpolicy|sysconfig|services|desktop`
+- `type`: e.g. `pcr_extend`, `config_select`, `config_validate_fail`, `fallback_to_golden`, `seal_attempt`, `unseal_ok`, `unseal_fail`
+- `details`: small object with relevant keys (e.g. `pcr`, `algo`, `digest`, `path`, `reason`)
+
+Encoding/storage (MVP)
+- Keep an in-memory ring buffer of events.
+- Always emit a compact one-line text form to serial.
+- When a writable filesystem exists, flush as JSONL to a stable path (later: `/system/logs/boot/measurements.jsonl`).
+
+Acceptance (MVP)
+- A boot with `/PROD` failure produces: `config_select(PROD)` → `config_validate_fail(...)` → `fallback_to_golden` → `config_select(GOLDEN)`.
+- Every PCR extend event includes `pcr`, `algo`, and `digest`.
+
 7. Citadel’s Philosophy (Emerging)
 Citadel is shaping into a system that is:
 - modular
@@ -292,6 +397,33 @@ This allows sysadmins to audit:
 - when Reduced Mode was triggered
 - why it was triggered
 - what thresholds were involved
+
+### MVP implementation notes (Roadmap item #14)
+
+Goal: unify the memory decision across UX + logs so the system is transparent and predictable.
+
+Runtime memory profile (single source of truth)
+- Define a `MemoryProfile` value early in boot: `full|reduced|refusal`.
+- Record: `detected_mb`, `minimum_mb`, `recommended_mb`, and selected profile.
+- The decision must be made before loading services/desktop.
+
+Splash/UX behavior (MVP)
+- If `reduced`: show the existing Reduced Memory notice text during splash.
+  - Include the numbers (detected vs recommended) if available.
+  - Keep it non-blocking (no prompts) and time-bound (e.g., shown briefly while boot continues).
+- If `refusal`: show Refusal Mode messaging and halt (already defined).
+- If `full`: no notice.
+
+Logging behavior (MVP)
+- Emit a structured boot event (see item #13) with: profile + thresholds + detected_mb.
+- Always log one compact serial line for humans.
+- Persistent target:
+  - If a writable filesystem is available: append a single JSONL record to `/system/logs/boot/memory_profile.log`.
+  - If not available yet: buffer the record and flush when storage comes online.
+
+Acceptance (MVP)
+- A reduced-memory boot shows the splash notice and produces exactly one log record.
+- The log record contains the thresholds + detected amount and matches the UX decision.
 
 
 ## Section III - addendums.
@@ -375,6 +507,36 @@ MVP merge rule: override‑only
 - Higher layers may add keys and override values.
 - Higher layers do not delete keys from lower layers (no tombstones in MVP).
 - Tombstone/delete support is a later extension once schema and tests are stable.
+
+### MVP implementation notes (Roadmap item #15)
+
+On-disk layout (MVP)
+- Base personalities (read-only):
+  - `/compat/<platform>/base/registry.json`
+  - `/compat/<platform>/base/filesystem.json`
+  - `/compat/<platform>/base/env.json`
+  - `/compat/<platform>/base/api_shims.json`
+- Optional persona (read-only):
+  - `/compat/<platform>/persona/<persona>/registry.json` (and peers)
+- Per-app delta (writable by system tools only):
+  - `/compat/<platform>/<appname>/registry.json` (and peers)
+
+Deterministic merge algorithm (override-only)
+- Merge order: base → persona (optional) → app.
+- Objects: deep-merge by key.
+- Scalars (string/number/bool/null): higher layer overwrites lower.
+- Arrays: higher layer replaces lower (no element-wise merging in MVP).
+- Unknown keys are allowed (future-proof), but type mismatches are validation failures.
+
+Validation (MVP)
+- Each file is optional; missing files are treated as empty objects.
+- Each top-level document must be a JSON object.
+- Size limits apply (prevent pathological memory use).
+
+Acceptance (MVP)
+- A key defined in base and overridden in app yields the app value.
+- Persona overrides apply only when persona is selected.
+- No merge operation can delete keys from a lower layer.
 
 3. In‑Memory Virtual Registry (Runtime)
 At application launch:
@@ -646,6 +808,28 @@ Step 5 — Build in‑memory virtual environment
 Step 6 — Launch app inside sandbox
 The app believes it is running on its native OS.
 Citadel knows it is running inside a controlled, isolated bubble.
+
+### MVP implementation notes (Roadmap item #16)
+
+Goal: one sandbox engine; personalities are just data-driven configurations.
+
+Personality selection (MVP)
+- Default mapping: `PE→windows`, `ELF→linux`, `Mach-O→macos`, else `citadel`.
+- Persona selection is explicit (per-app config or launcher argument). If unspecified, persona is `default`.
+
+Sandbox build (staging + commit)
+- Stage: load+merge the personality layers (see item #15) into an in-memory `SandboxConfig`.
+- Commit: create the sandbox namespace (vfs map, env, shim table, limits) from the staged config.
+- Only after commit does the process start executing.
+
+Security posture (MVP)
+- Sandbox config cannot grant privileges beyond kernel policy.
+- Deny-by-default for dangerous capabilities (raw disk, unrestricted network) unless explicitly allowed by policy.
+
+Acceptance (MVP)
+- A Windows app sees Windows paths/keys from its merged compatibility config.
+- Two apps can have different personas without affecting each other.
+- A malformed personality JSON fails sandbox creation safely (no partial sandbox, clear log).
 
 4. Why JSON Makes This Perfect
 Modular

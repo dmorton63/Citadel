@@ -2,7 +2,7 @@
     "desktop": {
         "background": {
             "type": "image",
-            "path": "/system/wallpapers/spring_meadow.png",
+            "path": "/system/wall/SPRING.PNG",
             "mode": "stretch"
         },
         "theme": {

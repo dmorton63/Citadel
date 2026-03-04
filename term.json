@@ -1,0 +1,100 @@
+{
+    "window": {
+        "id": "WinterTerminal",
+        "type": "Window",
+        "title": "Citadel Winter Terminal",
+        "width": 720,
+        "height": 480,
+        "resizable": true,
+        "movable": true,
+        "background": "#1C242C"
+    },
+
+    "theme": {
+        "accent": "#7AA0C8",
+        "accentLight": "#BFD6F0",
+        "accentDark": "#4A6A8A",
+        "text": "#FFFFFF",
+        "textSecondary": "#E6F0FA",
+        "panel": "#1C242C",
+        "panelBorder": "#2E3A45"
+    },
+
+    "controls": [
+        {
+            "id": "TitleBar",
+            "type": "TitleBar",
+            "x": 0,
+            "y": 0,
+            "width": "100%",
+            "height": 28,
+            "background": "#4A6A8A",
+            "text": "Citadel Winter Terminal",
+            "color": "#E6F0FA"
+        },
+        {
+            "id": "CloseButton",
+            "type": "CloseButton",
+            "parent": "TitleBar",
+            "align": "right",
+            "width": 24,
+            "height": 24,
+            "margin": 2
+        },
+        {
+            "id": "OutputArea",
+            "type": "TextArea",
+            "x": 10,
+            "y": 40,
+            "width": 660,
+            "height": 360,
+            "readonly": true,
+            "scrollable": true,
+            "font": "monospace",
+            "fontsize": 14,
+            "color": "#FFFFFF",
+            "background": "#1C242C",
+            "border": "#2E3A45"
+        },
+        {
+            "id": "OutputScrollBar",
+            "type": "ScrollBar",
+            "orientation": "vertical",
+            "x": 680,
+            "y": 40,
+            "height": 360,
+            "linkedControl": "OutputArea"
+        },
+        {
+            "id": "InputBox",
+            "type": "TextBox",
+            "x": 10,
+            "y": 410,
+            "width": 660,
+            "height": 28,
+            "font": "monospace",
+            "fontsize": 14,
+            "color": "#FFFFFF",
+            "background": "#2E3A45",
+            "border": "#4A6A8A"
+        },
+        {
+            "id": "SaveButton",
+            "type": "Button",
+            "x": 10,
+            "y": 445,
+            "width": 80,
+            "height": 24,
+            "text": "Save",
+            "action": "Terminal.SaveLog",
+            "background": "#4A6A8A",
+            "color": "#E6F0FA"
+        }
+    ],
+
+    "bindings": {
+        "InputBox.onEnter": "Terminal.ProcessCommand",
+        "OutputScrollBar.onScroll": "OutputArea.Scroll",
+        "CloseButton.onClick": "Window.Close"
+    }
+}

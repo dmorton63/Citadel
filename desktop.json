@@ -1,21 +1,16 @@
 {
     "desktop": {
-        "background": {
-            "type": "image",
-            "path": "/system/wall/LOGO512.PNG",
-            "mode": "center"
-        },
         "theme": {
             "base": "Vista",
             "overrides": {
                 "palette": {
-                    "accent": "#4FA7E3",
-                    "accentLight": "#8FD1FF",
-                    "accentDark": "#2F6FA3",
+                    "accent": "#4A90E2",
+                    "accentLight": "#6BB6FF",
+                    "accentDark": "#2F5A8A",
                     "text": "#FFFFFF",
-                    "textSecondary": "#E3F4FF",
-                    "panel": "#1E2A33",
-                    "panelBorder": "#2F3E4A"
+                    "textSecondary": "#CCCCCC",
+                    "panel": "#202020",
+                    "panelBorder": "#303030"
                 },
                 "metrics": {
                     "cornerRadius": 6,
@@ -24,26 +19,29 @@
                 },
                 "button": {
                     "sidebar": {
-                        "fillNormal": "#1E2A33",
-                        "fillHover": "#2F3E4A",
-                        "text": "#CFEAFF",
-                        "border": "#343F47"
+                        "fillNormal": "#661A1A1A",
+                        "fillHover": "#882A2A2A",
+                        "fillPressed": "#992A2A2A",
+                        "text": "#FFFFFF",
+                        "border": "#80303030",
+                        "shineIntensity": 0.25,
+                        "glass": true
                     },
                     "accent": {
-                        "fillNormal": "#3f3f47",
-                        "fillHover": "#8FD1FF",
-                        "fillPressed": "#2F6FA3",
+                        "fillNormal": "#883f3f47",
+                        "fillHover": "#AA6BB6FF",
+                        "fillPressed": "#AA2F5A8A",
                         "text": "#FFFFFF",
-                        "border": "#343F47",
+                        "border": "#80303030",
                         "shineIntensity": 0.35,
                         "glass": true
                     },
                     "destructive": {
-                        "fillNormal": "#C84040",
-                        "fillHover": "#D85A5A",
-                        "fillPressed": "#A03030",
+                        "fillNormal": "#AAC84040",
+                        "fillHover": "#BBD85A5A",
+                        "fillPressed": "#BBA03030",
                         "text": "#FFFFFF",
-                        "border": "#802020",
+                        "border": "#A0802020",
                         "glass": true
                     }
                 },
@@ -62,26 +60,17 @@
                     "y": 0,
                     "width": "100%",
                     "height": 56,
-                    "background": "#2F6FA3",
-                    "borderBottom": "#1C425F",
+                    "background": "#80181818",
+                    "borderBottom": "#80303030",
                     "children": [
                         {
                             "id": "headerTitle",
                             "type": "label",
-                            "text": "CITADEL Summer Desktop",
+                            "text": "CITADEL Desktop",
                             "x": 20,
                             "y": 16,
-                            "color": "#E3F4FF",
-                            "font": "system-bold-18"
-                        },
-                        {
-                            "id": "headerSun",
-                            "type": "label",
-                            "text": "☀️",
-                            "x": "right-160",
-                            "y": 14,
                             "color": "#FFFFFF",
-                            "font": "system-bold-24"
+                            "font": "system-bold-18"
                         },
                         {
                             "id": "clockLabel",
@@ -89,7 +78,7 @@
                             "text": "12:45 PM",
                             "x": "right-100",
                             "y": 18,
-                            "color": "#E3F4FF",
+                            "color": "#CCCCCC",
                             "font": "system-regular-16"
                         }
                     ]
@@ -101,8 +90,8 @@
                     "y": 56,
                     "width": 200,
                     "height": "100%-56",
-                    "background": "#1E2A33",
-                    "borderRight": "#2F3E4A",
+                    "background": "#801A1A1A",
+                    "borderRight": "#80303030",
                     "children": [
                         {
                             "id": "sidebarTitle",
@@ -110,7 +99,7 @@
                             "text": "Applications",
                             "x": 20,
                             "y": 20,
-                            "color": "#CFEAFF",
+                            "color": "#AAAAAA",
                             "font": "system-bold-14"
                         },
                         {
@@ -147,15 +136,14 @@
                             "icon": "/system/icons/terminal.png"
                         },
                         {
-                            "id": "btnSummerNotes",
+                            "id": "btnNotes",
                             "type": "button",
-                            "text": "Summer Notes",
+                            "text": "Notes",
                             "x": 20,
                             "y": 180,
                             "width": 160,
                             "height": 32,
-                            "role": "sidebar",
-                            "icon": "/system/icons/sun.png"
+                            "role": "sidebar"
                         }
                     ]
                 },
@@ -166,24 +154,24 @@
                     "y": 56,
                     "width": "100%-200",
                     "height": "100%-56",
-                    "background": "rgba(255,255,255,0.20)",
+                    "background": "#22181818",
                     "children": [
                         {
                             "id": "welcomeLabel",
                             "type": "label",
-                            "text": "Welcome to Summer in CITADEL!",
+                            "text": "Welcome to CITADEL!",
                             "x": 40,
                             "y": 40,
-                            "color": "#1C425F",
+                            "color": "#FFFFFF",
                             "font": "system-bold-28"
                         },
                         {
                             "id": "infoLabel",
                             "type": "label",
-                            "text": "Bright skies, warm colors, and a relaxed workspace.",
+                            "text": "Your theme and wallpaper can change with the season.",
                             "x": 40,
                             "y": 90,
-                            "color": "#2F6FA3",
+                            "color": "#CCCCCC",
                             "font": "system-regular-16"
                         },
                         {
@@ -193,29 +181,16 @@
                             "y": 150,
                             "width": 420,
                             "height": 220,
-                            "background": "#E3F4FF",
-                            "border": "#A8CDE6",
+                            "background": "#662A2A2A",
+                            "border": "#80404040",
                             "children": [
-                                {
-                                    "id": "oslogo",
-                                    "type": "image",
-                                    "path": "/system/wall/LOGO512.PNG",
-                                    "mode": "fit",
-                                    "x": 20,
-                                    "y": 20,
-                                    "width": 128,
-                                    "height": 128,
-                                    "zindex": 10,
-                                    "anchor": "topleft",
-                                    "visible": true
-                                },
                                 {
                                     "id": "cardText",
                                     "type": "label",
-                                    "text": "Kernel: CITADEL OS Experimental\nTheme: Summer 2026\nRenderer: PainterSurface\nSeasonal Mode: Sunburst",
+                                    "text": "Kernel: CITADEL OS Experimental\nRenderer: PainterSurface\nDesktop: JSON-driven",
                                     "x": 170,
                                     "y": 40,
-                                    "color": "#2F6FA3",
+                                    "color": "#CCCCCC",
                                     "font": "system-regular-14"
                                 }
                             ]
@@ -229,19 +204,19 @@
                     "y": "bottom-48",
                     "width": "100%",
                     "height": 48,
-                    "background": "#2F6FA3",
-                    "borderTop": "#1C425F",
+                    "background": "#80181818",
+                    "borderTop": "#80303030",
                     "children": [
                         {
                             "id": "startButton",
                             "type": "button",
-                            "text": "☀️ Start",
+                            "text": "Start",
                             "x": 10,
                             "y": 9,
                             "width": 100,
                             "height": 30,
                             "role": "accent",
-                            "icon": "/system/icons/sun.png"
+                            "icon": "/system/icons/start.png"
                         },
                         {
                             "id": "shutDownButton",
@@ -260,7 +235,7 @@
                             "text": "12:45 PM",
                             "x": "right-80",
                             "y": 14,
-                            "color": "#E3F4FF",
+                            "color": "#CCCCCC",
                             "font": "system-regular-16"
                         }
                     ]

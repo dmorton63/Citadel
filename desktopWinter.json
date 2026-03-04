@@ -2,7 +2,7 @@
     "desktop": {
         "background": {
             "type": "image",
-            "path": "/system/wallpapers/winter_forest_frost.png",
+            "path": "/system/wall/WINTER.PNG",
             "mode": "stretch"
         },
         "theme": {

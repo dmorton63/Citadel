@@ -29,6 +29,7 @@
 #include "QWStyleTypes.h"
 #include "QWControls/Containers/Panel.h"
 #include "QWControls/Leaf/Button.h"
+#include "QWControls/Leaf/ImageView.h"
 #include "QWControls/Leaf/Label.h"
 #include "QWInterfaces/IControl.h"
 #include "QCVector.h"
@@ -172,6 +173,8 @@ namespace QD
         void clearJsonDesktopState();
         void resetThemeOverrides();
         void parseThemeOverrides(const QC::JSON::Value *themeValue);
+        void parseThemeOverridesMerge(const QC::JSON::Value *themeValue);
+        void installDefaultMaterials();
 
         void createTopBar();
         void createSidebar();
@@ -255,9 +258,65 @@ namespace QD
             bool glass = false;
             bool shineSet = false;
             float shineIntensity = 0.0f;
+            bool materialSet = false;
+            char material[48] = {};
+            bool hasAny() const
+            {
+                return fillNormal.set || fillHover.set || fillPressed.set || text.set || border.set || glassSet || shineSet || materialSet;
+            }
+        };
+
+        static constexpr QC::u32 MAX_THEME_MATERIALS = 16;
+
+        struct ButtonMaterialStyle
+        {
+            ColorOverride fillNormal;
+            ColorOverride fillHover;
+            ColorOverride fillPressed;
+            ColorOverride text;
+            ColorOverride border;
+            bool glassSet = false;
+            bool glass = false;
+            bool shineSet = false;
+            float shineIntensity = 0.0f;
             bool hasAny() const
             {
                 return fillNormal.set || fillHover.set || fillPressed.set || text.set || border.set || glassSet || shineSet;
+            }
+        };
+
+        struct ButtonMaterialLayerSet
+        {
+            ColorOverride glossTop;
+            ColorOverride glossBottom;
+            ColorOverride shadeTop;
+            ColorOverride shadeBottom;
+            bool hasAny() const
+            {
+                return glossTop.set || glossBottom.set || shadeTop.set || shadeBottom.set;
+            }
+        };
+
+        struct ButtonMaterialLayers
+        {
+            ButtonMaterialLayerSet normal;
+            ButtonMaterialLayerSet hover;
+            ButtonMaterialLayerSet pressed;
+            bool hasAny() const
+            {
+                return normal.hasAny() || hover.hasAny() || pressed.hasAny();
+            }
+        };
+
+        struct ButtonMaterialDefinition
+        {
+            bool used = false;
+            char name[48] = {};
+            ButtonMaterialStyle style;
+            ButtonMaterialLayers layers;
+            bool hasAny() const
+            {
+                return style.hasAny() || layers.hasAny();
             }
         };
 
@@ -309,6 +368,8 @@ namespace QD
             PaletteOverrides palette;
             MetricsOverrides metrics;
             ButtonStyleOverrides button[static_cast<QC::u32>(QW::ButtonRole::Count)];
+            ButtonMaterialDefinition materials[MAX_THEME_MATERIALS];
+            QC::u32 materialCount = 0;
             EffectsOverrides effects;
             TransparencyOverrides transparency;
             FontOverrides font;
@@ -338,6 +399,9 @@ namespace QD
         // JSON-specific buttons we track for layout offsets
         QW::Controls::Button *m_jsonStartButton;
         QW::Controls::Button *m_jsonShutdownButton;
+
+        // JSON-driven wallpaper (painted as a root control behind everything else)
+        QW::Controls::ImageView *m_jsonWallpaperView;
 
         // Top bar controls
         QW::Controls::Button *m_logoButton;

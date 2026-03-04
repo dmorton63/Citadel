@@ -203,14 +203,17 @@ namespace QW
             {
                 for (QC::u32 i = 0; i < size; ++i)
                 {
-                    QC::u8 alpha = static_cast<QC::u8>((m_colors.shadow.a * (size - i)) / size);
+                    // Soft shadow: draw a larger, lighter outer layer first,
+                    // then smaller, darker layers towards the control.
+                    QC::u8 alpha = static_cast<QC::u8>((m_colors.shadow.a * (i + 1)) / size);
                     Color layerColor(m_colors.shadow.r, m_colors.shadow.g, m_colors.shadow.b, alpha);
 
+                    QC::u32 layer = size - i;
                     Rect layerRect = {
-                        shadowRect.x + static_cast<QC::i32>(i),
-                        shadowRect.y + static_cast<QC::i32>(i),
-                        shadowRect.width + (size - i) * 2,
-                        shadowRect.height + (size - i) * 2};
+                        shadowRect.x - static_cast<QC::i32>(layer),
+                        shadowRect.y - static_cast<QC::i32>(layer),
+                        shadowRect.width + layer * 2,
+                        shadowRect.height + layer * 2};
 
                     painter->fillRect(layerRect, layerColor);
                 }

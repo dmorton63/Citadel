@@ -12,12 +12,97 @@ namespace QW
         {
             return QC::Color::lerp(from, to, t);
         }
+
+        inline QC::u32 umin(QC::u32 a, QC::u32 b)
+        {
+            return a < b ? a : b;
+        }
+
+        // Integer sqrt for 32-bit values (floor).
+        inline QC::u32 isqrt_u32(QC::u32 x)
+        {
+            QC::u32 op = x;
+            QC::u32 res = 0;
+            QC::u32 one = 1u << 30;
+            while (one > op)
+            {
+                one >>= 2;
+            }
+            while (one != 0)
+            {
+                if (op >= res + one)
+                {
+                    op -= res + one;
+                    res += one << 1;
+                }
+                res >>= 1;
+                one >>= 2;
+            }
+            return res;
+        }
+
+        inline bool spanForRoundedRow(const QC::Rect &rect, QC::u32 radius, QC::i32 y, QC::i32 &x1, QC::i32 &x2)
+        {
+            if (rect.width == 0 || rect.height == 0)
+                return false;
+
+            const QC::i32 left = rect.x;
+            const QC::i32 right = rect.x + static_cast<QC::i32>(rect.width) - 1;
+
+            if (radius == 0)
+            {
+                x1 = left;
+                x2 = right;
+                return x1 <= x2;
+            }
+
+            const QC::u32 maxR = umin(rect.width / 2, rect.height / 2);
+            if (radius > maxR)
+                radius = maxR;
+            if (radius == 0)
+            {
+                x1 = left;
+                x2 = right;
+                return x1 <= x2;
+            }
+
+            const QC::i32 top = rect.y;
+            const QC::i32 bottom = rect.y + static_cast<QC::i32>(rect.height) - 1;
+            const QC::i32 r = static_cast<QC::i32>(radius);
+
+            const QC::i32 cyTop = top + (r - 1);
+            const QC::i32 cyBottom = bottom - (r - 1);
+
+            QC::i32 dy = 0;
+            if (y < cyTop)
+                dy = cyTop - y;
+            else if (y > cyBottom)
+                dy = y - cyBottom;
+
+            QC::i32 inset = 0;
+            if (dy > 0)
+            {
+                const QC::u32 r2 = radius * radius;
+                const QC::u32 dy2 = static_cast<QC::u32>(dy * dy);
+                const QC::u32 inside = (dy2 >= r2) ? 0 : (r2 - dy2);
+                const QC::u32 maxX = isqrt_u32(inside);
+                inset = (r - 1) - static_cast<QC::i32>(maxX);
+                if (inset < 0)
+                    inset = 0;
+                if (inset > (r - 1))
+                    inset = (r - 1);
+            }
+
+            x1 = left + inset;
+            x2 = right - inset;
+            return x1 <= x2;
+        }
     } // namespace
 
     FramebufferBackend::FramebufferBackend(Framebuffer *framebuffer)
         : m_framebuffer(framebuffer)
     {
-        m_caps.supportsRoundedRect = false;
+        m_caps.supportsRoundedRect = true;
         m_caps.supportsShadows = true;
         m_caps.supportsAlpha = true;
         updateTarget();
@@ -134,8 +219,115 @@ namespace QW
                                              QC::Color stroke,
                                              QC::u32 strokeWidth)
     {
-        (void)radius; // TODO: add rounded corner rasterization
-        drawRect(rect, fill, stroke, strokeWidth);
+        if (!updateTarget())
+            return;
+
+        if (rect.width == 0 || rect.height == 0)
+            return;
+
+        const QC::u32 maxR = umin(rect.width / 2, rect.height / 2);
+        if (radius > maxR)
+            radius = maxR;
+
+        if (radius == 0)
+        {
+            drawRect(rect, fill, stroke, strokeWidth);
+            return;
+        }
+
+        // Fill
+        if (fill.a > 0)
+        {
+            const QC::i32 yStart = rect.y;
+            const QC::i32 yEnd = rect.y + static_cast<QC::i32>(rect.height);
+            for (QC::i32 y = yStart; y < yEnd; ++y)
+            {
+                QC::i32 x1 = 0, x2 = -1;
+                if (!spanForRoundedRow(rect, radius, y, x1, x2))
+                    continue;
+
+                const QC::u32 len = static_cast<QC::u32>(x2 - x1 + 1);
+                if (len == 0)
+                    continue;
+                m_renderer.drawHLine(x1, y, len, fill);
+            }
+        }
+
+        // Stroke (inside the rect, like drawRect does)
+        if (strokeWidth == 0 || stroke.a == 0)
+            return;
+
+        for (QC::u32 layer = 0; layer < strokeWidth; ++layer)
+        {
+            QC::Rect outer = rect;
+            const QC::u32 inset = layer;
+            if (outer.width <= inset * 2 || outer.height <= inset * 2)
+                break;
+            outer.x += static_cast<QC::i32>(inset);
+            outer.y += static_cast<QC::i32>(inset);
+            outer.width -= inset * 2;
+            outer.height -= inset * 2;
+
+            QC::Rect inner = outer;
+            if (inner.width > 2 && inner.height > 2)
+            {
+                inner.x += 1;
+                inner.y += 1;
+                inner.width -= 2;
+                inner.height -= 2;
+            }
+            else
+            {
+                inner.width = 0;
+                inner.height = 0;
+            }
+
+            QC::u32 rOuter = radius > layer ? (radius - layer) : 0;
+            const QC::u32 rInner = (rOuter > 0) ? (rOuter - 1) : 0;
+            if (rOuter == 0)
+            {
+                drawRect(outer, QC::Color::transparent(), stroke, 1);
+                continue;
+            }
+
+            const QC::i32 yStart = outer.y;
+            const QC::i32 yEnd = outer.y + static_cast<QC::i32>(outer.height);
+            for (QC::i32 y = yStart; y < yEnd; ++y)
+            {
+                QC::i32 x1o = 0, x2o = -1;
+                if (!spanForRoundedRow(outer, rOuter, y, x1o, x2o))
+                    continue;
+
+                bool hasInner = false;
+                QC::i32 x1i = 0, x2i = -1;
+                if (inner.width > 0 && inner.height > 0 &&
+                    y >= inner.y && y < inner.y + static_cast<QC::i32>(inner.height))
+                {
+                    hasInner = spanForRoundedRow(inner, rInner, y, x1i, x2i);
+                }
+
+                if (!hasInner)
+                {
+                    const QC::u32 len = static_cast<QC::u32>(x2o - x1o + 1);
+                    if (len)
+                        m_renderer.drawHLine(x1o, y, len, stroke);
+                    continue;
+                }
+
+                if (x1i > x1o)
+                {
+                    const QC::u32 len = static_cast<QC::u32>(x1i - x1o);
+                    if (len)
+                        m_renderer.drawHLine(x1o, y, len, stroke);
+                }
+                if (x2o > x2i)
+                {
+                    const QC::u32 len = static_cast<QC::u32>(x2o - x2i);
+                    if (len)
+                        m_renderer.drawHLine(x2i + 1, y, len, stroke);
+                }
+            }
+        }
     }
 
     void FramebufferBackend::drawShadow(const QC::Rect &rect,

@@ -163,11 +163,17 @@ qemu-system-x86_64 -cdrom build/citadel-limine.iso -serial stdio
 
 - Create a directory named `shared/` at the repo root. The build script detects it automatically.
 - `./build.sh -r` now passes `-drive file=fat:rw:shared,...` to QEMU, exposing the folder as an IDE FAT volume so host↔guest file drops stay in sync.
-- Until the kernel grows an ATA/IDE block driver the extra disk remains invisible inside QAIOS++, but the QEMU plumbing is ready—once the driver lands we can mount it (e.g., `/share`) without touching the tooling again.
+- Enable the guest-side auto-mount by setting `IDE_SHARED=1` in `startup.cfg` (this controls the legacy IDE probe at boot).
+- If detected, the kernel registers it as `QFS_SHARED` and mounts it at `/shared`.
 
 ## Desktop JSON & Theming
 
 The desktop shell loads [desktop.json](desktop.json) from the ramdisk (build.sh copies it to `/DESKTOP.JSN`). Everything under `desktop.theme` controls runtime styling.
+
+Optional production/runtime tweaks can be provided via `desktop-overrides.json` (packed as `/DESKOVR.JSN` / `/PROD/DESKOVR.JSN`).
+
+- `season`: `spring|summer|autumn|fall|winter` applies the matching seasonal preset theme/background.
+- `season`: `auto` reads the CMOS RTC (month/day) and derives the season automatically.
 
 ### Theme loader
 

@@ -59,7 +59,20 @@ namespace QW
 
         QC::u32 *row = reinterpret_cast<QC::u32 *>(
             reinterpret_cast<QC::u8 *>(m_buffer) + y * m_pitch);
-        row[x] = color.value;
+
+        if (color.a == 255)
+        {
+            row[x] = color.value;
+            return;
+        }
+        if (color.a == 0)
+        {
+            return;
+        }
+
+        Color dst;
+        dst.value = row[x];
+        row[x] = color.blend(dst).value;
     }
 
     Color Renderer::getPixel(QC::i32 x, QC::i32 y) const
@@ -136,13 +149,33 @@ namespace QW
         if (!clipRect(clipped))
             return;
 
+        if (color.a == 0)
+        {
+            return;
+        }
+
+        const bool opaque = (color.a == 255);
+
         for (QC::i32 y = clipped.y; y < clipped.y + static_cast<QC::i32>(clipped.height); ++y)
         {
             QC::u32 *row = reinterpret_cast<QC::u32 *>(
                 reinterpret_cast<QC::u8 *>(m_buffer) + y * m_pitch);
-            for (QC::i32 x = clipped.x; x < clipped.x + static_cast<QC::i32>(clipped.width); ++x)
+
+            if (opaque)
             {
-                row[x] = color.value;
+                for (QC::i32 x = clipped.x; x < clipped.x + static_cast<QC::i32>(clipped.width); ++x)
+                {
+                    row[x] = color.value;
+                }
+            }
+            else
+            {
+                for (QC::i32 x = clipped.x; x < clipped.x + static_cast<QC::i32>(clipped.width); ++x)
+                {
+                    Color dst;
+                    dst.value = row[x];
+                    row[x] = color.blend(dst).value;
+                }
             }
         }
     }

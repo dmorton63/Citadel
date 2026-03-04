@@ -2,7 +2,7 @@
     "desktop": {
         "background": {
             "type": "image",
-            "path": "/system/wallpapers/autumn_forest_path.png",
+            "path": "/system/wall/AUTUMN.PNG",
             "mode": "stretch"
         },
         "theme": {
