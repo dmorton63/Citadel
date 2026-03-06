@@ -760,7 +760,7 @@ namespace QKDrv
 
                 ++evtCount;
                 TRBType type = getTRBType(event);
-                if (evtCount <= 10 || evtCount % 100 == 0)
+                if (evtCount <= 10 || evtCount % 1000 == 0)
                 {
                     QC_LOG_INFO("xHCI", "Event #%u: type=%u", evtCount, static_cast<QC::u8>(type));
                 }

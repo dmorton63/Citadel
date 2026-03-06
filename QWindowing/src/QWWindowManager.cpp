@@ -11,10 +11,22 @@
 #include "QKMemHeap.h"
 #include "QCMemUtil.h"
 #include "QCLinearAlgebra.h"
+#include "QDrvTimer.h"
 
 namespace QW
 {
 
+    static QC::u32 mouseButtonToMask(QK::Event::MouseButton button)
+    {
+        using namespace QK::Event;
+        if (button == MouseButton::None)
+            return 0;
+        const QC::u8 b = static_cast<QC::u8>(button);
+        if (b == 0)
+            return 0;
+        // MouseButton values are 1..N.
+        return (1u << (b - 1));
+    }
     WindowManager &WindowManager::instance()
     {
         static WindowManager s_instance;
@@ -28,6 +40,8 @@ namespace QW
           m_framebuffer(nullptr),
           m_compositor(nullptr),
           m_mousePos{0, 0},
+            m_lastInputTimestamp(0),
+            m_lastInputMs(0),
           m_listenerId(QK::Event::InvalidListenerId),
           m_dragWindow(nullptr),
           m_dragOffset{0, 0},
@@ -138,6 +152,10 @@ namespace QW
     Window *WindowManager::createWindow(const char *title, Rect bounds)
     {
         Window *window = new Window(title, bounds);
+        // Start windows hidden; callers typically set flags (including Visible)
+        // after populating controls. This also avoids synchronous paints during
+        // desktop initialization.
+        window->setVisible(false);
         window->setWindowId(m_nextWindowId++);
         m_windows.push_back(window);
 
@@ -178,6 +196,13 @@ namespace QW
                 m_focusedWindow = nullptr;
             if (m_hoveredWindow == window)
                 m_hoveredWindow = nullptr;
+            if (m_dragWindow == window)
+                m_dragWindow = nullptr;
+            if (m_captureWindow == window)
+            {
+                m_captureWindow = nullptr;
+                m_captureButtonsMask = 0;
+            }
 
             // Remove from z-order list so it won't receive more events.
             for (QC::usize i = 0; i < m_windows.size(); ++i)
@@ -208,6 +233,14 @@ namespace QW
         if (m_hoveredWindow == window)
         {
             m_hoveredWindow = nullptr;
+        }
+
+        if (m_dragWindow == window)
+            m_dragWindow = nullptr;
+        if (m_captureWindow == window)
+        {
+            m_captureWindow = nullptr;
+            m_captureButtonsMask = 0;
         }
 
         // Remove from list
@@ -336,6 +369,16 @@ namespace QW
     {
         if (m_compositor)
         {
+            // Paint dirty windows once per frame (coalesced).
+            for (QC::usize i = 0; i < m_windows.size(); ++i)
+            {
+                Window *window = m_windows[i];
+                if (window && window->isVisible() && window->needsPaint())
+                {
+                    window->paintIfNeeded();
+                }
+            }
+
             m_compositor->compose();
             m_needsRender = false;
         }
@@ -368,6 +411,10 @@ namespace QW
     {
         using namespace QK::Event;
 
+        // Capture timing for UI instrumentation/debugging.
+        m_lastInputTimestamp = mouse.timestamp;
+        m_lastInputMs = QDrv::Timer::instance().milliseconds();
+
         // The kernel input layer posts mouse events with a meaningful absolute cursor position
         // (clamped to screen bounds by the active mouse driver). Always trust x/y here to keep
         // cursor rendering and control hit-testing perfectly aligned.
@@ -387,6 +434,7 @@ namespace QW
             y = maxY;
 
         m_mousePos = Point{x, y};
+
         // Keep hardware cursor position tightly synced to input events.
         // Do this without forcing a full compose/present.
         auto syncCursorNow = [&]()
@@ -445,7 +493,18 @@ namespace QW
             }
         }
 
-        Window *targetWindow = windowAt(m_mousePos);
+        if (m_captureButtonsMask == 0)
+            m_captureWindow = nullptr;
+
+        Window *targetWindow = nullptr;
+        if (m_captureWindow && m_captureButtonsMask != 0)
+        {
+            targetWindow = m_captureWindow;
+        }
+        else
+        {
+            targetWindow = windowAt(m_mousePos);
+        }
 
         // Handle enter/leave
         if (targetWindow != m_hoveredWindow)
@@ -486,17 +545,29 @@ namespace QW
                     const bool handled = targetWindow->onEvent(downEvent);
                     if (handled)
                     {
+                        // Ensure mouse-up is delivered to the same window even
+                        // if the cursor leaves while the button is held.
+                        m_captureWindow = targetWindow;
+                        m_captureButtonsMask |= mouseButtonToMask(mouse.button);
                         syncCursorNow();
                         return;
                     }
 
                     // Not handled by controls; treat as a window move drag.
+                    m_captureWindow = nullptr;
+                    m_captureButtonsMask = 0;
                     m_dragWindow = targetWindow;
                     m_dragOffset = Point{m_mousePos.x - windowBounds.x, m_mousePos.y - windowBounds.y};
                     m_dragStartBounds = windowBounds;
                     syncCursorNow();
                     return;
                 }
+
+                // Begin general capture for control interactions inside this window.
+                // This ensures mouse-up always reaches the same window even if the
+                // cursor leaves its bounds (e.g. scrollbar thumb drag).
+                m_captureWindow = targetWindow;
+                m_captureButtonsMask |= mouseButtonToMask(mouse.button);
             }
 
             // Translate coordinates into the window's local space so controls
@@ -515,6 +586,14 @@ namespace QW
             targetWindow->onEvent(event);
             --m_dispatchDepth;
             processPendingDestroy();
+
+            // End capture when all pressed buttons are released.
+            if (mouse.type == Type::MouseButtonUp && m_captureWindow == targetWindow)
+            {
+                m_captureButtonsMask &= ~mouseButtonToMask(mouse.button);
+                if (m_captureButtonsMask == 0)
+                    m_captureWindow = nullptr;
+            }
         }
 
         // Ensure cursor position updates even if no repaint is needed.

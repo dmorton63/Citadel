@@ -22,6 +22,8 @@
 #include "QWControls/Leaf/Button.h"
 #include "QWControls/Leaf/Label.h"
 #include "QWControls/Leaf/TextBox.h"
+#include "QWControls/Composite/ListView.h"
+#include "QWControls/Leaf/ScrollBar.h"
 
 #include "QKServiceRegistry.h"
 #include "QKMsgBus.h"
@@ -149,10 +151,17 @@ namespace QD
     }
 
     Terminal::Terminal(Desktop *desktop)
-        : m_desktop(desktop), m_window(nullptr), m_windowId(0), m_root(nullptr), m_output(nullptr), m_input(nullptr), m_windowListenerId(QK::Event::InvalidListenerId), m_outputLen(0)
+        : m_desktop(desktop),
+          m_window(nullptr),
+          m_windowId(0),
+          m_root(nullptr),
+          m_output(nullptr),
+          m_outputScroll(nullptr),
+          m_input(nullptr),
+          m_windowListenerId(QK::Event::InvalidListenerId),
+          m_followTail(true),
+          m_syncingScroll(false)
     {
-        m_outputBuf[0] = '\0';
-
         auto &eventMgr = QK::Event::EventManager::instance();
         if (eventMgr.isInitialized())
         {
@@ -220,8 +229,82 @@ namespace QD
         m_window = nullptr;
         m_root = nullptr;
         m_output = nullptr;
+        m_outputScroll = nullptr;
         m_input = nullptr;
         m_windowId = 0;
+    }
+
+    void Terminal::onOutputScrollChanged(QW::Controls::ScrollBar *scrollBar, void *userData)
+    {
+        auto *self = static_cast<Terminal *>(userData);
+        if (!self || !scrollBar || !self->m_output)
+            return;
+
+        if (self->m_syncingScroll)
+            return;
+
+        self->m_followTail = (scrollBar->value() >= scrollBar->maximum());
+        self->m_output->setScrollOffset(static_cast<QC::usize>(scrollBar->value()));
+    }
+
+    void Terminal::onOutputViewScrollChanged(QW::Controls::ListView *listView, void *userData)
+    {
+        auto *self = static_cast<Terminal *>(userData);
+        if (!self || !listView)
+            return;
+
+        self->syncScrollUi();
+    }
+
+    void Terminal::syncScrollUi()
+    {
+        if (!m_output || !m_outputScroll)
+            return;
+
+        const QC::usize items = m_output->itemCount();
+        const QC::u32 itemHeight = m_output->itemHeight();
+        const QC::u32 h = m_output->bounds().height;
+
+        QC::usize visible = 0;
+        if (itemHeight != 0)
+            visible = static_cast<QC::usize>(h / itemHeight);
+
+        QC::usize maxOffset = 0;
+        if (items > visible)
+            maxOffset = items - visible;
+
+        m_syncingScroll = true;
+        m_outputScroll->setMinimum(0);
+        m_outputScroll->setMaximum(static_cast<QC::i32>(maxOffset));
+        m_outputScroll->setPageSize(static_cast<QC::u32>(visible));
+        m_outputScroll->setLargeStep(static_cast<QC::i32>((visible > 0) ? visible : 1));
+        m_outputScroll->setSmallStep(1);
+        m_outputScroll->setValue(static_cast<QC::i32>(m_output->scrollOffset()));
+        m_syncingScroll = false;
+
+        m_followTail = (m_output->scrollOffset() >= maxOffset);
+    }
+
+    void Terminal::scrollToTail()
+    {
+        if (!m_output || !m_outputScroll)
+            return;
+
+        const QC::usize items = m_output->itemCount();
+        const QC::u32 itemHeight = m_output->itemHeight();
+        const QC::u32 h = m_output->bounds().height;
+
+        QC::usize visible = 0;
+        if (itemHeight != 0)
+            visible = static_cast<QC::usize>(h / itemHeight);
+
+        QC::usize maxOffset = 0;
+        if (items > visible)
+            maxOffset = items - visible;
+
+        m_output->setScrollOffset(maxOffset);
+        // setScrollOffset will call syncScrollUi via handler.
+        m_followTail = true;
     }
 
     void Terminal::open()
@@ -278,14 +361,33 @@ namespace QD
         m_root->setBorderStyle(QW::Controls::BorderStyle::None);
         m_root->setPadding(8);
 
-        // Output label (multiline)
-        QC::Rect outBounds = {8, 8, static_cast<QC::u32>(w - 16), static_cast<QC::u32>(h - 16 - 28)};
-        m_output = new QW::Controls::Label(m_window, "QAIOS+ Terminal\nType 'help'\n", outBounds);
-        m_output->setWordWrap(true);
-        m_output->setTransparent(false);
+        // Output view + scrollbar
+        const QC::u32 scrollW = 14;
+        QC::Rect outBounds = {8, 8, static_cast<QC::u32>(w - 16 - scrollW - 4), static_cast<QC::u32>(h - 16 - 28)};
+        QC::Rect scrollBounds = {static_cast<QC::i32>(outBounds.x + static_cast<QC::i32>(outBounds.width) + 4), outBounds.y, scrollW, outBounds.height};
+
+        m_output = new QW::Controls::ListView(m_window, outBounds);
+        m_output->setShowHeader(false);
+        m_output->setSelectionMode(QW::Controls::SelectionMode::None);
+        m_output->setItemHeight(16);
         m_output->setBackgroundColor(QW::Color(20, 20, 20, 255));
         m_output->setTextColor(QW::Color(230, 230, 230, 255));
+        m_output->setSelectionColor(QW::Color(80, 120, 170, 255));
+        m_output->setScrollOffsetChangeHandler(&Terminal::onOutputViewScrollChanged, this);
         m_root->addChild(m_output);
+
+        m_outputScroll = new QW::Controls::ScrollBar(m_window, scrollBounds, QW::Controls::ScrollOrientation::Vertical);
+        m_outputScroll->setBackgroundColor(QW::Color(20, 20, 20, 255));
+        m_outputScroll->setTrackColor(QW::Color(20, 20, 20, 255));
+        m_outputScroll->setThumbColor(QW::Color(110, 110, 110, 255));
+        m_outputScroll->setArrowColor(QW::Color(230, 230, 230, 255));
+        m_outputScroll->setScrollChangeHandler(&Terminal::onOutputScrollChanged, this);
+        m_root->addChild(m_outputScroll);
+
+        // Initial lines
+        (void)m_output->addItem("QAIOS+ Terminal");
+        (void)m_output->addItem("Type 'help'");
+        scrollToTail();
 
         // Input textbox
         QC::Rect inBounds = {8, static_cast<QC::i32>(h - 8 - 20), static_cast<QC::u32>(w - 16), 20};
@@ -304,19 +406,6 @@ namespace QD
         closeButton->setRole(QW::ButtonRole::Destructive);
         closeButton->setClickHandler(&Terminal::onCloseClick, this);
         m_root->addChild(closeButton);
-
-        // Initialize output buffer from initial text
-        const char *initial = m_output->text();
-        if (initial)
-        {
-            QC::usize len = QC::String::strlen(initial);
-            if (len >= OUTPUT_CAP)
-                len = OUTPUT_CAP - 1;
-            for (QC::usize i = 0; i < len; ++i)
-                m_outputBuf[i] = initial[i];
-            m_outputBuf[len] = '\0';
-            m_outputLen = len;
-        }
 
         focus();
         m_window->invalidate();
@@ -345,6 +434,7 @@ namespace QD
         m_window = nullptr;
         m_root = nullptr;
         m_output = nullptr;
+        m_outputScroll = nullptr;
         m_input = nullptr;
     }
 
@@ -383,26 +473,54 @@ namespace QD
         if (!line)
             return;
 
-        const QC::usize addLen = QC::String::strlen(line);
-        const QC::usize need = addLen + 1; // +\n
+        if (!m_output)
+            return;
 
-        // If overflow, drop oldest by resetting (minimal behavior)
-        if (m_outputLen + need + 1 >= OUTPUT_CAP)
+        // Normalize: split incoming text on \n into separate list items.
+        // (Also ignore \r to keep Windows/serial style clean.)
+        char tmp[384];
+        QC::usize tlen = 0;
+
+        auto flush = [&]() {
+            tmp[tlen] = '\0';
+            (void)m_output->addItem(tmp);
+            tlen = 0;
+        };
+
+        for (const char *p = line; *p; ++p)
         {
-            m_outputLen = 0;
-            m_outputBuf[0] = '\0';
+            const char c = *p;
+            if (c == '\r')
+                continue;
+            if (c == '\n')
+            {
+                flush();
+                continue;
+            }
+            if (tlen + 1 < sizeof(tmp))
+            {
+                tmp[tlen++] = c;
+            }
         }
 
-        for (QC::usize i = 0; i < addLen; ++i)
-        {
-            m_outputBuf[m_outputLen++] = line[i];
-        }
-        m_outputBuf[m_outputLen++] = '\n';
-        m_outputBuf[m_outputLen] = '\0';
+        if (tlen > 0)
+            flush();
 
-        if (m_output)
+        // Trim scrollback.
+        while (m_output->itemCount() > OUTPUT_MAX_LINES)
         {
-            m_output->setText(m_outputBuf);
+            m_output->removeItem(0);
+            if (m_output->scrollOffset() > 0)
+            {
+                m_output->setScrollOffset(m_output->scrollOffset() - 1);
+            }
+        }
+
+        // Keep scroll UI coherent.
+        syncScrollUi();
+        if (m_followTail)
+        {
+            scrollToTail();
         }
     }
 
@@ -430,10 +548,12 @@ namespace QD
 
         if (streqIgnoreCase(cmd, "clear"))
         {
-            m_outputLen = 0;
-            m_outputBuf[0] = '\0';
             if (m_output)
-                m_output->setText("");
+            {
+                m_output->clearItems();
+            }
+            m_followTail = true;
+            syncScrollUi();
             return;
         }
 
@@ -473,10 +593,19 @@ namespace QD
                 return;
             }
 
-            if (m_outputLen > 0)
+            if (m_output)
             {
-                (void)file->write(m_outputBuf, m_outputLen);
-                (void)file->write("\r\n", 2);
+                const QC::usize count = m_output->itemCount();
+                for (QC::usize i = 0; i < count; ++i)
+                {
+                    const auto *it = m_output->item(i);
+                    if (!it)
+                        continue;
+                    const QC::usize len = QC::String::strlen(it->text);
+                    if (len)
+                        (void)file->write(it->text, len);
+                    (void)file->write("\r\n", 2);
+                }
             }
 
             QFS::VFS::instance().close(file);

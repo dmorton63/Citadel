@@ -67,10 +67,17 @@ namespace QW
 
     void Window::setVisible(bool visible)
     {
+        const bool wasVisible = isVisible();
         if (visible)
             m_flags |= WindowFlags::Visible;
         else
             m_flags &= ~WindowFlags::Visible;
+
+        // If transitioning to visible, ensure we paint at least once.
+        if (!wasVisible && visible)
+        {
+            invalidate();
+        }
     }
 
     uint32_t Window::flags() const
@@ -80,7 +87,13 @@ namespace QW
 
     void Window::setFlags(uint32_t flags)
     {
+        const bool wasVisible = isVisible();
         m_flags = flags;
+        const bool nowVisible = isVisible();
+        if (!wasVisible && nowVisible)
+        {
+            invalidate();
+        }
     }
 
     Controls::Panel *Window::root() const { return m_root; }
@@ -120,34 +133,95 @@ namespace QW
 
     void Window::invalidateRect(const Rect &rect)
     {
-        // Notify compositor of the affected screen region.
-        // `rect` is window-local; convert to screen coordinates.
-        Rect clipped = rect;
-        if (clipped.x < 0)
-            clipped.x = 0;
-        if (clipped.y < 0)
-            clipped.y = 0;
+        // Hidden windows should not trigger compositor work or paints.
+        if (!isVisible())
+            return;
+
+        // Controls may draw slightly outside their nominal bounds (hover lift,
+        // focus rings, soft shadows). Expand a bit so visual state changes don't
+        // leave stale pixels.
+        static constexpr QC::i32 kInvalidateMargin = 32;
+
         const QC::i32 maxW = static_cast<QC::i32>(m_bounds.width);
         const QC::i32 maxH = static_cast<QC::i32>(m_bounds.height);
-        if (clipped.x > maxW)
-            clipped.x = maxW;
-        if (clipped.y > maxH)
-            clipped.y = maxH;
-        if (static_cast<QC::i32>(clipped.right()) > maxW)
-            clipped.width = static_cast<QC::u32>(maxW - clipped.x);
-        if (static_cast<QC::i32>(clipped.bottom()) > maxH)
-            clipped.height = static_cast<QC::u32>(maxH - clipped.y);
 
-        if (!clipped.isEmpty())
+        QC::i32 x1 = rect.x - kInvalidateMargin;
+        QC::i32 y1 = rect.y - kInvalidateMargin;
+        QC::i32 x2 = rect.x + static_cast<QC::i32>(rect.width) + kInvalidateMargin;
+        QC::i32 y2 = rect.y + static_cast<QC::i32>(rect.height) + kInvalidateMargin;
+
+        if (x1 < 0)
+            x1 = 0;
+        if (y1 < 0)
+            y1 = 0;
+        if (x2 > maxW)
+            x2 = maxW;
+        if (y2 > maxH)
+            y2 = maxH;
+
+        if (x2 <= x1 || y2 <= y1)
+            return;
+
+        const Rect clipped{ x1, y1,
+                            static_cast<QC::u32>(x2 - x1),
+                            static_cast<QC::u32>(y2 - y1) };
+
+        // Notify compositor of the affected screen region.
+        // `rect` is window-local; convert to screen coordinates.
+        const Rect screenRect{m_bounds.x + clipped.x,
+                              m_bounds.y + clipped.y,
+                              clipped.width,
+                              clipped.height};
+        WindowManager::instance().invalidate(screenRect);
+
+        // Track union dirty rect for clip-based partial painting.
+        if (!m_hasDirtyRect)
         {
-            const Rect screenRect{m_bounds.x + clipped.x,
-                                  m_bounds.y + clipped.y,
-                                  clipped.width,
-                                  clipped.height};
-            WindowManager::instance().invalidate(screenRect);
+            m_dirtyRect = clipped;
+            m_hasDirtyRect = true;
+        }
+        else
+        {
+            const QC::i32 ux1 = (clipped.x < m_dirtyRect.x) ? clipped.x : m_dirtyRect.x;
+            const QC::i32 uy1 = (clipped.y < m_dirtyRect.y) ? clipped.y : m_dirtyRect.y;
+            const QC::i32 ux2 = (static_cast<QC::i32>(clipped.right()) > static_cast<QC::i32>(m_dirtyRect.right()))
+                                    ? static_cast<QC::i32>(clipped.right())
+                                    : static_cast<QC::i32>(m_dirtyRect.right());
+            const QC::i32 uy2 = (static_cast<QC::i32>(clipped.bottom()) > static_cast<QC::i32>(m_dirtyRect.bottom()))
+                                    ? static_cast<QC::i32>(clipped.bottom())
+                                    : static_cast<QC::i32>(m_dirtyRect.bottom());
+
+            m_dirtyRect.x = ux1;
+            m_dirtyRect.y = uy1;
+            m_dirtyRect.width = static_cast<QC::u32>(ux2 - ux1);
+            m_dirtyRect.height = static_cast<QC::u32>(uy2 - uy1);
         }
 
+        // Coalesce paints: do not repaint synchronously inside invalidation.
+        m_needsPaint = true;
+    }
+
+    void Window::paintIfNeeded()
+    {
+        if (!m_needsPaint)
+            return;
+
+        // Clip repaint to what was invalidated since the last paint.
+        if (m_hasDirtyRect)
+        {
+            m_painter.setClipRect(m_dirtyRect);
+        }
+        else
+        {
+            m_painter.clearClipRect();
+        }
+
+        m_needsPaint = false;
+        m_hasDirtyRect = false;
         paint();
+
+        // Restore no-clip for subsequent operations.
+        m_painter.clearClipRect();
     }
 
     void Window::paint()
@@ -269,13 +343,18 @@ namespace QW
         if (m_surfacePixels.empty())
             return false;
 
-        QC::u32 *pixelData = m_surfacePixels.data();
-        m_painter.setSurface(pixelData, m_bufferWidth, m_bufferHeight, m_bufferWidth);
-        m_surfaceBackend.setSurface(&m_painter,
-                                    pixelData,
-                                    m_bufferWidth,
-                                    m_bufferHeight,
-                                    m_bufferPitchBytes);
+        // IMPORTANT: do not rebind the painter/backend every frame.
+        // PainterSurface::setSurface() resets the clip rect, which breaks dirty-rect repaint.
+        if (sizeChanged)
+        {
+            QC::u32 *pixelData = m_surfacePixels.data();
+            m_painter.setSurface(pixelData, m_bufferWidth, m_bufferHeight, m_bufferWidth);
+            m_surfaceBackend.setSurface(&m_painter,
+                                        pixelData,
+                                        m_bufferWidth,
+                                        m_bufferHeight,
+                                        m_bufferPitchBytes);
+        }
         return true;
     }
 

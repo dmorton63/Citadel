@@ -26,6 +26,19 @@ namespace QK
                 return false;
             }
 
+            // Coalesce consecutive mouse-move events: keep only the most recent.
+            // This prevents input floods from building large backlogs of stale
+            // cursor positions (which makes hover highlighting appear "behind").
+            if (event.type() == Type::MouseMove && m_count > 0)
+            {
+                const QC::usize lastIdx = (m_tail == 0) ? (MaxEvents - 1) : (m_tail - 1);
+                if (m_events[lastIdx].type() == Type::MouseMove)
+                {
+                    m_events[lastIdx] = event;
+                    return true;
+                }
+            }
+
             // For priority queue, we insert in order
             // Higher priority events are processed first
             if (m_count == 0 || event.priority() <= Priority::Normal)

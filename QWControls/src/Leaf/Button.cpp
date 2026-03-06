@@ -3,6 +3,7 @@
 
 #include "QWControls/Leaf/Button.h"
 #include "QWWindow.h"
+#include "QWWindowManager.h"
 #include "QCLogger.h"
 #include <cstring>
 
@@ -85,6 +86,19 @@ namespace QW
             if (inside && !m_hovered)
             {
                 m_hovered = true;
+                {
+                    auto &wm = QW::WindowManager::instance();
+                    m_hoverEnterMs = wm.lastInputMs();
+                    m_hoverEnterTs = wm.lastInputTimestamp();
+                    m_hasHoverEnter = true;
+
+                    const Rect abs = absoluteBounds();
+                    const char *title = (m_window && m_window->title()) ? m_window->title() : "";
+                    QC_LOG_INFO("QWButton", "Hover enter '%s' window='%s' bounds=%d,%d %ux%u ms=%llu ts=%llu",
+                                m_text, title, abs.x, abs.y, abs.width, abs.height,
+                                static_cast<unsigned long long>(m_hoverEnterMs),
+                                static_cast<unsigned long long>(m_hoverEnterTs));
+                }
                 invalidate();
                 return true;
             }
@@ -109,6 +123,12 @@ namespace QW
                 m_pressX = x;
                 m_pressY = y;
                 m_hasPressPos = true;
+                {
+                    auto &wm = QW::WindowManager::instance();
+                    m_pressDownMs = wm.lastInputMs();
+                    m_pressDownTs = wm.lastInputTimestamp();
+                    m_hasPressDown = true;
+                }
                 invalidate();
                 return true;
             }
@@ -146,9 +166,20 @@ namespace QW
 
                 if ((inside || withinSlop) && m_clickHandler)
                 {
+                    auto &wm = QW::WindowManager::instance();
+                    const QC::u64 nowMs = wm.lastInputMs();
+                    const QC::u64 nowTs = wm.lastInputTimestamp();
+                    const QC::u64 dtHoverMs = (m_hasHoverEnter && nowMs >= m_hoverEnterMs) ? (nowMs - m_hoverEnterMs) : 0;
+                    const QC::u64 dtPressMs = (m_hasPressDown && nowMs >= m_pressDownMs) ? (nowMs - m_pressDownMs) : 0;
+
                     const Rect abs = absoluteBounds();
                     const char *title = (m_window && m_window->title()) ? m_window->title() : "";
-                    QC_LOG_INFO("QWButton", "Click '%s' window='%s' bounds=%d,%d %ux%u", m_text, title, abs.x, abs.y, abs.width, abs.height);
+                    QC_LOG_INFO("QWButton", "Click '%s' window='%s' bounds=%d,%d %ux%u ms=%llu ts=%llu dtHover=%llums dtPress=%llums",
+                                m_text, title, abs.x, abs.y, abs.width, abs.height,
+                                static_cast<unsigned long long>(nowMs),
+                                static_cast<unsigned long long>(nowTs),
+                                static_cast<unsigned long long>(dtHoverMs),
+                                static_cast<unsigned long long>(dtPressMs));
                     m_clickHandler(this, m_clickUserData);
                 }
                 else if (!inside && !withinSlop)

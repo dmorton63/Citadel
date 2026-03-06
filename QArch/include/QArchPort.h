@@ -3,52 +3,48 @@
 // QArch Port I/O - Low-level port access
 // Namespace: QArch
 
-#include "QCTypes.h"
+#include "QCBuiltins.h"
 
 namespace QArch
 {
 
-    // Inline port I/O functions
+    // Port I/O functions
+    // NOTE: These forward to QC::out*/in* in QCBuiltins.h so there is a single
+    // canonical implementation of the inline-asm semantics.
     inline void outb(QC::u16 port, QC::u8 value)
     {
-        asm volatile("outb %0, %1" : : "a"(value), "Nd"(port));
+        QC::outb(port, value);
     }
 
     inline QC::u8 inb(QC::u16 port)
     {
-        QC::u8 value;
-        asm volatile("inb %1, %0" : "=a"(value) : "Nd"(port));
-        return value;
+        return QC::inb(port);
     }
 
     inline void outw(QC::u16 port, QC::u16 value)
     {
-        asm volatile("outw %0, %1" : : "a"(value), "Nd"(port));
+        QC::outw(port, value);
     }
 
     inline QC::u16 inw(QC::u16 port)
     {
-        QC::u16 value;
-        asm volatile("inw %1, %0" : "=a"(value) : "Nd"(port));
-        return value;
+        return QC::inw(port);
     }
 
     inline void outl(QC::u16 port, QC::u32 value)
     {
-        asm volatile("outl %0, %1" : : "a"(value), "Nd"(port));
+        QC::outl(port, value);
     }
 
     inline QC::u32 inl(QC::u16 port)
     {
-        QC::u32 value;
-        asm volatile("inl %1, %0" : "=a"(value) : "Nd"(port));
-        return value;
+        return QC::inl(port);
     }
 
     // I/O wait (for legacy devices)
     inline void io_wait()
     {
-        outb(0x80, 0);
+        QC::outb(static_cast<QC::u16>(0x80), static_cast<QC::u8>(0));
     }
 
     // String I/O

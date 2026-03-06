@@ -20,11 +20,25 @@
 #include "QCJson.h"
 #include "QCString.h"
 
+#include "QKBootLog.h"
+
 namespace
 {
     QKBoot::FLogFn g_Log = nullptr;
+    QKBoot::FLogFn g_LogUpstream = nullptr;
     QKBoot::LimineRequests g_Req{};
     bool g_DesktopPrepared = false;
+
+    static void BootLogFanout(const char *msg)
+    {
+        // Always capture, even if upstream logging is disabled.
+        QK::Boot::Log::Append(msg ? msg : "");
+
+        if (g_LogUpstream)
+        {
+            g_LogUpstream(msg);
+        }
+    }
 
     static constexpr bool kProductionMode =
 #if defined(CITADEL_PRODUCTION) && (CITADEL_PRODUCTION != 0)
@@ -1426,14 +1440,19 @@ namespace
         return true;
     }
 
+    static void SilentLog(const char *)
+    {
+    }
+
     static bool SysConfigSelectActiveTier(QKBoot::FLogFn Log, QC::u64 ModuleRequest[], const QK::Boot::Config::SysConfig &syscfg,
                                           QK::Boot::Config::ConfigTier &outTier, const char *&outRoot)
     {
         outTier = QK::Boot::Config::ConfigTier::Unknown;
         outRoot = "";
 
-        if (!Log)
-            return true;
+        // Stage validation should never spam serial logs; only the final outcome and/or
+        // first-failure fallback reason should be surfaced.
+        const auto StageLog = &SilentLog;
 
         // Clear any previous committed snapshot before selecting a tier.
         QK::Boot::Config::ClearCommittedEarlyConfig();
@@ -1447,7 +1466,7 @@ namespace
             bool prodOk = true;
             char prodReason[192] = {0};
             QK::Boot::Config::StagedEarlyConfig prodStage{};
-            if (!SysConfigEarlyStageForRoot(Log, ModuleRequest, syscfg, "production", syscfg.productionRoot, prodOk, prodReason, sizeof(prodReason),
+            if (!SysConfigEarlyStageForRoot(StageLog, ModuleRequest, syscfg, "production", syscfg.productionRoot, prodOk, prodReason, sizeof(prodReason),
                                             prodStage))
                 return false;
 
@@ -1462,30 +1481,36 @@ namespace
 
             if (haveGoldenRoot)
             {
-                Log("SysConfig: production tier invalid");
-                if (prodReason[0])
+                if (Log)
                 {
-                    Log(": ");
-                    Log(prodReason);
+                    Log("SysConfig: production tier invalid");
+                    if (prodReason[0])
+                    {
+                        Log(": ");
+                        Log(prodReason);
+                    }
+                    Log("; falling back to golden\r\n");
                 }
-                Log("; falling back to golden\r\n");
 
                 bool goldenOk = true;
                 char goldenReason[192] = {0};
                 QK::Boot::Config::StagedEarlyConfig goldenStage{};
-                if (!SysConfigEarlyStageForRoot(Log, ModuleRequest, syscfg, "golden", syscfg.goldenRoot, goldenOk, goldenReason, sizeof(goldenReason),
+                if (!SysConfigEarlyStageForRoot(StageLog, ModuleRequest, syscfg, "golden", syscfg.goldenRoot, goldenOk, goldenReason, sizeof(goldenReason),
                                                 goldenStage))
                     return false;
 
                 if (!goldenOk)
                 {
-                    Log("SysConfig: golden tier invalid");
-                    if (goldenReason[0])
+                    if (Log)
                     {
-                        Log(": ");
-                        Log(goldenReason);
+                        Log("SysConfig: golden tier invalid");
+                        if (goldenReason[0])
+                        {
+                            Log(": ");
+                            Log(goldenReason);
+                        }
+                        Log("\r\n");
                     }
-                    Log("\r\n");
                     if (kProductionMode)
                         return false;
                 }
@@ -1511,19 +1536,22 @@ namespace
             bool goldenOk = true;
             char goldenReason[192] = {0};
             QK::Boot::Config::StagedEarlyConfig goldenStage{};
-            if (!SysConfigEarlyStageForRoot(Log, ModuleRequest, syscfg, "golden", syscfg.goldenRoot, goldenOk, goldenReason, sizeof(goldenReason),
+            if (!SysConfigEarlyStageForRoot(StageLog, ModuleRequest, syscfg, "golden", syscfg.goldenRoot, goldenOk, goldenReason, sizeof(goldenReason),
                                             goldenStage))
                 return false;
 
             if (!goldenOk)
             {
-                Log("SysConfig: golden tier invalid");
-                if (goldenReason[0])
+                if (Log)
                 {
-                    Log(": ");
-                    Log(goldenReason);
+                    Log("SysConfig: golden tier invalid");
+                    if (goldenReason[0])
+                    {
+                        Log(": ");
+                        Log(goldenReason);
+                    }
+                    Log("\r\n");
                 }
-                Log("\r\n");
                 if (kProductionMode)
                     return false;
             }
@@ -1563,7 +1591,8 @@ namespace QKBoot
 {
     void setLogFn(FLogFn log)
     {
-        g_Log = log;
+        g_LogUpstream = log;
+        g_Log = &BootLogFanout;
     }
 
     void setLimineRequests(const LimineRequests &req)

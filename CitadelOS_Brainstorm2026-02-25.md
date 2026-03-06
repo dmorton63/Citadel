@@ -25,6 +25,8 @@ Session: Core System Architecture – Registry, Config, Recovery
 15. [ ] Compatibility registry system (JSON-backed per-app virtual registries) + merge semantics
 16. [ ] Unified sandbox “personality profiles” (Windows/Linux/macOS/Citadel) + app launch flow integration
 17. [x] Apply desktop overrides at runtime (optional `DESKOVR.JSN` merged onto golden desktop)
+18. [x] Boot log capture + `bootlog` terminal command (text ring buffer; viewable during boot + callable from QDTerminal)
+19. [ ] Windowing UX rules: desktop always-bottom + non-focusable; add proper window chrome (Terminal first) with minimize/maximize
 
 ### Implementation readiness (note: checkboxes above are implementation status)
 
@@ -43,6 +45,31 @@ Blocked/partially blocked on “writable persistent storage exists”
 Incremental/parallelizable (core merge logic can land early)
 - #15 JSON layering + merge engine + validation can be implemented before full compat execution
 - #16 Sandbox personality selection + staging/commit config build can be implemented before app shims exist
+
+---
+
+## Desktop windowing UX notes (2026-03-05)
+
+Goal: make desktop clicks not “hide” windows, and align terminal behavior with standard window systems.
+
+### Desktop window rules
+
+Desired semantics (conceptual; maps to WindowRegistry/WindowManager flags):
+- `window->isDesktop = true;`
+- `window->acceptsFocus = false;`
+- `window->zIndex = 0; // always bottom`
+
+Effect: clicking the desktop should NOT reorder the desktop above other windows. It should remain the background surface.
+
+### QDTerminal chrome + minimize/maximize
+
+- Add a top window label bar (title bar) for QDTerminal.
+- Title bar contains: window title + Close + Minimize + Maximize buttons.
+- Maximize: grows window to occupy the entire screen.
+- Minimize: hides window and places a button/icon on the bottom task bar.
+- Restore: clicking the taskbar entry restores the window to its default size or last-known size.
+
+Note: once the desktop is always-bottom/non-focusable, the "Terminal" taskbar button should only be needed for minimized state (not as a permanent duplicate of the sidebar launcher).
 
 ---
 ## Sample sysconfig.json (info only; contents TBD)
@@ -849,3 +876,57 @@ You can see exactly what the app “thinks” its world looks like.
 Citadel uses JSON files to define sandbox personalities for all applications.
 Each sandbox is configured with virtual filesystems, virtual registries, API shims, and environment variables — all defined in JSON and isolated from Citadel’s core systems.
 This allows Citadel to run foreign applications safely, cleanly, and without legacy contamination.
+
+---
+
+## Executable format note
+
+Planned Citadel native executable file extension: `.cpe` (Citadel Program Executable). Format details TBD.
+
+---
+
+## CUI-ML (Citadel UI Markup Language) note
+
+Current state: JSON drives much of Citadel’s runtime configuration, including UI.
+
+Proposal: introduce a Citadel-native markup language for UI layout called **CUI-ML** with extension `.cuiml`.
+
+Sample (concept)
+```xml
+<CUI xmlns="citadel.ui" Title="Help" Width="600" Height="500">
+  <Window>
+    <Column Padding="12" Spacing="8">
+
+      <Text Style="Heading" Value="Citadel Help" />
+
+      <WebView Width="100%" Height="100%">
+        <html>
+          <body>
+            <h1>Welcome to Citadel</h1>
+            <p>This is your system help page.</p>
+            <p>You can embed any HTML content here.</p>
+          </body>
+        </html>
+      </WebView>
+
+    </Column>
+  </Window>
+</CUI>
+```
+
+Design direction: single markup parser, multiple dialects
+- Build one tokenizer + tree builder that can parse both `.cuiml` and `.html` into a markup tree.
+- Treat the file extension as a dialect selector:
+  - `.cuiml` → Citadel UI dialect (CUI-ML)
+  - `.html` → Web dialect (HTML)
+- Semantic interpretation stays separate per dialect (different tag sets, layout rules, event model).
+
+Why this is attractive (high-level)
+- One parser codebase instead of separate HTML + UI parsers.
+- Enables embedded documentation/help content via HTML (e.g., `<WebView>` host).
+- Future-friendly for additional dialects (Markdown/XML/SVG) by reusing the same parsing pipeline.
+
+Key caution: keep semantics isolated
+- Do not allow HTML semantics to leak into CUI-ML.
+- CUI-ML remains Citadel-native: strongly typed components, Citadel layout engine, Citadel bindings/events.
+- HTML remains HTML (DOM/events/CSS are separate concerns; optional/limited support as policy permits).

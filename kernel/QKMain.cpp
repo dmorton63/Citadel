@@ -71,6 +71,14 @@ extern "C" void kernel_main()
     QK::Debug::Serial::Write("\r\n=== CITADEL Kernel ===\r\n");
     QK::Debug::Serial::Write("Serial initialized, kernel starting...\r\n");
 
+    // If Limine's terminal is available, mirror serial output to it as early as possible
+    // so early boot messages (including the kernel console prompt) are visible on-screen.
+    if (QK::Debug::Terminal::InitFromLimineRequest(limine_terminal_request))
+    {
+        QK::Debug::Serial::SetMirror(QK::Debug::Terminal::Write);
+        QK::Debug::Terminal::Write("Boot terminal initialized\r\n");
+    }
+
     // --- Early Boot ---
     QKBoot::setLogFn(QK::Debug::Serial::Write);
     {
@@ -95,12 +103,6 @@ extern "C" void kernel_main()
     QK::Console::initialize(QK::Debug::Serial::Write);
     // Limine already clears BSS for us.
     QK::Debug::Serial::Write("BSS (skipped - Limine does it)\r\n");
-
-    if (QK::Debug::Terminal::InitFromLimineRequest(limine_terminal_request))
-    {
-        QK::Debug::Serial::SetMirror(QK::Debug::Terminal::Write);
-        QK::Debug::Terminal::Write("Boot terminal initialized\r\n");
-    }
 
     QKBoot::initializeDrivers();
 

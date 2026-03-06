@@ -483,7 +483,6 @@ namespace QK::Boot::Desktop
                 //  - periodically on movement (dx/dy != 0)
                 //  - and a slow heartbeat even when idle
                 static QC::u32 s_mouseReportCount = 0;
-                static QC::u32 s_mouseMoveCount = 0;
                 static QC::u8 s_prevButtons = 0;
                 ++s_mouseReportCount;
 
@@ -496,16 +495,11 @@ namespace QK::Boot::Desktop
                 {
                     logThis = true;
                 }
-                else if (moved)
-                {
-                    ++s_mouseMoveCount;
-                    // Log every Nth movement report.
-                    logThis = ((s_mouseMoveCount % 20u) == 0u);
-                }
                 else
                 {
                     // Slow heartbeat so we know input is still flowing.
-                    logThis = ((s_mouseReportCount % 600u) == 0u);
+                    // Avoid logging movement by default; serial I/O here directly impacts UI latency.
+                    logThis = ((s_mouseReportCount % 5000u) == 0u);
                 }
 
                 if (logThis)
@@ -546,7 +540,10 @@ namespace QK::Boot::Desktop
                 // NOTE: For our USB mouse path, the driver already maintains a clamped
                 // absolute cursor position even for relative devices (curX/curY). Windowing
                 // hit-testing relies on x/y being meaningful.
-                eventMgr.postMouseMove(curX, curY, dx, dy);
+                if (moved || buttonsChanged)
+                {
+                    eventMgr.postMouseMove(curX, curY, dx, dy);
+                }
 
                 // Check for button state changes.
                 if (leftBtn && !g_prevLeftBtn)
@@ -676,14 +673,26 @@ namespace QK::Boot::Desktop
             // Also explicitly poll keyboard (debug).
             QKDrv::PS2::Keyboard::instance().poll();
 
-            // Process pending events.
-            QK::Event::EventManager::instance().processEvents();
-
-            // Render only when something invalidated.
+            auto &eventMgr = QK::Event::EventManager::instance();
             auto &wm = QW::WindowManager::instance();
-            if (wm.needsRender())
+
+            // Process a bounded batch, then give rendering a chance.
+            // This keeps pointer hover/press visuals responsive even under
+            // high-frequency mouse reports.
+            for (;;)
             {
-                wm.render();
+                const QC::usize processed = eventMgr.processEvents(128);
+
+                if (wm.needsRender())
+                {
+                    wm.render();
+                }
+
+                // No more immediate work to do; sleep until the next interrupt.
+                if (processed == 0 && !wm.needsRender())
+                {
+                    break;
+                }
             }
 
             // Halt until next interrupt.

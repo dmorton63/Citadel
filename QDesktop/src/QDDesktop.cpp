@@ -685,10 +685,12 @@ namespace QD
         m_screenWidth = screenWidth;
         m_screenHeight = screenHeight;
 
-        // Create fullscreen desktop window via WindowManager (so it gets rendered)
+        // Create fullscreen desktop window via WindowManager.
+        // Keep it hidden until initialization completes to avoid synchronous paints
+        // from control/theme setup invalidations.
         QW::Rect desktopBounds = {0, 0, screenWidth, screenHeight};
         m_desktopWindow = QW::WindowManager::instance().createWindow("Desktop", desktopBounds);
-        m_desktopWindow->setFlags(QW::WindowFlags::Visible); // No border, no title
+        m_desktopWindow->setFlags(0); // No border/title; hidden during init
 
         // Prefer JSON-driven desktop if /desktop.json is present and valid
         if (!tryInitializeFromJson())
@@ -712,6 +714,15 @@ namespace QD
         if (!isOwnerEnrolled())
         {
             showSetupWizard();
+        }
+
+        if (m_desktopWindow)
+        {
+            const QC::u64 t0 = QDrv::Timer::instance().milliseconds();
+            m_desktopWindow->setFlags(QW::WindowFlags::Visible);
+            QW::WindowManager::instance().setFocus(m_desktopWindow);
+            const QC::u64 t1 = QDrv::Timer::instance().milliseconds();
+            QC_LOG_INFO(LOG_MODULE, "Desktop show request dt=%llums\n", static_cast<unsigned long long>(t1 - t0));
         }
 
         m_initialized = true;
@@ -2598,6 +2609,9 @@ namespace QD
         const QC::JSON::Value *layout = nullptr;
         const QC::JSON::Value *controls = nullptr;
         const char *openedPath = nullptr;
+        QC::usize openedBytes = 0;
+        QC::u64 openedIoMs = 0;
+        QC::u64 openedParseMs = 0;
 
         for (QC::usize i = 0; i < jsonPathCount; ++i)
         {
@@ -2605,6 +2619,8 @@ namespace QD
             QFS::File *file = QFS::VFS::instance().open(path, QFS::OpenMode::Read);
             if (!file)
                 continue;
+
+            const QC::u64 tIo0 = QDrv::Timer::instance().milliseconds();
 
             QC::u64 size64 = file->size();
             if (size64 == 0 || size64 > 1024 * 256)
@@ -2619,6 +2635,8 @@ namespace QD
             QC::isize readCount = file->read(jsonText, size);
             QFS::VFS::instance().close(file);
 
+            const QC::u64 tIo1 = QDrv::Timer::instance().milliseconds();
+
             if (readCount <= 0)
             {
                 operator delete[](jsonText);
@@ -2631,7 +2649,10 @@ namespace QD
             jsonText[size] = '\0';
 
             root = QC::JSON::Value{};
+
+            const QC::u64 tParse0 = QDrv::Timer::instance().milliseconds();
             const bool ok = QC::JSON::parse(jsonText, root);
+            const QC::u64 tParse1 = QDrv::Timer::instance().milliseconds();
             operator delete[](jsonText);
 
             if (!ok)
@@ -2656,6 +2677,9 @@ namespace QD
             }
 
             openedPath = path;
+            openedBytes = size;
+            openedIoMs = tIo1 - tIo0;
+            openedParseMs = tParse1 - tParse0;
             break;
         }
 
@@ -2665,7 +2689,11 @@ namespace QD
             return false;
         }
 
-        QC_LOG_INFO(LOG_MODULE, "Loading desktop definition from %s\n", openedPath);
+        QC_LOG_INFO(LOG_MODULE, "Loading desktop definition from %s (bytes=%u io=%llums parse=%llums)\n",
+                openedPath,
+                static_cast<unsigned>(openedBytes),
+                static_cast<unsigned long long>(openedIoMs),
+                static_cast<unsigned long long>(openedParseMs));
 
         // Apply theme first. Background selection is deferred until after optional overrides
         // (e.g. seasonal presets) to avoid decoding a wallpaper that will immediately be replaced.
@@ -3077,6 +3105,8 @@ namespace QD
                                 if (!seasonFile)
                                     continue;
 
+                                const QC::u64 tIo0 = QDrv::Timer::instance().milliseconds();
+
                                 QC::u64 size64 = seasonFile->size();
                                 if (size64 == 0 || size64 > 1024 * 256)
                                 {
@@ -3089,6 +3119,8 @@ namespace QD
                                 QC::isize rc = seasonFile->read(seasonJson, size2);
                                 QFS::VFS::instance().close(seasonFile);
 
+                                const QC::u64 tIo1 = QDrv::Timer::instance().milliseconds();
+
                                 if (rc <= 0)
                                 {
                                     operator delete[](seasonJson);
@@ -3100,7 +3132,9 @@ namespace QD
                                 seasonJson[size2] = '\0';
 
                                 QC::JSON::Value seasonRoot;
+                                const QC::u64 tParse0 = QDrv::Timer::instance().milliseconds();
                                 const bool ok = QC::JSON::parse(seasonJson, seasonRoot);
+                                const QC::u64 tParse1 = QDrv::Timer::instance().milliseconds();
                                 operator delete[](seasonJson);
                                 if (!ok || !seasonRoot.isObject())
                                     continue;
@@ -3134,6 +3168,12 @@ namespace QD
                                 }
 
                                 appliedPath = paths[i];
+
+                                QC_LOG_INFO(LOG_MODULE, "Seasonal preset %s bytes=%u io=%llums parse=%llums\n",
+                                            appliedPath ? appliedPath : "<unknown>",
+                                            static_cast<unsigned>(size2),
+                                            static_cast<unsigned long long>(tIo1 - tIo0),
+                                            static_cast<unsigned long long>(tParse1 - tParse0));
                                 break;
                             }
 
@@ -3795,7 +3835,13 @@ namespace QD
         // Activate this window
         desktop->setActiveTaskbarWindow(windowId);
 
-        // TODO: Tell WindowManager to bring this window to front
+        // Bring the selected window back to the front.
+        QW::Window *window = QW::WindowManager::instance().windowById(windowId);
+        if (window)
+        {
+            window->setVisible(true);
+            QW::WindowManager::instance().bringToFront(window);
+        }
     }
 
 } // namespace QD

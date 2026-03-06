@@ -45,6 +45,12 @@ namespace QW
             int m_pressX = 0;
             int m_pressY = 0;
             bool m_hasPressPos = false;
+            QC::u64 m_hoverEnterMs = 0;
+            QC::u64 m_hoverEnterTs = 0;
+            bool m_hasHoverEnter = false;
+            QC::u64 m_pressDownMs = 0;
+            QC::u64 m_pressDownTs = 0;
+            bool m_hasPressDown = false;
             ButtonRole m_role = ButtonRole::Default;
 
             ButtonClickHandler m_clickHandler = nullptr;

@@ -86,6 +86,11 @@ namespace QW
         void invalidate();
         void invalidateRect(const Rect &rect);
 
+        // Rendering (coalesced): invalidation marks the window dirty; actual painting happens
+        // during WindowManager::render() to avoid doing full repaints inside input handlers.
+        bool needsPaint() const { return m_needsPaint; }
+        void paintIfNeeded();
+
         // event handling
         bool onEvent(const QK::Event::Event &e) override;
 
@@ -118,5 +123,11 @@ namespace QW
 
         MessageHandler m_msgHandler = nullptr;
         void *m_msgUserData = nullptr;
+
+        bool m_needsPaint = true;
+
+        // Union of invalidated regions since last paint (window-local coordinates).
+        Rect m_dirtyRect{0, 0, 0, 0};
+        bool m_hasDirtyRect = false;
     };
 } // namespace QW

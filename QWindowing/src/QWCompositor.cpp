@@ -8,6 +8,7 @@
 #include "QKMemHeap.h"
 #include "QCMemUtil.h"
 #include "QCLogger.h"
+#include "QDrvTimer.h"
 
 #include "QWPresentBackend.h"
 #include "QWFramebufferPresentBackend.h"
@@ -316,7 +317,45 @@ namespace QW
         if (!m_framebuffer || !m_renderer)
             return;
 
+        const QC::u64 composeStartMs = QDrv::Timer::instance().milliseconds();
+
         const bool hasHwCursor = (m_presentBackend && m_presentBackend->hasHardwareCursor());
+
+        // When using a hardware cursor, we can safely redraw only dirty regions.
+        // (Software cursor needs full redraw unless we track/restore background.)
+        bool useDirtyClip = false;
+        Rect dirtyClip{0, 0, 0, 0};
+        if (hasHwCursor && !m_dirtyRegions.empty())
+        {
+            QC::i32 x1 = m_dirtyRegions[0].rect.x;
+            QC::i32 y1 = m_dirtyRegions[0].rect.y;
+            QC::i32 x2 = m_dirtyRegions[0].rect.x + static_cast<QC::i32>(m_dirtyRegions[0].rect.width);
+            QC::i32 y2 = m_dirtyRegions[0].rect.y + static_cast<QC::i32>(m_dirtyRegions[0].rect.height);
+
+            for (QC::usize i = 1; i < m_dirtyRegions.size(); ++i)
+            {
+                const Rect r = m_dirtyRegions[i].rect;
+                const QC::i32 rx2 = r.x + static_cast<QC::i32>(r.width);
+                const QC::i32 ry2 = r.y + static_cast<QC::i32>(r.height);
+                if (r.x < x1)
+                    x1 = r.x;
+                if (r.y < y1)
+                    y1 = r.y;
+                if (rx2 > x2)
+                    x2 = rx2;
+                if (ry2 > y2)
+                    y2 = ry2;
+            }
+
+            if (x2 > x1 && y2 > y1)
+            {
+                dirtyClip = Rect{x1, y1,
+                                 static_cast<QC::u32>(x2 - x1),
+                                 static_cast<QC::u32>(y2 - y1)};
+                m_renderer->setClipRect(dirtyClip);
+                useDirtyClip = true;
+            }
+        }
 
         // If nothing is dirty and we have a hardware cursor, skip recompositing/presenting.
         // Cursor movement is handled via cursor registers, so we don't need framebuffer updates.
@@ -326,8 +365,7 @@ namespace QW
             return;
         }
 
-        // TODO: Get timestamp for performance tracking
-        // m_lastComposeTime = ...
+        // Keep a simple compose duration metric for performance tracking.
 
         // Draw desktop background
         drawDesktop();
@@ -380,6 +418,7 @@ namespace QW
         }
 
         // Present frame
+        const QC::u64 presentStartMs = QDrv::Timer::instance().milliseconds();
         if (m_presentBackend)
         {
             // Present only dirty rectangles when supported.
@@ -413,8 +452,44 @@ namespace QW
             m_framebuffer->swap();
         }
 
+        const QC::u64 composeEndMs = QDrv::Timer::instance().milliseconds();
+        m_lastComposeTime = (composeEndMs >= composeStartMs) ? (composeEndMs - composeStartMs) : 0;
+
+        // Low-noise latency instrumentation: measure time from last input dispatch to this present.
+        // This helps distinguish "event backlog" vs "render/present" lag.
+        {
+            static QC::u64 s_lastLoggedInputTs = 0;
+            auto &wm = WindowManager::instance();
+            const QC::u64 inputTs = wm.lastInputTimestamp();
+            if (inputTs != 0 && inputTs != s_lastLoggedInputTs)
+            {
+                const QC::u64 inputMs = wm.lastInputMs();
+                const QC::u64 sinceInputMs = (composeEndMs >= inputMs) ? (composeEndMs - inputMs) : 0;
+
+                // Only log when latency is noticeable.
+                if (sinceInputMs >= 100)
+                {
+                    const QC::u64 presentMs = (composeEndMs >= presentStartMs) ? (composeEndMs - presentStartMs) : 0;
+                    QC_LOG_INFO("QWLatency",
+                                "Input->Present dt=%lums (compose=%lums present=%lums dirty=%lu) ts=%llu",
+                                static_cast<unsigned long>(sinceInputMs),
+                                static_cast<unsigned long>(m_lastComposeTime),
+                                static_cast<unsigned long>(presentMs),
+                                static_cast<unsigned long>(m_dirtyRegions.size()),
+                                static_cast<unsigned long long>(inputTs));
+                }
+
+                s_lastLoggedInputTs = inputTs;
+            }
+        }
+
         m_frameCount++;
         clearDirtyRegions();
+
+        if (useDirtyClip)
+        {
+            m_renderer->clearClipRect();
+        }
     }
 
     void Compositor::syncHardwareCursorPosition()

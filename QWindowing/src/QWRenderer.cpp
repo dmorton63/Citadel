@@ -289,16 +289,44 @@ namespace QW
         if (!src || !m_buffer)
             return;
 
-        // Clip to screen
-        QC::i32 startX = x < 0 ? -x : 0;
-        QC::i32 startY = y < 0 ? -y : 0;
-        QC::i32 endX = static_cast<QC::i32>(srcWidth);
-        QC::i32 endY = static_cast<QC::i32>(srcHeight);
+        // Clip to renderer clip rect (and screen).
+        const Rect clip = m_hasClipRect ? m_clipRect : Rect{0, 0, m_width, m_height};
 
-        if (x + endX > static_cast<QC::i32>(m_width))
-            endX = static_cast<QC::i32>(m_width) - x;
-        if (y + endY > static_cast<QC::i32>(m_height))
-            endY = static_cast<QC::i32>(m_height) - y;
+        QC::i32 dstX1 = x;
+        QC::i32 dstY1 = y;
+        QC::i32 dstX2 = x + static_cast<QC::i32>(srcWidth);
+        QC::i32 dstY2 = y + static_cast<QC::i32>(srcHeight);
+
+        const QC::i32 clipX1 = clip.x;
+        const QC::i32 clipY1 = clip.y;
+        const QC::i32 clipX2 = clip.x + static_cast<QC::i32>(clip.width);
+        const QC::i32 clipY2 = clip.y + static_cast<QC::i32>(clip.height);
+
+        if (dstX1 < clipX1)
+            dstX1 = clipX1;
+        if (dstY1 < clipY1)
+            dstY1 = clipY1;
+        if (dstX2 > clipX2)
+            dstX2 = clipX2;
+        if (dstY2 > clipY2)
+            dstY2 = clipY2;
+
+        if (dstX1 < 0)
+            dstX1 = 0;
+        if (dstY1 < 0)
+            dstY1 = 0;
+        if (dstX2 > static_cast<QC::i32>(m_width))
+            dstX2 = static_cast<QC::i32>(m_width);
+        if (dstY2 > static_cast<QC::i32>(m_height))
+            dstY2 = static_cast<QC::i32>(m_height);
+
+        if (dstX2 <= dstX1 || dstY2 <= dstY1)
+            return;
+
+        const QC::i32 startX = dstX1 - x;
+        const QC::i32 startY = dstY1 - y;
+        const QC::i32 endX = dstX2 - x;
+        const QC::i32 endY = dstY2 - y;
 
         for (QC::i32 sy = startY; sy < endY; ++sy)
         {
@@ -331,16 +359,44 @@ namespace QW
         if (!src || !m_buffer)
             return;
 
-        // Clip to screen
-        QC::i32 startX = x < 0 ? -x : 0;
-        QC::i32 startY = y < 0 ? -y : 0;
-        QC::i32 endX = static_cast<QC::i32>(srcWidth);
-        QC::i32 endY = static_cast<QC::i32>(srcHeight);
+        // Clip to renderer clip rect (and screen).
+        const Rect clip = m_hasClipRect ? m_clipRect : Rect{0, 0, m_width, m_height};
 
-        if (x + endX > static_cast<QC::i32>(m_width))
-            endX = static_cast<QC::i32>(m_width) - x;
-        if (y + endY > static_cast<QC::i32>(m_height))
-            endY = static_cast<QC::i32>(m_height) - y;
+        QC::i32 dstX1 = x;
+        QC::i32 dstY1 = y;
+        QC::i32 dstX2 = x + static_cast<QC::i32>(srcWidth);
+        QC::i32 dstY2 = y + static_cast<QC::i32>(srcHeight);
+
+        const QC::i32 clipX1 = clip.x;
+        const QC::i32 clipY1 = clip.y;
+        const QC::i32 clipX2 = clip.x + static_cast<QC::i32>(clip.width);
+        const QC::i32 clipY2 = clip.y + static_cast<QC::i32>(clip.height);
+
+        if (dstX1 < clipX1)
+            dstX1 = clipX1;
+        if (dstY1 < clipY1)
+            dstY1 = clipY1;
+        if (dstX2 > clipX2)
+            dstX2 = clipX2;
+        if (dstY2 > clipY2)
+            dstY2 = clipY2;
+
+        if (dstX1 < 0)
+            dstX1 = 0;
+        if (dstY1 < 0)
+            dstY1 = 0;
+        if (dstX2 > static_cast<QC::i32>(m_width))
+            dstX2 = static_cast<QC::i32>(m_width);
+        if (dstY2 > static_cast<QC::i32>(m_height))
+            dstY2 = static_cast<QC::i32>(m_height);
+
+        if (dstX2 <= dstX1 || dstY2 <= dstY1)
+            return;
+
+        const QC::i32 startX = dstX1 - x;
+        const QC::i32 startY = dstY1 - y;
+        const QC::i32 endX = dstX2 - x;
+        const QC::i32 endY = dstY2 - y;
 
         for (QC::i32 sy = startY; sy < endY; ++sy)
         {

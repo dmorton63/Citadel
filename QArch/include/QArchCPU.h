@@ -136,5 +136,5 @@ namespace QArch
 } // namespace QArch
 
 // Low-level spin-wait hint (x86 PAUSE).
-// Implemented in NASM (see QArchPort.asm) with C linkage.
+// Implemented with C linkage (see QArchRelax.cpp).
 extern "C" void cpu_relax();

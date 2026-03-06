@@ -74,6 +74,10 @@ namespace QW
         // Mouse state
         Point mousePosition() const { return m_mousePos; }
 
+        // Input timing (updated on each routed mouse event)
+        QC::u64 lastInputTimestamp() const { return m_lastInputTimestamp; }
+        QC::u64 lastInputMs() const { return m_lastInputMs; }
+
         // Window access for compositor
         QC::usize windowCount() const { return m_windows.size(); }
         Window *windowAtIndex(QC::usize index) { return m_windows[index]; }
@@ -108,12 +112,20 @@ namespace QW
         Compositor *m_compositor;
 
         Point m_mousePos;
+        QC::u64 m_lastInputTimestamp = 0;
+        QC::u64 m_lastInputMs = 0;
         QK::Event::ListenerId m_listenerId;
 
         // Window drag/move state (title bar)
         Window *m_dragWindow;
         Point m_dragOffset;
         Rect m_dragStartBounds;
+
+        // General mouse capture state (controls dragging inside a window)
+        // When any mouse button is down on a window, keep routing subsequent
+        // move/up events to that same window even if the cursor leaves.
+        Window *m_captureWindow = nullptr;
+        QC::u32 m_captureButtonsMask = 0;
 
         QC::u32 m_dispatchDepth = 0;
         QC::Vector<PendingDestroy> m_pendingDestroy;

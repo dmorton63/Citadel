@@ -44,6 +44,7 @@ namespace QW
         class ListView;
         using SelectionChangeHandler = void (*)(ListView *listView, void *userData);
         using ItemDoubleClickHandler = void (*)(ListView *listView, QC::usize index, void *userData);
+        using ScrollOffsetChangeHandler = void (*)(ListView *listView, void *userData);
 
         class ListView : public ControlBase
         {
@@ -83,6 +84,9 @@ namespace QW
             QC::usize scrollOffset() const { return m_scrollOffset; }
             void setScrollOffset(QC::usize offset);
             void ensureVisible(QC::usize index);
+
+            // Called when scrollOffset changes (mouse wheel, ensureVisible, setScrollOffset).
+            void setScrollOffsetChangeHandler(ScrollOffsetChangeHandler handler, void *userData);
 
             // Appearance
             Color textColor() const { return m_textColor; }
@@ -138,6 +142,9 @@ namespace QW
             void *m_selChangeUserData;
             ItemDoubleClickHandler m_dblClickHandler;
             void *m_dblClickUserData;
+
+            ScrollOffsetChangeHandler m_scrollChangeHandler;
+            void *m_scrollChangeUserData;
 
             QC::i32 m_hoverIndex;
         };

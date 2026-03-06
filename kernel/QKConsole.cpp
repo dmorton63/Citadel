@@ -10,6 +10,9 @@
 #include "QCCommandRegistry.h"
 #include "QKCommandCenter.h"
 
+#include "QKBootConfigTier.h"
+#include "QKBootStagedConfig.h"
+
 namespace QK
 {
     namespace Console
@@ -714,6 +717,69 @@ namespace QK
                 print("\r\n");
             }
 
+            void handleTier(int, const char *const *)
+            {
+                print("\r\nActive tier: '");
+                print(QK::Boot::Config::GetActiveConfigTierName());
+                print("' root='");
+                print(QK::Boot::Config::GetActiveConfigTierRoot());
+                print("'\r\n");
+
+                const auto *stage = QK::Boot::Config::GetCommittedEarlyConfig();
+                if (!stage)
+                {
+                    print("Committed early config: (none)\r\n");
+                    return;
+                }
+
+                print("Committed early config: root='");
+                print(stage->root[0] ? stage->root : "(none)");
+                print("' modules=");
+
+                char num[32];
+                QC::String::memset(num, 0, sizeof(num));
+                QC::u64 v = static_cast<QC::u64>(stage->moduleCount);
+                int numIdx = 0;
+                if (v == 0)
+                {
+                    num[numIdx++] = '0';
+                }
+                else
+                {
+                    char tmp[32];
+                    int tmpIdx = 0;
+                    while (v > 0 && tmpIdx < 31)
+                    {
+                        tmp[tmpIdx++] = static_cast<char>('0' + (v % 10));
+                        v /= 10;
+                    }
+                    for (int i = tmpIdx - 1; i >= 0; --i)
+                        num[numIdx++] = tmp[i];
+                }
+                num[numIdx] = '\0';
+                print(num);
+                print("\r\n");
+
+                for (QC::u32 i = 0; i < stage->moduleCount && i < 16; ++i)
+                {
+                    const auto &m = stage->modules[i];
+                    if (m.id[0] == 0)
+                        continue;
+
+                    print("- id='");
+                    print(m.id);
+                    print("' type='");
+                    print(m.type);
+                    print("' required=");
+                    print(m.required ? "true" : "false");
+                    print(" json=");
+                    print(m.hasJson ? "true" : "false");
+                    print(" path='");
+                    print(m.resolvedPath);
+                    print("'\r\n");
+                }
+            }
+
             void registerBuiltIns()
             {
                 addCommandInternal({"ls", handleLs, "List directory contents"});
@@ -723,6 +789,7 @@ namespace QK
                 addCommandInternal({"cd", handleCd, "Change current directory"});
                 addCommandInternal({"cat", handleCat, "Print file contents"});
                 addCommandInternal({"saveterm", handleSaveTerm, "Save console transcript to /shared"});
+                addCommandInternal({"tier", handleTier, "Show active config tier + staged early modules"});
             }
 
             void executeCommand()

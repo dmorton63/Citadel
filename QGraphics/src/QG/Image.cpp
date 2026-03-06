@@ -233,34 +233,48 @@ namespace QG
                     }
                 }
 
+                // Convert to ARGB8888. Hot path: avoid per-pixel QC::Color construction
+                // and avoid per-row vector copies.
+                QC::u32 *dstRow = out.pixels.data() + static_cast<QC::usize>(y) * header.width;
                 const QC::u8 *row = reconCur.data();
-                for (QC::u32 x = 0; x < header.width; ++x)
-                {
-                    QC::u8 r = 0, g = 0, b = 0, a = 255;
-                    switch (static_cast<PNGColorType>(header.colorType))
-                    {
-                    case PNGColorType::Grayscale:
-                        r = g = b = row[x];
-                        break;
-                    case PNGColorType::RGB:
-                        r = row[x * 3 + 0];
-                        g = row[x * 3 + 1];
-                        b = row[x * 3 + 2];
-                        break;
-                    case PNGColorType::RGBA:
-                        r = row[x * 4 + 0];
-                        g = row[x * 4 + 1];
-                        b = row[x * 4 + 2];
-                        a = row[x * 4 + 3];
-                        break;
-                    default:
-                        break;
-                    }
 
-                    out.pixels[y * header.width + x] = QC::Color(r, g, b, a).value;
+                if (header.colorType == static_cast<QC::u8>(PNGColorType::RGBA))
+                {
+                    const QC::u8 *p = row;
+                    for (QC::u32 x = 0; x < header.width; ++x)
+                    {
+                        const QC::u32 r = p[0];
+                        const QC::u32 g = p[1];
+                        const QC::u32 b = p[2];
+                        const QC::u32 a = p[3];
+                        dstRow[x] = (a << 24) | (r << 16) | (g << 8) | b;
+                        p += 4;
+                    }
+                }
+                else if (header.colorType == static_cast<QC::u8>(PNGColorType::RGB))
+                {
+                    const QC::u8 *p = row;
+                    for (QC::u32 x = 0; x < header.width; ++x)
+                    {
+                        const QC::u32 r = p[0];
+                        const QC::u32 g = p[1];
+                        const QC::u32 b = p[2];
+                        dstRow[x] = (255u << 24) | (r << 16) | (g << 8) | b;
+                        p += 3;
+                    }
+                }
+                else // Grayscale
+                {
+                    for (QC::u32 x = 0; x < header.width; ++x)
+                    {
+                        const QC::u32 v = row[x];
+                        dstRow[x] = (255u << 24) | (v << 16) | (v << 8) | v;
+                    }
                 }
 
-                reconPrev = reconCur;
+                // Keep reconPrev as previous row for next scanline filter.
+                // Using memcpy avoids per-element construction overhead in QC::Vector assignment.
+                QC::String::memcpy(reconPrev.data(), reconCur.data(), stride);
             }
 
             return out.isValid();
@@ -337,58 +351,93 @@ namespace QG
             if (!painter)
                 return;
 
+            // Respect clip rect to avoid rescaling/blitting the entire image when only a
+            // small region is dirty (e.g., button hover on a wallpaper-backed desktop).
+            const QC::Point origin = painter->origin();
+            QC::Rect clipLocal = painter->clipRect().offset(-origin.x, -origin.y);
+
+            QC::i32 ix1 = target.x;
+            QC::i32 iy1 = target.y;
+            QC::i32 ix2 = target.x + static_cast<QC::i32>(target.width);
+            QC::i32 iy2 = target.y + static_cast<QC::i32>(target.height);
+            if (!clipLocal.isEmpty())
+            {
+                const QC::i32 cx1 = clipLocal.x;
+                const QC::i32 cy1 = clipLocal.y;
+                const QC::i32 cx2 = clipLocal.x + static_cast<QC::i32>(clipLocal.width);
+                const QC::i32 cy2 = clipLocal.y + static_cast<QC::i32>(clipLocal.height);
+
+                if (ix1 < cx1)
+                    ix1 = cx1;
+                if (iy1 < cy1)
+                    iy1 = cy1;
+                if (ix2 > cx2)
+                    ix2 = cx2;
+                if (iy2 > cy2)
+                    iy2 = cy2;
+            }
+
+            if (ix2 <= ix1 || iy2 <= iy1)
+                return;
+
+            const QC::u32 xStart = static_cast<QC::u32>(ix1 - target.x);
+            const QC::u32 yStart = static_cast<QC::u32>(iy1 - target.y);
+            const QC::u32 outW = static_cast<QC::u32>(ix2 - ix1);
+            const QC::u32 yEnd = static_cast<QC::u32>(iy2 - target.y);
+
             if (target.width == surface.width && target.height == surface.height)
             {
-                painter->blitAlpha(target.x,
-                                   target.y,
-                                   surface.data(),
-                                   surface.width,
-                                   surface.height,
+                painter->blitAlpha(target.x + static_cast<QC::i32>(xStart),
+                                   target.y + static_cast<QC::i32>(yStart),
+                                   surface.data() + (static_cast<QC::usize>(yStart) * surface.width) + xStart,
+                                   outW,
+                                   yEnd - yStart,
                                    surface.width);
                 return;
             }
 
-            scratch.resize(target.width);
+            scratch.resize(outW);
             QC::Vector<QC::u32> srcXMap;
-            srcXMap.resize(target.width);
+            srcXMap.resize(outW);
 
-            for (QC::u32 x = 0; x < target.width; ++x)
+            for (QC::u32 i = 0; i < outW; ++i)
             {
-                srcXMap[x] = (static_cast<QC::u64>(x) * surface.width) / target.width;
+                const QC::u32 destX = xStart + i;
+                srcXMap[i] = (static_cast<QC::u64>(destX) * surface.width) / target.width;
             }
 
             const QC::u32 *source = surface.data();
 
-            for (QC::u32 y = 0; y < target.height; ++y)
+            for (QC::u32 y = yStart; y < yEnd; ++y)
             {
                 QC::u32 srcY = (static_cast<QC::u64>(y) * surface.height) / target.height;
                 const QC::u32 *srcRow = source + srcY * surface.width;
                 bool rowOpaque = true;
-                for (QC::u32 x = 0; x < target.width; ++x)
+                for (QC::u32 i = 0; i < outW; ++i)
                 {
-                    const QC::u32 px = srcRow[srcXMap[x]];
-                    scratch[x] = px;
+                    const QC::u32 px = srcRow[srcXMap[i]];
+                    scratch[i] = px;
                     if (((px >> 24) & 0xFF) != 255)
                         rowOpaque = false;
                 }
 
                 if (rowOpaque)
                 {
-                    painter->blit(target.x,
+                    painter->blit(target.x + static_cast<QC::i32>(xStart),
                                  target.y + static_cast<QC::i32>(y),
                                  scratch.data(),
-                                 target.width,
+                                 outW,
                                  1,
-                                 target.width);
+                                 outW);
                 }
                 else
                 {
-                    painter->blitAlpha(target.x,
+                    painter->blitAlpha(target.x + static_cast<QC::i32>(xStart),
                                        target.y + static_cast<QC::i32>(y),
                                        scratch.data(),
-                                       target.width,
+                                       outW,
                                        1,
-                                       target.width);
+                                       outW);
                 }
             }
         }

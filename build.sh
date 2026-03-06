@@ -519,7 +519,8 @@ if [ "$RUN_QEMU" = true ]; then
 
         SWTPM_DIR="${BUILD_DIR}/swtpm"
         SWTPM_SOCK="${SWTPM_DIR}/swtpm-sock"
-        mkdir -p "${SWTPM_DIR}/state"
+        SWTPM_LOG="${SWTPM_DIR}/swtpm.log"
+        mkdir -p "${SWTPM_DIR}" "${SWTPM_DIR}/state"
         rm -f "${SWTPM_SOCK}"
 
         echo -e "${GREEN}Starting swtpm (TPM2) at ${SWTPM_SOCK}${NC}"
@@ -527,7 +528,7 @@ if [ "$RUN_QEMU" = true ]; then
             --tpmstate dir="${SWTPM_DIR}/state" \
             --ctrl type=unixio,path="${SWTPM_SOCK}" \
             --log level=20 \
-            >/dev/null 2>&1 &
+            >"${SWTPM_LOG}" 2>&1 &
         SWTPM_PID=$!
 
         cleanup_swtpm() {
@@ -538,6 +539,29 @@ if [ "$RUN_QEMU" = true ]; then
             rm -f "${SWTPM_SOCK}" 2>/dev/null || true
         }
         trap cleanup_swtpm EXIT
+
+        # Wait for swtpm to create the socket before launching QEMU.
+        # Without this, QEMU can race and fail with "No such file".
+        SWTPM_READY=false
+        for _ in $(seq 1 100); do
+            if [ -S "${SWTPM_SOCK}" ]; then
+                SWTPM_READY=true
+                break
+            fi
+            if ! kill -0 "${SWTPM_PID}" 2>/dev/null; then
+                echo -e "${RED}swtpm exited before creating its socket.${NC}" >&2
+                echo -e "${RED}See log: ${SWTPM_LOG}${NC}" >&2
+                tail -50 "${SWTPM_LOG}" 2>/dev/null || true
+                exit 1
+            fi
+            sleep 0.05
+        done
+        if [ "${SWTPM_READY}" != "true" ]; then
+            echo -e "${RED}swtpm socket did not appear in time: ${SWTPM_SOCK}${NC}" >&2
+            echo -e "${RED}See log: ${SWTPM_LOG}${NC}" >&2
+            tail -50 "${SWTPM_LOG}" 2>/dev/null || true
+            exit 1
+        fi
 
         TPM_ARGS=(
             -chardev "socket,id=chrtpm,path=${SWTPM_SOCK}"

@@ -169,14 +169,10 @@ namespace QW
                                    event.asMouse().deltaY);
             }
             case QK::Event::Type::MouseButtonDown:
-                setState(ControlState::Pressed);
-                invalidate();
                 return onMouseDown(event.asMouse().x, event.asMouse().y,
                                    event.asMouse().button);
 
             case QK::Event::Type::MouseButtonUp:
-                setState(ControlState::Hovered);
-                invalidate();
                 return onMouseUp(event.asMouse().x, event.asMouse().y,
                                  event.asMouse().button);
 

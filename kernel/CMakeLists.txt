@@ -10,6 +10,7 @@ add_executable(citadel_kernel
     Boot/Config/SysConfig.cpp
     Boot/Config/ActiveConfigTier.cpp
     Boot/Config/StagedConfig.cpp
+    Boot/Config/BootLog.cpp
     Boot/Config/StartupConfig.cpp
     Boot/Config/RamdiskFile.cpp
     Boot/Security/Sha256.cpp

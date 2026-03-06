@@ -14,6 +14,10 @@
 #include "QKEventManager.h"
 #include "QKShutdownController.h"
 
+#include "QKBootConfigTier.h"
+#include "QKBootStagedConfig.h"
+#include "QKBootLog.h"
+
 #include "QNetStack.h"
 #include "QNetIP.h"
 #include "QNetEthernet.h"
@@ -770,6 +774,137 @@ namespace QK::CmdCenter
             return true;
         }
 
+        static bool cmdTier(const char *, const QC::Cmd::Context &ctx, void *)
+        {
+            char line[384];
+            QC::String::memset(line, 0, sizeof(line));
+            (void)appendString(line, sizeof(line), "Active tier: '");
+            (void)appendString(line, sizeof(line), QK::Boot::Config::GetActiveConfigTierName());
+            (void)appendString(line, sizeof(line), "' root='");
+            (void)appendString(line, sizeof(line), QK::Boot::Config::GetActiveConfigTierRoot());
+            (void)appendString(line, sizeof(line), "'");
+            ctx.writeLine(line);
+
+            const auto *stage = QK::Boot::Config::GetCommittedEarlyConfig();
+            if (!stage)
+            {
+                ctx.writeLine("Committed early config: (none)");
+                return true;
+            }
+
+            char header[256];
+            QC::String::memset(header, 0, sizeof(header));
+            (void)appendString(header, sizeof(header), "Committed early config: root='");
+            (void)appendString(header, sizeof(header), stage->root[0] ? stage->root : "(none)");
+            (void)appendString(header, sizeof(header), "' modules=");
+
+            // moduleCount (decimal)
+            char num[32];
+            QC::String::memset(num, 0, sizeof(num));
+            QC::u64 v = static_cast<QC::u64>(stage->moduleCount);
+            int numIdx = 0;
+            if (v == 0)
+            {
+                num[numIdx++] = '0';
+            }
+            else
+            {
+                char tmp[32];
+                int tmpIdx = 0;
+                while (v > 0 && tmpIdx < 31)
+                {
+                    tmp[tmpIdx++] = static_cast<char>('0' + (v % 10));
+                    v /= 10;
+                }
+                for (int i = tmpIdx - 1; i >= 0; --i)
+                    num[numIdx++] = tmp[i];
+            }
+            num[numIdx] = '\0';
+            (void)appendString(header, sizeof(header), num);
+            ctx.writeLine(header);
+
+            for (QC::u32 i = 0; i < stage->moduleCount && i < 16; ++i)
+            {
+                const auto &m = stage->modules[i];
+                if (m.id[0] == 0)
+                    continue;
+
+                char mline[512];
+                QC::String::memset(mline, 0, sizeof(mline));
+                (void)appendString(mline, sizeof(mline), "- id='");
+                (void)appendString(mline, sizeof(mline), m.id);
+                (void)appendString(mline, sizeof(mline), "' type='");
+                (void)appendString(mline, sizeof(mline), m.type);
+                (void)appendString(mline, sizeof(mline), "' required=");
+                (void)appendString(mline, sizeof(mline), m.required ? "true" : "false");
+                (void)appendString(mline, sizeof(mline), " json=");
+                (void)appendString(mline, sizeof(mline), m.hasJson ? "true" : "false");
+                (void)appendString(mline, sizeof(mline), " path='");
+                (void)appendString(mline, sizeof(mline), m.resolvedPath);
+                (void)appendString(mline, sizeof(mline), "'");
+                ctx.writeLine(mline);
+            }
+
+            return true;
+        }
+
+        static bool cmdBootLog(const char *, const QC::Cmd::Context &ctx, void *)
+        {
+            const QC::usize total = QK::Boot::Log::Size();
+            if (total == 0)
+            {
+                ctx.writeLine("bootlog: (empty)");
+                return true;
+            }
+
+            char chunk[256];
+            char line[512];
+            QC::usize lineLen = 0;
+            QC::usize offset = 0;
+
+            while (offset < total)
+            {
+                const QC::usize n = QK::Boot::Log::CopyOut(offset, chunk, sizeof(chunk));
+                if (n == 0)
+                    break;
+                offset += n;
+
+                for (QC::usize i = 0; i < n; ++i)
+                {
+                    const char c = chunk[i];
+                    if (c == '\r')
+                        continue;
+
+                    if (c == '\n')
+                    {
+                        line[lineLen] = '\0';
+                        ctx.writeLine(line);
+                        lineLen = 0;
+                        continue;
+                    }
+
+                    if (lineLen + 1 < sizeof(line))
+                    {
+                        line[lineLen++] = c;
+                    }
+                    else
+                    {
+                        line[lineLen] = '\0';
+                        ctx.writeLine(line);
+                        lineLen = 0;
+                    }
+                }
+            }
+
+            if (lineLen > 0)
+            {
+                line[lineLen] = '\0';
+                ctx.writeLine(line);
+            }
+
+            return true;
+        }
+
     } // namespace
 
     void initSession(Session &session)
@@ -796,6 +931,10 @@ namespace QK::CmdCenter
         (void)reg.registerCommandEx("ls", &cmdLs, nullptr, "List directory contents (ls [path])");
         (void)reg.registerCommandEx("cat", &cmdCat, nullptr, "Print file contents (cat <path>)");
         (void)reg.registerCommandEx("shutdown", &cmdShutdown, nullptr, "Request shutdown");
+
+        // Boot/config helpers.
+        (void)reg.registerCommandEx("tier", &cmdTier, nullptr, "Show active config tier + staged early modules");
+        (void)reg.registerCommandEx("bootlog", &cmdBootLog, nullptr, "Dump captured boot log output");
 
         // Networking helpers (for subsystem testing).
         (void)reg.registerCommandEx("ip", &cmdIp, nullptr, "Show/set IPv4 config (ip | ip set <ip> [mask] [gw])");

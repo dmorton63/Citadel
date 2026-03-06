@@ -18,6 +18,8 @@ namespace QW::Controls
     class TextBox;
     class Panel;
     class Button;
+    class ListView;
+    class ScrollBar;
 }
 
 namespace QD
@@ -50,19 +52,27 @@ namespace QD
         void executeLine(const char *line);
         void listDirectory(const char *path);
 
+        void syncScrollUi();
+        void scrollToTail();
+
+        static void onOutputScrollChanged(QW::Controls::ScrollBar *scrollBar, void *userData);
+        static void onOutputViewScrollChanged(QW::Controls::ListView *listView, void *userData);
+
         Desktop *m_desktop;
 
         QW::Window *m_window;
         QC::u32 m_windowId;
         QW::Controls::Panel *m_root;
-        QW::Controls::Label *m_output;
+        QW::Controls::ListView *m_output;
+        QW::Controls::ScrollBar *m_outputScroll;
         QW::Controls::TextBox *m_input;
 
         QK::Event::ListenerId m_windowListenerId;
 
-        static constexpr QC::usize OUTPUT_CAP = 4096;
-        char m_outputBuf[OUTPUT_CAP];
-        QC::usize m_outputLen;
+        bool m_followTail;
+        bool m_syncingScroll;
+
+        static constexpr QC::usize OUTPUT_MAX_LINES = 2048;
     };
 
 } // namespace QD

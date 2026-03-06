@@ -191,6 +191,15 @@ namespace QW
         if (rect.width == 0 || rect.height == 0)
             return;
 
+        // Respect the painter clip rect (used for dirty-rect repaint).
+        // The rounded-rect implementation below draws directly into the target
+        // pixel buffer, so it must explicitly clip or it can overwrite pixels
+        // outside the dirty region (e.g., wiping button text until a later hover
+        // triggers a repaint).
+        QC::Rect clipped;
+        if (!clipRect(rect, clipped))
+            return;
+
         const QC::u32 maxR = umin(rect.width / 2, rect.height / 2);
         if (radius > maxR)
             radius = maxR;
@@ -208,6 +217,12 @@ namespace QW
             if (y < 0 || y >= static_cast<QC::i32>(m_target.height))
                 return;
 
+            // Clip to the requested draw bounds (includes painter clip rect).
+            const QC::i32 clipTop = clipped.y;
+            const QC::i32 clipBottom = clipped.y + static_cast<QC::i32>(clipped.height);
+            if (y < clipTop || y >= clipBottom)
+                return;
+
             if (x2 < 0 || x1 >= static_cast<QC::i32>(m_target.width))
                 return;
             if (x1 < 0)
@@ -215,6 +230,13 @@ namespace QW
             const QC::i32 maxX = static_cast<QC::i32>(m_target.width) - 1;
             if (x2 > maxX)
                 x2 = maxX;
+
+            const QC::i32 clipLeft = clipped.x;
+            const QC::i32 clipRight = clipped.x + static_cast<QC::i32>(clipped.width);
+            if (x1 < clipLeft)
+                x1 = clipLeft;
+            if (x2 >= clipRight)
+                x2 = clipRight - 1;
             if (x1 > x2)
                 return;
 
@@ -240,8 +262,8 @@ namespace QW
         // Fill
         if (fill.a > 0)
         {
-            const QC::i32 yStart = rect.y;
-            const QC::i32 yEnd = rect.y + static_cast<QC::i32>(rect.height);
+            const QC::i32 yStart = clipped.y;
+            const QC::i32 yEnd = clipped.y + static_cast<QC::i32>(clipped.height);
             for (QC::i32 y = yStart; y < yEnd; ++y)
             {
                 QC::i32 x1 = 0, x2 = -1;
@@ -289,8 +311,14 @@ namespace QW
                 continue;
             }
 
-            const QC::i32 yStart = outer.y;
-            const QC::i32 yEnd = outer.y + static_cast<QC::i32>(outer.height);
+            QC::i32 yStart = outer.y;
+            QC::i32 yEnd = outer.y + static_cast<QC::i32>(outer.height);
+            const QC::i32 clipTop = clipped.y;
+            const QC::i32 clipBottom = clipped.y + static_cast<QC::i32>(clipped.height);
+            if (yStart < clipTop)
+                yStart = clipTop;
+            if (yEnd > clipBottom)
+                yEnd = clipBottom;
             for (QC::i32 y = yStart; y < yEnd; ++y)
             {
                 QC::i32 x1o = 0, x2o = -1;
@@ -362,10 +390,26 @@ namespace QW
         if (!ensureSurface())
             return false;
 
-        QC::i32 x1 = std::max(rect.x, 0);
-        QC::i32 y1 = std::max(rect.y, 0);
-        QC::i32 x2 = std::min(rect.x + static_cast<QC::i32>(rect.width), static_cast<QC::i32>(m_target.width));
-        QC::i32 y2 = std::min(rect.y + static_cast<QC::i32>(rect.height), static_cast<QC::i32>(m_target.height));
+        // Base bounds: surface dimensions.
+        QC::Rect hardClip(0, 0, m_target.width, m_target.height);
+
+        // Also honor the painter's clip rect (used for dirty-rect repaint).
+        // PainterSurface::clipRect() returns full bounds if no clip is active.
+        QC::Rect softClip = hardClip;
+        if (m_surface)
+        {
+            softClip = m_surface->clipRect();
+        }
+
+        const QC::i32 clipX1 = std::max(hardClip.x, softClip.x);
+        const QC::i32 clipY1 = std::max(hardClip.y, softClip.y);
+        const QC::i32 clipX2 = std::min(hardClip.x + static_cast<QC::i32>(hardClip.width), softClip.x + static_cast<QC::i32>(softClip.width));
+        const QC::i32 clipY2 = std::min(hardClip.y + static_cast<QC::i32>(hardClip.height), softClip.y + static_cast<QC::i32>(softClip.height));
+
+        QC::i32 x1 = std::max(rect.x, clipX1);
+        QC::i32 y1 = std::max(rect.y, clipY1);
+        QC::i32 x2 = std::min(rect.x + static_cast<QC::i32>(rect.width), clipX2);
+        QC::i32 y2 = std::min(rect.y + static_cast<QC::i32>(rect.height), clipY2);
 
         if (x2 <= x1 || y2 <= y1)
             return false;

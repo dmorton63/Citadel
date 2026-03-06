@@ -25,6 +25,8 @@ namespace QW
               m_selChangeUserData(nullptr),
               m_dblClickHandler(nullptr),
               m_dblClickUserData(nullptr),
+              m_scrollChangeHandler(nullptr),
+              m_scrollChangeUserData(nullptr),
               m_hoverIndex(-1)
         {
             m_bgColor = Color(255, 255, 255, 255);
@@ -43,6 +45,8 @@ namespace QW
               m_selChangeUserData(nullptr),
               m_dblClickHandler(nullptr),
               m_dblClickUserData(nullptr),
+              m_scrollChangeHandler(nullptr),
+              m_scrollChangeUserData(nullptr),
               m_hoverIndex(-1)
         {
             m_bgColor = Color(255, 255, 255, 255);
@@ -106,6 +110,7 @@ namespace QW
             item.userData = userData;
             item.selected = false;
             m_items.push_back(item);
+            invalidate();
             return m_items.size() - 1;
         }
 
@@ -119,6 +124,19 @@ namespace QW
                     m_items[j] = m_items[j + 1];
                 }
                 m_items.pop_back();
+                invalidate();
+
+                // Clamp scroll offset if needed.
+                const QC::usize visible = visibleItemCount();
+                QC::usize maxOffset = 0;
+                if (m_items.size() > visible)
+                    maxOffset = m_items.size() - visible;
+                if (m_scrollOffset > maxOffset)
+                {
+                    m_scrollOffset = maxOffset;
+                    if (m_scrollChangeHandler)
+                        m_scrollChangeHandler(this, m_scrollChangeUserData);
+                }
             }
         }
 
@@ -126,6 +144,12 @@ namespace QW
         {
             m_items.clear();
             m_scrollOffset = 0;
+            invalidate();
+
+            if (m_scrollChangeHandler)
+            {
+                m_scrollChangeHandler(this, m_scrollChangeUserData);
+            }
         }
 
         const ListViewItem *ListView::item(QC::usize index) const
@@ -143,6 +167,7 @@ namespace QW
             {
                 strncpy(m_items[index].text, text, sizeof(m_items[index].text) - 1);
                 m_items[index].text[sizeof(m_items[index].text) - 1] = '\0';
+                invalidate();
             }
         }
 
@@ -222,9 +247,26 @@ namespace QW
 
         void ListView::setScrollOffset(QC::usize offset)
         {
-            if (offset < m_items.size())
+            // Clamp offset to valid range (0..maxOffset)
+            QC::usize maxOffset = 0;
+            const QC::usize visible = visibleItemCount();
+            if (m_items.size() > visible)
+            {
+                maxOffset = m_items.size() - visible;
+            }
+
+            if (offset > maxOffset)
+                offset = maxOffset;
+
+            if (m_scrollOffset != offset)
             {
                 m_scrollOffset = offset;
+                invalidate();
+
+                if (m_scrollChangeHandler)
+                {
+                    m_scrollChangeHandler(this, m_scrollChangeUserData);
+                }
             }
         }
 
@@ -233,6 +275,7 @@ namespace QW
             if (index >= m_items.size())
                 return;
 
+            const QC::usize before = m_scrollOffset;
             QC::usize visible = visibleItemCount();
             if (index < m_scrollOffset)
             {
@@ -242,6 +285,21 @@ namespace QW
             {
                 m_scrollOffset = index - visible + 1;
             }
+
+            if (m_scrollOffset != before)
+            {
+                invalidate();
+                if (m_scrollChangeHandler)
+                {
+                    m_scrollChangeHandler(this, m_scrollChangeUserData);
+                }
+            }
+        }
+
+        void ListView::setScrollOffsetChangeHandler(ScrollOffsetChangeHandler handler, void *userData)
+        {
+            m_scrollChangeHandler = handler;
+            m_scrollChangeUserData = userData;
         }
 
         void ListView::setSelectionChangeHandler(SelectionChangeHandler handler, void *userData)
@@ -363,12 +421,22 @@ namespace QW
             {
                 m_scrollOffset--;
                 invalidate();
+
+                if (m_scrollChangeHandler)
+                {
+                    m_scrollChangeHandler(this, m_scrollChangeUserData);
+                }
                 return true;
             }
             else if (delta < 0 && m_scrollOffset + visibleItemCount() < m_items.size())
             {
                 m_scrollOffset++;
                 invalidate();
+
+                if (m_scrollChangeHandler)
+                {
+                    m_scrollChangeHandler(this, m_scrollChangeUserData);
+                }
                 return true;
             }
             return false;
