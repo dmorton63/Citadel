@@ -8,6 +8,14 @@ A modular x86-64 kernel with unified naming conventions, built with the Limine b
 
 The screenshot above reflects the current desktop shell with the latest console-first flow.
 
+## Screenshots
+
+![Citadel Setup](docs/screenshots/CitadelSetup.png)
+
+![Citadel Terminal](docs/screenshots/CitadelTerminal.png)
+
+![Citadel Shutdown](docs/screenshots/CitadelShutDown.png)
+
 ## Project Structure
 
 ```
