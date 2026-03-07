@@ -690,7 +690,9 @@ namespace QD
         // from control/theme setup invalidations.
         QW::Rect desktopBounds = {0, 0, screenWidth, screenHeight};
         m_desktopWindow = QW::WindowManager::instance().createWindow("Desktop", desktopBounds);
-        m_desktopWindow->setFlags(0); // No border/title; hidden during init
+        // Desktop is a background surface: never takes focus and is pinned to the bottom.
+        // Keep it hidden until initialization completes.
+        m_desktopWindow->setFlags(QW::WindowFlags::AlwaysBottom | QW::WindowFlags::NoFocus);
 
         // Prefer JSON-driven desktop if /desktop.json is present and valid
         if (!tryInitializeFromJson())
@@ -719,8 +721,8 @@ namespace QD
         if (m_desktopWindow)
         {
             const QC::u64 t0 = QDrv::Timer::instance().milliseconds();
-            m_desktopWindow->setFlags(QW::WindowFlags::Visible);
-            QW::WindowManager::instance().setFocus(m_desktopWindow);
+            m_desktopWindow->setFlags(QW::WindowFlags::Visible | QW::WindowFlags::AlwaysBottom | QW::WindowFlags::NoFocus);
+            QW::WindowManager::instance().sendToBack(m_desktopWindow);
             const QC::u64 t1 = QDrv::Timer::instance().milliseconds();
             QC_LOG_INFO(LOG_MODULE, "Desktop show request dt=%llums\n", static_cast<unsigned long long>(t1 - t0));
         }

@@ -41,6 +41,12 @@ namespace QW
         constexpr QC::u32 HasMinimize = 0x0040;
         constexpr QC::u32 HasMaximize = 0x0080;
 
+        // Special behavior flags
+        // - NoFocus: window never becomes the focused window (desktop background, overlays).
+        // - AlwaysBottom: window is pinned to the bottom of z-order and cannot be raised.
+        constexpr QC::u32 NoFocus = 0x0100;
+        constexpr QC::u32 AlwaysBottom = 0x0200;
+
         constexpr QC::u32 Default = Visible | Resizable | Movable |
                                     HasTitle | HasBorder | HasClose |
                                     HasMinimize | HasMaximize;

@@ -359,11 +359,34 @@ namespace QD
 
         m_root = m_window->root();
         m_root->setBorderStyle(QW::Controls::BorderStyle::None);
-        m_root->setPadding(8);
+        m_root->setPadding(0);
 
-        // Output view + scrollbar
+        static constexpr QC::i32 kTitleBarHeight = 24;
+        static constexpr QC::i32 kPad = 8;
+        static constexpr QC::u32 kInputHeight = 20;
+
+        // Title bar (dedicated region for window dragging)
+        {
+            QC::Rect titleBounds = {0, 0, w, static_cast<QC::u32>(kTitleBarHeight)};
+            auto *titleBar = new QW::Controls::Panel(m_window, titleBounds);
+            titleBar->setBorderStyle(QW::Controls::BorderStyle::None);
+            titleBar->setBackgroundColor(QW::Color(20, 20, 20, 255));
+            m_root->addChild(titleBar);
+
+            QC::Rect titleLabelBounds = {kPad, 4, static_cast<QC::u32>(w > 64 ? (w - 64) : w), 16};
+            auto *titleLabel = new QW::Controls::Label(m_window, "Terminal", titleLabelBounds);
+            titleLabel->setTextColor(QW::Color(230, 230, 230, 255));
+            titleBar->addChild(titleLabel);
+        }
+
+        // Output view + scrollbar (below title bar)
         const QC::u32 scrollW = 14;
-        QC::Rect outBounds = {8, 8, static_cast<QC::u32>(w - 16 - scrollW - 4), static_cast<QC::u32>(h - 16 - 28)};
+        const QC::i32 inputY = static_cast<QC::i32>(h) - kPad - static_cast<QC::i32>(kInputHeight);
+        const QC::i32 outY = kTitleBarHeight + kPad;
+        const QC::i32 outH = (inputY - kPad) - outY;
+        QC::Rect outBounds = {kPad, outY,
+                              static_cast<QC::u32>(w - static_cast<QC::u32>(kPad * 2) - scrollW - 4),
+                              static_cast<QC::u32>(outH > 0 ? outH : 0)};
         QC::Rect scrollBounds = {static_cast<QC::i32>(outBounds.x + static_cast<QC::i32>(outBounds.width) + 4), outBounds.y, scrollW, outBounds.height};
 
         m_output = new QW::Controls::ListView(m_window, outBounds);
@@ -390,7 +413,7 @@ namespace QD
         scrollToTail();
 
         // Input textbox
-        QC::Rect inBounds = {8, static_cast<QC::i32>(h - 8 - 20), static_cast<QC::u32>(w - 16), 20};
+        QC::Rect inBounds = {kPad, inputY, static_cast<QC::u32>(w - static_cast<QC::u32>(kPad * 2)), kInputHeight};
         m_input = new QW::Controls::TextBox(m_window, inBounds);
         m_input->setPlaceholder("command...");
         m_input->setBackgroundColor(QW::Color(20, 20, 20, 255));
@@ -401,7 +424,7 @@ namespace QD
         m_root->addChild(m_input);
 
         // Close button in the upper-right corner
-        QC::Rect closeBounds = {static_cast<QC::i32>(w - 28), 8, 20, 20};
+        QC::Rect closeBounds = {static_cast<QC::i32>(w - kPad - 20), 2, 20, 20};
         auto *closeButton = new QW::Controls::Button(m_window, "X", closeBounds);
         closeButton->setRole(QW::ButtonRole::Destructive);
         closeButton->setClickHandler(&Terminal::onCloseClick, this);

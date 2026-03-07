@@ -290,6 +290,11 @@ namespace QW
 
     void WindowManager::setFocus(Window *window)
     {
+        if (window && (window->flags() & WindowFlags::NoFocus) != 0)
+        {
+            window = nullptr;
+        }
+
         if (m_focusedWindow == window)
             return;
 
@@ -312,6 +317,10 @@ namespace QW
     void WindowManager::bringToFront(Window *window)
     {
         if (!window)
+            return;
+
+        // Desktop/background surfaces are pinned to the bottom.
+        if ((window->flags() & WindowFlags::AlwaysBottom) != 0)
             return;
 
         for (QC::usize i = 0; i < m_windows.size(); ++i)
@@ -338,20 +347,52 @@ namespace QW
         if (!window)
             return;
 
+        // Find current index.
+        QC::usize fromIndex = m_windows.size();
         for (QC::usize i = 0; i < m_windows.size(); ++i)
         {
             if (m_windows[i] == window)
             {
-                // Move to beginning (bottom of z-order)
-                // Shift elements right to make room at front
-                for (QC::usize j = i; j > 0; --j)
-                {
-                    m_windows[j] = m_windows[j - 1];
-                }
-                m_windows[0] = window;
+                fromIndex = i;
                 break;
             }
         }
+        if (fromIndex == m_windows.size())
+            return;
+
+        // Compute target index.
+        QC::usize toIndex = 0;
+        if ((window->flags() & WindowFlags::AlwaysBottom) == 0)
+        {
+            // Non-bottom windows may not move below any AlwaysBottom windows.
+            // Place them just above the AlwaysBottom segment.
+            while (toIndex < m_windows.size())
+            {
+                Window *w = m_windows[toIndex];
+                if (!w || (w->flags() & WindowFlags::AlwaysBottom) == 0)
+                    break;
+                ++toIndex;
+            }
+        }
+        // else: AlwaysBottom windows go to true bottom (index 0).
+
+        if (fromIndex == toIndex)
+            return;
+
+        // Remove window from current position.
+        for (QC::usize j = fromIndex; j + 1 < m_windows.size(); ++j)
+            m_windows[j] = m_windows[j + 1];
+        m_windows.pop_back();
+
+        // If we removed an element before the insertion point, adjust.
+        if (fromIndex < toIndex)
+            --toIndex;
+
+        // Insert window at target index.
+        m_windows.push_back(window);
+        for (QC::usize j = m_windows.size() - 1; j > toIndex; --j)
+            m_windows[j] = m_windows[j - 1];
+        m_windows[toIndex] = window;
 
         invalidate(window->bounds());
     }
@@ -519,7 +560,16 @@ namespace QW
             // For mouse down, focus the window
             if (mouse.type == Type::MouseButtonDown)
             {
-                bringToFront(targetWindow);
+                if ((targetWindow->flags() & WindowFlags::AlwaysBottom) != 0)
+                {
+                    // Clicking the desktop/background should not raise it.
+                    // Desktop itself is not focusable, and we also avoid
+                    // changing focus away from the active window.
+                }
+                else
+                {
+                    bringToFront(targetWindow);
+                }
 
                 // Title-bar drag for movable windows.
                 // NOTE: The compositor chrome is currently minimal, so we treat the
