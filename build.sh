@@ -42,6 +42,7 @@ PRODUCTION=false
 JOBS=$(nproc 2>/dev/null || echo 4)
 RUN_FOR_SECONDS=0
 HEADLESS=false
+AUTO_GRAB=true
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -65,6 +66,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --headless)
             HEADLESS=true
+            shift
+            ;;
+        --no-grab|--nograb)
+            AUTO_GRAB=false
             shift
             ;;
         -f|--fullscreen)
@@ -101,6 +106,7 @@ while [[ $# -gt 0 ]]; do
             echo "  -r, --run       Run in QEMU after building"
             echo "  --run-for <s>   Run QEMU, auto-stop after <s> seconds (best for scripted/CI runs)"
             echo "  --headless      Run QEMU without a GUI window (serial still logs to build/serial.log)"
+            echo "  --no-grab       Disable QEMU grab-on-hover (by default we try to avoid first-click focus loss)"
             echo "  -f, --fullscreen Start QEMU fullscreen"
             echo "  --tpm           Enable TPM2 emulation (requires swtpm)"
             echo "  --tablet        Use absolute USB tablet in QEMU (default)"
@@ -464,6 +470,19 @@ for f in limine-bios-cd.bin limine-bios.sys limine-uefi-cd.bin; do
     fi
 done
 
+# UEFI removable media path. Some firmware/tools expect BOOTX64.EFI to exist in the ISO filesystem
+# in addition to (or instead of) an El Torito EFI boot image.
+mkdir -p "${ISO_DIR}/EFI/BOOT"
+if [ ! -f "${ISO_DIR}/EFI/BOOT/BOOTX64.EFI" ]; then
+    if [ -f "${LIMINE_DIR}/BOOTX64.EFI" ]; then
+        cp "${LIMINE_DIR}/BOOTX64.EFI" "${ISO_DIR}/EFI/BOOT/BOOTX64.EFI"
+    else
+        echo -e "${RED}Missing Limine UEFI boot file: BOOTX64.EFI${NC}"
+        echo -e "${RED}Hint: run 'git submodule update --init --recursive' to populate limine.${NC}"
+        exit 1
+    fi
+fi
+
 # Check for xorriso
 if ! command -v xorriso &> /dev/null; then
     echo -e "${RED}xorriso not found! Install with: sudo apt install xorriso${NC}"
@@ -475,7 +494,11 @@ xorriso -as mkisofs \
     -no-emul-boot \
     -boot-load-size 4 \
     -boot-info-table \
+    -eltorito-alt-boot \
+    -e boot/limine/limine-uefi-cd.bin \
+    -no-emul-boot \
     --protective-msdos-label \
+    -isohybrid-gpt-basdat \
     "${ISO_DIR}" \
     -o "${ISO_FILE}" \
     2>&1 | grep -v "^xorriso" || true
@@ -582,7 +605,7 @@ if [ "$RUN_QEMU" = true ]; then
     # This avoids QEMU relative-mouse grab artifacts and improves 1:1 UI hit-testing.
     INPUT_DEVICE=( -device usb-tablet,bus=xhci.0 )
     if [ "$USE_TABLET" = false ]; then
-        INPUT_DEVICE=( -device usb-mouse,bus=xhci.0 )
+        INPUT_DEVICE=( -device usb-mouse,bus=xhci.0  -device usb-kbd,bus=xhci.0 )
     fi
 
     QEMU_ARGS=(
@@ -615,6 +638,25 @@ if [ "$RUN_QEMU" = true ]; then
         QEMU_BIN="/usr/local/bin/qemu-system-x86_64"
     fi
     echo -e "${CYAN}Using QEMU: ${QEMU_BIN}${NC}"
+
+    # Best-effort: avoid the common "first click focuses QEMU but doesn't reach the guest" behavior
+    # on some host window managers by grabbing input when the mouse enters the QEMU window.
+    # Only add this when QEMU reports both a supported display backend AND that the backend
+    # supports the specific suboption (QEMU builds vary).
+    if [ "$HEADLESS" = false ] && [ "$AUTO_GRAB" = true ]; then
+        DISPLAY_HELP="$(${QEMU_BIN} -display help 2>/dev/null || true)"
+        HELP_TEXT="$(${QEMU_BIN} -help 2>/dev/null || true)"
+
+        if echo "${DISPLAY_HELP}" | grep -q "gtk"; then
+            if echo "${HELP_TEXT}" | grep -i "^-display gtk" | grep -q "grab-on-hover"; then
+                QEMU_ARGS+=( -display gtk,grab-on-hover=on )
+            fi
+        elif echo "${DISPLAY_HELP}" | grep -q "sdl"; then
+            if echo "${HELP_TEXT}" | grep -i "^-display sdl" | grep -q "grab-on-hover"; then
+                QEMU_ARGS+=( -display sdl,grab-on-hover=on )
+            fi
+        fi
+    fi
 
     #QEMU_CMD = "qemu-system-x86_64 "${QEMU_ARGS[@]}" "${TPM_ARGS[@]}" ${SHARED_ARGS[@]}  
     echo "${QEMU_BIN} ${QEMU_ARGS[@]} ${TPM_ARGS[@]} ${SHARED_ARGS[@]}"

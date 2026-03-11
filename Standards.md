@@ -15,6 +15,19 @@
 - Implementation: `Q<Module><Class>.cpp`
 - Example: `QKDrvPS2Mouse.h`, `QKDrvPS2Mouse.cpp`
 
+### Directories
+- Use `PascalCase` for directory names.
+- Use `ALLCAPS` for common initialisms/acronyms.
+	- Examples: `ACPI`, `TPM`, `UI`, `PCI`.
+- Avoid mixed conventions in the same layer (e.g., don’t mix `Acpi` and `ACPI`).
+
+### Kernel Source Layout
+- The `kernel/` executable target should follow the same naming rules as the libraries where practical.
+- Kernel C/C++ source files should generally use the `QK*` prefix (matching the `QK` namespace/module) unless the file is a bootloader/linker artifact.
+	- OK exceptions: `linker.ld`, `limine_boot.h`, early boot `.asm` stubs.
+- Boot subdirectories under `kernel/Boot/` must follow the directory rules above.
+	- Examples (target convention): `kernel/Boot/ACPI/`, `kernel/Boot/TPM/`.
+
 ### Namespaces
 ```cpp
 namespace QC { }       // Common

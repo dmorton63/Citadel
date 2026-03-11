@@ -1,12 +1,14 @@
 add_library(QNetwork STATIC
-    src/QNetStack.cpp
-    src/QNetEthernet.cpp
-    src/QNetIP.cpp
-    src/QNetTCP.cpp
-    src/QNetUDP.cpp
-    src/QNetSocket.cpp
+    Src/QNetStack.cpp
+    Src/QNetEthernet.cpp
+    Src/QNetIP.cpp
+    Src/QNetTCP.cpp
+    Src/QNetUDP.cpp
+    Src/QNetDNS.cpp
+    Src/QNetDHCP.cpp
+    Src/QNetSocket.cpp
 )
 
-target_include_directories(QNetwork PUBLIC include)
+target_include_directories(QNetwork PUBLIC Include)
 target_link_libraries(QNetwork PUBLIC QCommon QKMemory)
 target_compile_options(QNetwork PRIVATE ${KERNEL_COMPILE_FLAGS})

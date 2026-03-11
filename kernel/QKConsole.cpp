@@ -58,6 +58,10 @@ namespace QK
             QC::usize g_transcriptLen = 0;
             bool g_transcriptTruncated = false;
 
+            QC::usize g_savetermLastSavedLen = 0;
+            bool g_savetermHasBaseline = false;
+            char g_savetermLastPath[256];
+
             bool g_inputEnabled = true;
 
             void appendTranscript(const char *msg)
@@ -622,12 +626,27 @@ namespace QK
                     return;
                 }
 
-                const char *arg = (argc >= 2) ? argv[1] : nullptr;
+                bool appendMode = false;
+                const char *arg = nullptr;
+
+                if (argc >= 2 && streqIgnoreCase(argv[1], "append"))
+                {
+                    appendMode = true;
+                    arg = (argc >= 3) ? argv[2] : nullptr;
+                }
+                else
+                {
+                    arg = (argc >= 2) ? argv[1] : nullptr;
+                }
 
                 char path[256];
                 QC::String::memset(path, 0, sizeof(path));
 
-                if (!arg || !*arg)
+                if ((!arg || !*arg) && appendMode && g_savetermHasBaseline && g_savetermLastPath[0])
+                {
+                    QC::String::strncpy(path, g_savetermLastPath, sizeof(path) - 1);
+                }
+                else if (!arg || !*arg)
                 {
                     QC::String::strncpy(path, "/shared/citadel.txt", sizeof(path) - 1);
                 }
@@ -666,7 +685,11 @@ namespace QK
                     }
                 }
 
-                QFS::File *file = QFS::VFS::instance().open(path, QFS::OpenMode::Write | QFS::OpenMode::Create | QFS::OpenMode::Truncate);
+                QFS::OpenMode mode = QFS::OpenMode::Write | QFS::OpenMode::Create;
+                if (!appendMode)
+                    mode = mode | QFS::OpenMode::Truncate;
+
+                QFS::File *file = QFS::VFS::instance().open(path, mode);
                 if (!file)
                 {
                     print("saveterm: cannot open output file: ");
@@ -675,16 +698,29 @@ namespace QK
                     return;
                 }
 
-                if (g_transcriptTruncated)
+                if (appendMode)
+                {
+                    (void)file->seek(0, QFS::SeekOrigin::End);
+                }
+
+                if (!appendMode && g_transcriptTruncated)
                 {
                     const char *hdr = "[transcript truncated]\r\n";
                     (void)file->write(hdr, QC::String::strlen(hdr));
                 }
 
-                QC::isize wrote = 0;
-                if (g_transcriptLen > 0)
+                QC::usize start = 0;
+                if (appendMode && g_savetermHasBaseline && QC::String::strcmp(path, g_savetermLastPath) == 0)
                 {
-                    wrote = file->write(g_transcript, g_transcriptLen);
+                    start = g_savetermLastSavedLen;
+                    if (start > g_transcriptLen)
+                        start = 0;
+                }
+
+                QC::isize wrote = 0;
+                if (g_transcriptLen > start)
+                {
+                    wrote = file->write(g_transcript + start, g_transcriptLen - start);
                 }
 
                 QFS::VFS::instance().close(file);
@@ -715,6 +751,12 @@ namespace QK
                 print(" bytes to ");
                 print(path);
                 print("\r\n");
+
+                // Skip the status output we just printed.
+                g_savetermLastSavedLen = g_transcriptLen;
+                g_savetermHasBaseline = true;
+                QC::String::memset(g_savetermLastPath, 0, sizeof(g_savetermLastPath));
+                QC::String::strncpy(g_savetermLastPath, path, sizeof(g_savetermLastPath) - 1);
             }
 
             void handleTier(int, const char *const *)
@@ -824,6 +866,7 @@ namespace QK
                             print(text);
                         print("\r\n");
                     };
+                    ctx.callerAccess = QC::Cmd::AccessLevel::System;
                     const bool handled = QC::Cmd::Registry::instance().execute(original, ctx);
                     if (!handled)
                         print("\r\nUnknown command\r\n");
@@ -846,6 +889,9 @@ namespace QK
             QC::String::memset(g_transcript, 0, sizeof(g_transcript));
             g_transcriptLen = 0;
             g_transcriptTruncated = false;
+            g_savetermLastSavedLen = 0;
+            g_savetermHasBaseline = false;
+            QC::String::memset(g_savetermLastPath, 0, sizeof(g_savetermLastPath));
             g_inputEnabled = true;
             print("\r\nCITADEL console ready\r\n");
             printPrompt();

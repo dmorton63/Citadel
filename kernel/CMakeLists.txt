@@ -1,31 +1,32 @@
-add_subdirectory(drivers)
+add_subdirectory(Drivers)
 
 add_executable(citadel_kernel
     QKMain.cpp
     QKConsole.cpp
     Boot/QKBoot.cpp
-    Boot/Arch/ArchInit.cpp
-    Boot/Acpi/AcpiTables.cpp
-    Boot/Config/BootJson.cpp
-    Boot/Config/SysConfig.cpp
-    Boot/Config/ActiveConfigTier.cpp
-    Boot/Config/StagedConfig.cpp
-    Boot/Config/BootLog.cpp
-    Boot/Config/StartupConfig.cpp
-    Boot/Config/RamdiskFile.cpp
-    Boot/Security/Sha256.cpp
-    Boot/Security/BootJsonSigKey.cpp
-    Boot/Security/BootJsonSignature.cpp
-    Boot/Ramdisk/RamdiskMount.cpp
-    Boot/Desktop/DesktopSession.cpp
-    Boot/Memory/AddressMapping.cpp
-    Boot/Memory/EarlyMemory.cpp
-    Boot/Tpm/TpmSecureStore.cpp
-    Boot/Limine/LimineRequests.cpp
-    Boot/Limine/LimineModules.cpp
-    Debug/Serial/SerialDebug.cpp
-    Debug/Panic.cpp
-    Debug/Terminal/LimineTerminal.cpp
+    Boot/Arch/QKBootArchInit.cpp
+    Boot/ACPI/QKBootACPITables.cpp
+    Boot/Config/QKBootJson.cpp
+    Boot/Config/QKBootSysConfig.cpp
+    Boot/Config/QKBootConfigTier.cpp
+    Boot/Config/QKBootStagedConfig.cpp
+    Boot/Config/QKBootLog.cpp
+    Boot/Config/QKBootEventLog.cpp
+    Boot/Config/QKBootStartupConfig.cpp
+    Boot/Config/QKBootRamdiskFile.cpp
+    Boot/Security/QKBootSha256.cpp
+    Boot/Security/QKBootJsonSigKey.cpp
+    Boot/Security/QKBootJsonSignature.cpp
+    Boot/Ramdisk/QKBootRamdiskMount.cpp
+    Boot/Desktop/QKBootDesktopSession.cpp
+    Boot/Memory/QKBootAddressMapping.cpp
+    Boot/Memory/QKBootEarlyMemory.cpp
+    Boot/TPM/QKBootTPMSecureStore.cpp
+    Boot/Limine/QKBootLimineRequests.cpp
+    Boot/Limine/QKBootLimineModules.cpp
+    Debug/Serial/QKDebugSerial.cpp
+    Debug/QKDebugPanic.cpp
+    Debug/Terminal/QKDebugLimineTerminal.cpp
 )
 
 # Add assembly with custom compile flags

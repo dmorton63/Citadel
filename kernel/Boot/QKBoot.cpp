@@ -1,26 +1,28 @@
 #include "Boot/QKBoot.h"
 
-#include "Boot/Limine/LimineRequests.h"
-#include "Boot/Memory/AddressMapping.h"
-#include "Boot/Memory/EarlyMemory.h"
+#include "Boot/Limine/QKBootLimineRequests.h"
+#include "Boot/Memory/QKBootAddressMapping.h"
+#include "Boot/Memory/QKBootEarlyMemory.h"
 
-#include "Boot/Config/BootJson.h"
-#include "Boot/Config/RamdiskFile.h"
-#include "Boot/Config/SysConfig.h"
+#include "Boot/Config/QKBootJson.h"
+#include "Boot/Config/QKBootRamdiskFile.h"
+#include "Boot/Config/QKBootSysConfig.h"
 #include "QKBootConfigTier.h"
 #include "QKBootStagedConfig.h"
 
-#include "Boot/Security/BootJsonSignature.h"
+#include "Boot/Security/QKBootJsonSignature.h"
 
-#include "Boot/Acpi/AcpiTables.h"
-#include "Boot/Arch/ArchInit.h"
-#include "Boot/Desktop/DesktopSession.h"
-#include "Boot/Tpm/TpmSecureStore.h"
+#include "Boot/ACPI/QKBootACPITables.h"
+#include "Boot/Arch/QKBootArchInit.h"
+#include "Boot/Desktop/QKBootDesktopSession.h"
+#include "Boot/TPM/QKBootTPMSecureStore.h"
 
 #include "QCJson.h"
 #include "QCString.h"
 
 #include "QKBootLog.h"
+#include "QKBootEventLog.h"
+#include "QKRuntimeRegistries.h"
 
 namespace
 {
@@ -1460,6 +1462,9 @@ namespace
         const bool haveProdRoot = syscfg.productionRoot[0] != 0;
         const bool haveGoldenRoot = syscfg.goldenRoot[0] != 0;
 
+        QK::Boot::Events::Emit("sysconfig", "select_begin", haveProdRoot ? (haveGoldenRoot ? "have_production=1 have_golden=1" : "have_production=1 have_golden=0")
+                                           : (haveGoldenRoot ? "have_production=0 have_golden=1" : "have_production=0 have_golden=0"));
+
         // Default to production if configured; otherwise golden if configured.
         if (haveProdRoot)
         {
@@ -1476,7 +1481,24 @@ namespace
                 outRoot = syscfg.productionRoot;
                 prodStage.tier = QK::Boot::Config::ConfigTier::Production;
                 QK::Boot::Config::CommitEarlyConfig(static_cast<QK::Boot::Config::StagedEarlyConfig &&>(prodStage));
+
+                QK::Boot::Events::Emit("sysconfig", "select_ok", "active_tier=production");
                 return true;
+            }
+
+            if (prodReason[0])
+            {
+                char details[192];
+                QC::String::memset(details, 0, sizeof(details));
+                QC::String::strncpy(details, "reason=", sizeof(details) - 1);
+                const QC::usize cur = static_cast<QC::usize>(QC::String::strlen(details));
+                if (cur < sizeof(details) - 1)
+                    QC::String::strncpy(details + cur, prodReason, sizeof(details) - 1 - cur);
+                QK::Boot::Events::Emit("sysconfig", "production_invalid", details);
+            }
+            else
+            {
+                QK::Boot::Events::Emit("sysconfig", "production_invalid", "");
             }
 
             if (haveGoldenRoot)
@@ -1522,12 +1544,36 @@ namespace
                     goldenStage.tier = QK::Boot::Config::ConfigTier::Golden;
                     QK::Boot::Config::CommitEarlyConfig(static_cast<QK::Boot::Config::StagedEarlyConfig &&>(goldenStage));
                 }
+
+                if (goldenOk)
+                {
+                    QK::Boot::Events::Emit("sysconfig", "fallback_ok", "active_tier=golden");
+                }
+                else
+                {
+                    if (goldenReason[0])
+                    {
+                        char details[192];
+                        QC::String::memset(details, 0, sizeof(details));
+                        QC::String::strncpy(details, "reason=", sizeof(details) - 1);
+                        const QC::usize cur = static_cast<QC::usize>(QC::String::strlen(details));
+                        if (cur < sizeof(details) - 1)
+                            QC::String::strncpy(details + cur, goldenReason, sizeof(details) - 1 - cur);
+                        QK::Boot::Events::Emit("sysconfig", "golden_invalid", details);
+                    }
+                    else
+                    {
+                        QK::Boot::Events::Emit("sysconfig", "golden_invalid", "");
+                    }
+                }
                 return true;
             }
 
             // No golden tier configured; continue in dev with production selected.
             outTier = QK::Boot::Config::ConfigTier::Production;
             outRoot = syscfg.productionRoot;
+
+            QK::Boot::Events::Emit("sysconfig", "select_ok", "active_tier=production dev_no_golden=1");
             return true;
         }
 
@@ -1563,9 +1609,66 @@ namespace
                 goldenStage.tier = QK::Boot::Config::ConfigTier::Golden;
                 QK::Boot::Config::CommitEarlyConfig(static_cast<QK::Boot::Config::StagedEarlyConfig &&>(goldenStage));
             }
+
+            if (goldenOk)
+            {
+                QK::Boot::Events::Emit("sysconfig", "select_ok", "active_tier=golden");
+            }
         }
 
         return true;
+    }
+
+    static QK::Runtime::TierKind ToTierKind(QK::Boot::Config::ConfigTier t)
+    {
+        switch (t)
+        {
+        case QK::Boot::Config::ConfigTier::Production:
+            return QK::Runtime::TierKind::Production;
+        case QK::Boot::Config::ConfigTier::Golden:
+            return QK::Runtime::TierKind::Golden;
+        default:
+            return QK::Runtime::TierKind::Unknown;
+        }
+    }
+
+    static void RebuildRuntimeRegistriesFromCommittedEarlyConfig()
+    {
+        QK::Runtime::BootSeedConfig seed{};
+        seed.tier = ToTierKind(QK::Boot::Config::GetActiveConfigTier());
+
+        const char *tierName = QK::Boot::Config::GetActiveConfigTierName();
+        const char *tierRoot = QK::Boot::Config::GetActiveConfigTierRoot();
+
+        if (tierName)
+            QC::String::strncpy(seed.tierName, tierName, sizeof(seed.tierName) - 1);
+        if (tierRoot)
+            QC::String::strncpy(seed.tierRoot, tierRoot, sizeof(seed.tierRoot) - 1);
+
+        const auto *stage = QK::Boot::Config::GetCommittedEarlyConfig();
+        if (stage)
+        {
+            QC::u32 n = stage->moduleCount;
+            if (n > 16)
+                n = 16;
+            seed.moduleCount = n;
+            for (QC::u32 i = 0; i < n; ++i)
+            {
+                const auto &m = stage->modules[i];
+
+                if (m.id[0])
+                    QC::String::strncpy(seed.modules[i].id, m.id, sizeof(seed.modules[i].id) - 1);
+                if (m.type[0])
+                    QC::String::strncpy(seed.modules[i].type, m.type, sizeof(seed.modules[i].type) - 1);
+                if (m.resolvedPath[0])
+                    QC::String::strncpy(seed.modules[i].resolvedPath, m.resolvedPath, sizeof(seed.modules[i].resolvedPath) - 1);
+
+                seed.modules[i].required = m.required;
+                seed.modules[i].hasJson = m.hasJson;
+            }
+        }
+
+        QK::Runtime::Registries::instance().rebuildFromBootSeed(seed);
     }
 
     static const char *firmwareTypeToString(QC::u64 t)
@@ -1593,6 +1696,9 @@ namespace QKBoot
     {
         g_LogUpstream = log;
         g_Log = &BootLogFanout;
+
+        // Mirror structured events to the boot log + upstream serial.
+        QK::Boot::Events::SetSerialSink(g_Log);
     }
 
     void setLimineRequests(const LimineRequests &req)
@@ -1778,12 +1884,22 @@ namespace QKBoot
                 g_Log(QK::Boot::Config::GetActiveConfigTierRoot());
                 g_Log("'\r\n");
             }
+
+            RebuildRuntimeRegistriesFromCommittedEarlyConfig();
+            if (g_Log)
+                g_Log("Runtime registries: rebuilt\r\n");
+        }
+        else
+        {
+            QK::Boot::Events::Emit("sysconfig", "not_loaded", "");
         }
 
         if (availMiB < effectiveRecMiB)
         {
             if (g_Log)
                 g_Log("Reduced Memory Mode: some services/features may be limited\r\n");
+
+            QK::Boot::Events::Emit("bootpolicy", "reduced_memory_mode", "");
         }
     }
 

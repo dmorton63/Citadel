@@ -65,6 +65,10 @@
 
 # TODO (Quantum Engine)
 
+# TODO (Networking)
+  [ ] Implement a minimal DHCPv4 client and run it at boot to auto-configure IPv4 (IP/mask/gateway/DNS); fall back to manual `ip set` if DHCP fails.
+  [ ] Add `ip dhcp` to renew DHCPv4 on-demand (run DORA with a bounded wait, pump NIC RX during the command, then apply IP/mask/gw/dns).
+
 # TODO (PORT Manager)
   [ ] Close all unused Ports
   [ ] Register open ports to the Application that Opens them

@@ -1,15 +1,15 @@
 add_library(QFileSystem STATIC
-    src/QFSVFS.cpp
-    src/QFSFile.cpp
-    src/QFSDirectory.cpp
-    src/QFSFAT32.cpp
-    src/QFSFAT16.cpp
-    src/QFSFATProbe.cpp
-    src/QFSCache.cpp
-    src/QFSPath.cpp
-    src/QFSVolumeManager.cpp
+    Src/QFSVFS.cpp
+    Src/QFSFile.cpp
+    Src/QFSDirectory.cpp
+    Src/QFSFAT32.cpp
+    Src/QFSFAT16.cpp
+    Src/QFSFATProbe.cpp
+    Src/QFSCache.cpp
+    Src/QFSPath.cpp
+    Src/QFSVolumeManager.cpp
 )
 
-target_include_directories(QFileSystem PUBLIC include)
+target_include_directories(QFileSystem PUBLIC Include)
 target_link_libraries(QFileSystem PUBLIC QCommon QKMemory)
 target_compile_options(QFileSystem PRIVATE ${KERNEL_COMPILE_FLAGS})

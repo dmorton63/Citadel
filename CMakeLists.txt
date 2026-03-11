@@ -60,7 +60,7 @@ add_subdirectory(QKMemory)
 add_subdirectory(QArch)
 add_subdirectory(QEvent)
 add_subdirectory(QDrivers)
-# add_subdirectory(QUSB)  # Replaced by kernel/drivers/UHCI and XHCI
+# add_subdirectory(QUSB)  # Replaced by kernel/Drivers/UHCI and XHCI
 add_subdirectory(QFileSystem)
 add_subdirectory(QNetwork)
 add_subdirectory(QGraphics)

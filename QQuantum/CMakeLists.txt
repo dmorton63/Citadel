@@ -1,3 +1,3 @@
 add_library(QQuantum INTERFACE)
 
-target_include_directories(QQuantum INTERFACE include)
+target_include_directories(QQuantum INTERFACE Include)

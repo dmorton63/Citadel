@@ -1,20 +1,20 @@
 add_library(QWindowing STATIC
-    src/QWWindow.cpp
-    src/QWWindowManager.cpp
-    src/QWFramebuffer.cpp
-    src/QWFramebufferBackend.cpp
-    src/QWCompositor.cpp
-    src/QWFramebufferPresentBackend.cpp
-    src/QWVmwareSVGAPresentBackend.cpp
-    src/QWMessageBus.cpp
-    src/QWRenderer.cpp
-    src/QWStyleRenderer.cpp
-    src/QWStyleTypes.cpp
-    src/QWSurfaceBackend.cpp
-    src/QWStyleSystem.cpp
+    Src/QWWindow.cpp
+    Src/QWWindowManager.cpp
+    Src/QWFramebuffer.cpp
+    Src/QWFramebufferBackend.cpp
+    Src/QWCompositor.cpp
+    Src/QWFramebufferPresentBackend.cpp
+    Src/QWVmwareSVGAPresentBackend.cpp
+    Src/QWMessageBus.cpp
+    Src/QWRenderer.cpp
+    Src/QWStyleRenderer.cpp
+    Src/QWStyleTypes.cpp
+    Src/QWSurfaceBackend.cpp
+    Src/QWStyleSystem.cpp
 )
 
-target_include_directories(QWindowing PUBLIC include)
+target_include_directories(QWindowing PUBLIC Include)
 target_link_libraries(QWindowing PUBLIC
     QCommon
     QGraphics

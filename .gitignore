@@ -33,6 +33,10 @@ Thumbs.db
 *.o
 *.a
 
+# ISO staging (generated Limine binaries copied by build.sh)
+iso/boot/limine/
+iso/EFI/BOOT/
+
 # QEMU host shared folder (local-only)
 shared
 shared/

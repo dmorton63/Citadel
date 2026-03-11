@@ -4,6 +4,28 @@
 
 A modular x86-64 kernel with unified naming conventions, built with the Limine bootloader.
 
+## Networking bring-up (recent)
+
+Citadel now has a practical “bring-up grade” IPv4 stack used for real Internet validation under QEMU SLIRP (10.0.2.x).
+
+Milestones so far:
+- DHCPv4 client at boot + runtime renewal (`ip dhcp`) to acquire IP/mask/gateway/DNS.
+- ARP cache correctness + maintenance (aging/retry) and a terminal `arp` command for visibility.
+- ICMP echo (ping) RX fixed; `ping` now waits/pumps and prints replies.
+- DNS A-record resolver + `nslookup`; hostname support for commands that accept a destination.
+- TCP connect + SYN retransmit/backoff + MSS option + basic RX buffering.
+- HTTP diagnostics over TCP via `httpget` (headers tweaked for server compatibility; `Accept-Encoding: identity`).
+- TCP event ring buffer + `tcplog` to see SYN/SYN-ACK/ACK/PSH/FIN flows.
+
+Useful terminal commands:
+- `ip` / `ip dhcp [timeout_ms]`
+- `arp [ip]`
+- `ping <ip|host> [timeout_ms]`
+- `nslookup <name> [timeout_ms]`
+- `tcpconnect <ip|host> <port> [timeout_ms]`
+- `httpget <host> [path] [timeout_ms]`
+- `tcplog`
+
 ## A Snapshot of our desktop design as it is at the moment.
 
 The screenshot above reflects the current desktop shell with the latest console-first flow.
@@ -76,7 +98,7 @@ qaiosplus-ue-naming/
 │   └── Composite/          # ComboBox, ListView, etc.
 │
 ├── QFileSystem/             # File system (VFS, FAT32)
-├── QNetwork/                # Networking (stub)
+├── QNetwork/                # Networking (IPv4/ARP/ICMP/UDP/DHCP/DNS/TCP)
 ├── QPR/                     # Process runtime (stub)
 └── QQuantum/                # Quantum computing (stub)
 ```
@@ -97,6 +119,12 @@ qaiosplus-ue-naming/
 - Headers: `Q<Module><Class>.h`
 - Implementation: `Q<Module><Class>.cpp`
 - Example: `QKDrvPS2Mouse.h`, `QKDrvPS2Mouse.cpp`
+
+### Directories
+- Use `PascalCase` for directory names.
+- Use `ALLCAPS` for common initialisms/acronyms (e.g., `ACPI`, `TPM`).
+
+See `Standards.md` for the full naming standard (this README is a quick reference).
 
 ### Namespaces
 ```cpp
@@ -165,6 +193,11 @@ qemu-system-x86_64 -kernel build/citadel.elf -serial stdio -usb -device usb-tabl
 # Create ISO with Limine
 ./build.sh
 qemu-system-x86_64 -cdrom build/citadel-limine.iso -serial stdio
+
+# If your host window manager "eats" the first click just to focus the QEMU window,
+# and your QEMU build supports it, use grab-on-hover so the first click reaches the guest UI.
+# (Not all QEMU display backends/builds expose this suboption.)
+qemu-system-x86_64 -cdrom build/citadel-limine.iso -serial stdio -display gtk,grab-on-hover=on
 ```
 
 ### Shared host folder (QEMU)
@@ -173,6 +206,24 @@ qemu-system-x86_64 -cdrom build/citadel-limine.iso -serial stdio
 - `./build.sh -r` now passes `-drive file=fat:rw:shared,...` to QEMU, exposing the folder as an IDE FAT volume so host↔guest file drops stay in sync.
 - Enable the guest-side auto-mount by setting `IDE_SHARED=1` in `startup.cfg` (this controls the legacy IDE probe at boot).
 - If detected, the kernel registers it as `QFS_SHARED` and mounts it at `/shared`.
+
+## Bootable USB (real hardware)
+
+Citadel builds a Limine ISO at `build/citadel-limine.iso`. The easiest way to make a bootable USB stick is to write the ISO to the raw device.
+
+```bash
+./build.sh
+
+# Find your USB device (example: /dev/sdX). Double-check this.
+lsblk
+
+# This will erase the target drive.
+sudo dd if=build/citadel-limine.iso of=/dev/sdX bs=4M status=progress oflag=sync
+```
+
+Notes:
+- Disable UEFI Secure Boot for now (Limine isn’t signed for Microsoft Secure Boot).
+- Whether it boots depends on your firmware mode (UEFI vs legacy BIOS/CSM) and hardware support in the kernel. Expect "boots on some machines" at this stage.
 
 ## Desktop JSON & Theming
 
@@ -267,10 +318,10 @@ See [backups/2026-02-19_backup_summary.md](backups/2026-02-19_backup_summary.md)
 ## Recent Changes (Feb 9, 2026)
 
 ### Driver Refactoring
-- Created unified driver structure under `kernel/drivers/`
+- Created unified driver structure under `kernel/Drivers/`
 - Implemented `QKDrv::Manager` for driver probing and selection
 - Separated drivers by controller type: PS2, UHCI, XHCI
-- Removed old `QUSB/` module (replaced by kernel/drivers/UHCI, XHCI)
+- Removed old `QUSB/` module (replaced by kernel/Drivers/UHCI, XHCI)
 - Removed old `drivers/usb/` C code
 - Cleaned up `QDrivers/` to only keep Timer and BGA
 
