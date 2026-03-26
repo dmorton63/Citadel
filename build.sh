@@ -111,7 +111,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --tpm           Enable TPM2 emulation (requires swtpm)"
             echo "  --tablet        Use absolute USB tablet in QEMU (default)"
             echo "  --relmouse      Use relative USB mouse in QEMU"
-            echo "  --prod          Build production mode (fail-closed boot signature enforcement)"
+            echo "  --prod          Build production mode (fail-closed boot signature enforcement; use --tpm when running)"
             echo "  -j<N>           Use N parallel jobs (default: $(nproc))"
             echo "  -h, --help      Show this help"
             exit 0
@@ -122,6 +122,30 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+# Helper: sign a file with the BootGate RSA private key without ever prompting.
+# If the key is encrypted, set CITADEL_BOOTGATE_PASSPHRASE to allow signing.
+sign_sha256_rsa2048_no_prompt() {
+    local key="$1"
+    local input="$2"
+    local output="$3"
+
+    if [ -z "${key}" ] || [ -z "${input}" ] || [ -z "${output}" ]; then
+        return 1
+    fi
+
+    # Detect encrypted keys by PEM header/content markers.
+    if grep -q "ENCRYPTED" "${key}" 2>/dev/null; then
+        if [ -z "${CITADEL_BOOTGATE_PASSPHRASE}" ]; then
+            return 2
+        fi
+        openssl dgst -sha256 -sign "${key}" -passin env:CITADEL_BOOTGATE_PASSPHRASE -out "${output}" "${input}"
+        return $?
+    fi
+
+    openssl dgst -sha256 -sign "${key}" -out "${output}" "${input}"
+    return $?
+}
 
 # Step 1: Clean if requested
 if [ "$CLEAN" = true ]; then
@@ -204,6 +228,20 @@ if [ -d "${RAMDISK_DIR}" ]; then
         fi
     fi
 
+    # Font aliases for FAT 8.3 (current VFS has no LFN support).
+    # If you add RobotoMono static TTFs with long filenames, create a stable 8.3 alias
+    # so runtime can open it reliably via "/system/fonts/RMONO.TTF".
+    {
+        ROBOTO_MONO_REG_SRC="${RAMDISK_DIR}/system/fonts/static/RobotoMono-Regular.ttf"
+        if [ -f "${ROBOTO_MONO_REG_SRC}" ]; then
+            # /system/fonts should already exist (copied from ramdisk tree). Avoid mmd here:
+            # mtools can prompt on /dev/tty if the directory exists, and we redirect stderr.
+            if ! mcopy -o -i "${RAMDISK_TEMP}" "${ROBOTO_MONO_REG_SRC}" ::/system/fonts/RMONO.TTF >/dev/null 2>&1; then
+                echo -e "${YELLOW}WARNING: Failed to alias RobotoMono-Regular.ttf as /system/fonts/RMONO.TTF in ramdisk image${NC}"
+            fi
+        fi
+    }
+
     RAMDISK_T1=$(date +%s)
     echo -e "${GREEN}      Ramdisk build done in $((RAMDISK_T1 - RAMDISK_T0))s.${NC}"
 
@@ -212,6 +250,182 @@ if [ -d "${RAMDISK_DIR}" ]; then
         # Copy as an 8.3 name so our current FAT32 implementation (no LFN) can open it reliably.
         # Keep the source name desktop.json, but store it in the image as DESKTOP.JSN.
         mcopy -i "${RAMDISK_TEMP}" "${PROJECT_DIR}/desktop.json" ::/DESKTOP.JSN >/dev/null 2>&1
+    fi
+
+    # Also include the CUI-ML desktop definition (if present)
+    CUI_DESKTOP_SRC=""
+    if [ -f "${PROJECT_DIR}/desktop.cuiml" ]; then
+        CUI_DESKTOP_SRC="${PROJECT_DIR}/desktop.cuiml"
+    elif [ -f "${PROJECT_DIR}/shared/desktop.cuiml" ]; then
+        CUI_DESKTOP_SRC="${PROJECT_DIR}/shared/desktop.cuiml"
+    fi
+
+    if [ -n "${CUI_DESKTOP_SRC}" ]; then
+        # Stored as DESKTOP.CML (8.3) for early FAT32 reader compatibility.
+        mcopy -i "${RAMDISK_TEMP}" "${CUI_DESKTOP_SRC}" ::/DESKTOP.CML >/dev/null 2>&1
+
+        # Optional signature file for DESKTOP.CML.
+        # If you provide a raw DESKTOP.SIG (RSA-2048 signature, 256 bytes) it will be packed as 8.3.
+        # If you provide a signing key at keys/bootgate_rsa_priv.pem and have openssl installed,
+        # we will generate DESKTOP.SIG automatically.
+        DESKTOP_SIG_SRC=""
+        if [ -f "${PROJECT_DIR}/DESKTOP.SIG" ]; then
+            DESKTOP_SIG_SRC="${PROJECT_DIR}/DESKTOP.SIG"
+        elif [ -f "${PROJECT_DIR}/desktop.sig" ]; then
+            DESKTOP_SIG_SRC="${PROJECT_DIR}/desktop.sig"
+        else
+            BOOTGATE_PRIV_KEY=""
+            if [ -f "${PROJECT_DIR}/keys/bootgate_rsa_priv.pem" ]; then
+                BOOTGATE_PRIV_KEY="${PROJECT_DIR}/keys/bootgate_rsa_priv.pem"
+            elif [ -f "${BUILD_DIR}/bootgate_rsa_priv.pem" ]; then
+                BOOTGATE_PRIV_KEY="${BUILD_DIR}/bootgate_rsa_priv.pem"
+            fi
+
+            if command -v openssl >/dev/null 2>&1 && [ -n "${BOOTGATE_PRIV_KEY}" ]; then
+                DESKTOP_SIG_GEN="${BUILD_DIR}/DESKTOP.SIG"
+                sign_sha256_rsa2048_no_prompt "${BOOTGATE_PRIV_KEY}" "${CUI_DESKTOP_SRC}" "${DESKTOP_SIG_GEN}" >/dev/null 2>&1 || true
+                if [ -f "${DESKTOP_SIG_GEN}" ]; then
+                    DESKTOP_SIG_SRC="${DESKTOP_SIG_GEN}"
+                fi
+            fi
+        fi
+
+        if [ "$PRODUCTION" = true ]; then
+            if [ -z "${DESKTOP_SIG_SRC}" ]; then
+                echo -e "${RED}Production build requires DESKTOP.SIG for DESKTOP.CML, but none was found or generated.${NC}" >&2
+                if ! command -v openssl >/dev/null 2>&1; then
+                    echo -e "${RED}Hint: install openssl to generate DESKTOP.SIG automatically.${NC}" >&2
+                else
+                    echo -e "${RED}Hint: provide ${PROJECT_DIR}/DESKTOP.SIG or ${PROJECT_DIR}/desktop.sig, or create ${PROJECT_DIR}/keys/bootgate_rsa_priv.pem.${NC}" >&2
+                fi
+                exit 1
+            fi
+
+            DESKTOP_SIG_SIZE=$(wc -c < "${DESKTOP_SIG_SRC}" 2>/dev/null || echo 0)
+            if [ "${DESKTOP_SIG_SIZE}" != "256" ]; then
+                echo -e "${RED}Production build: DESKTOP.SIG must be exactly 256 bytes (RSA-2048). Got ${DESKTOP_SIG_SIZE}.${NC}" >&2
+                exit 1
+            fi
+        fi
+
+        if [ -n "${DESKTOP_SIG_SRC}" ]; then
+            mcopy -o -i "${RAMDISK_TEMP}" "${DESKTOP_SIG_SRC}" ::/DESKTOP.SIG >/dev/null 2>&1
+        fi
+    fi
+
+    # Optional signature file for /SYSTEM/UI/DESKTOP.CML (preferred trusted path).
+    SYSUI_DESKTOP_SRC=""
+    if [ -f "${RAMDISK_DIR}/system/ui/desktop.cml" ]; then
+        SYSUI_DESKTOP_SRC="${RAMDISK_DIR}/system/ui/desktop.cml"
+    elif [ -f "${RAMDISK_DIR}/system/ui/DESKTOP.CML" ]; then
+        SYSUI_DESKTOP_SRC="${RAMDISK_DIR}/system/ui/DESKTOP.CML"
+    fi
+
+    if [ -n "${SYSUI_DESKTOP_SRC}" ]; then
+        SYSUI_SIG_SRC=""
+        if [ -f "${RAMDISK_DIR}/system/ui/DESKTOP.SIG" ]; then
+            SYSUI_SIG_SRC="${RAMDISK_DIR}/system/ui/DESKTOP.SIG"
+        elif [ -f "${RAMDISK_DIR}/system/ui/desktop.sig" ]; then
+            SYSUI_SIG_SRC="${RAMDISK_DIR}/system/ui/desktop.sig"
+        else
+            BOOTGATE_PRIV_KEY=""
+            if [ -f "${PROJECT_DIR}/keys/bootgate_rsa_priv.pem" ]; then
+                BOOTGATE_PRIV_KEY="${PROJECT_DIR}/keys/bootgate_rsa_priv.pem"
+            elif [ -f "${BUILD_DIR}/bootgate_rsa_priv.pem" ]; then
+                BOOTGATE_PRIV_KEY="${BUILD_DIR}/bootgate_rsa_priv.pem"
+            fi
+
+            if command -v openssl >/dev/null 2>&1 && [ -n "${BOOTGATE_PRIV_KEY}" ]; then
+                SYSUI_SIG_GEN="${BUILD_DIR}/SYSUIDES.SIG"
+                sign_sha256_rsa2048_no_prompt "${BOOTGATE_PRIV_KEY}" "${SYSUI_DESKTOP_SRC}" "${SYSUI_SIG_GEN}" >/dev/null 2>&1 || true
+                if [ -f "${SYSUI_SIG_GEN}" ]; then
+                    SYSUI_SIG_SRC="${SYSUI_SIG_GEN}"
+                fi
+            fi
+        fi
+
+        if [ "$PRODUCTION" = true ]; then
+            if [ -z "${SYSUI_SIG_SRC}" ]; then
+                echo -e "${RED}Production build requires DESKTOP.SIG for /SYSTEM/UI/DESKTOP.CML, but none was found or generated.${NC}" >&2
+                if ! command -v openssl >/dev/null 2>&1; then
+                    echo -e "${RED}Hint: install openssl to generate DESKTOP.SIG automatically.${NC}" >&2
+                else
+                    echo -e "${RED}Hint: create ${RAMDISK_DIR}/system/ui/DESKTOP.SIG or provide ${PROJECT_DIR}/keys/bootgate_rsa_priv.pem.${NC}" >&2
+                fi
+                exit 1
+            fi
+
+            SYSUI_SIG_SIZE=$(wc -c < "${SYSUI_SIG_SRC}" 2>/dev/null || echo 0)
+            if [ "${SYSUI_SIG_SIZE}" != "256" ]; then
+                echo -e "${RED}Production build: /SYSTEM/UI/DESKTOP.SIG must be exactly 256 bytes (RSA-2048). Got ${SYSUI_SIG_SIZE}.${NC}" >&2
+                exit 1
+            fi
+        fi
+
+        if [ -n "${SYSUI_SIG_SRC}" ]; then
+            mcopy -o -i "${RAMDISK_TEMP}" "${SYSUI_SIG_SRC}" ::/SYSTEM/UI/DESKTOP.SIG >/dev/null 2>&1
+        fi
+    fi
+
+    # Optional signatures for CUIMLSS styles under /SYSTEM/UI.
+    # In production mode, any .cxs present under ramdisk/system/ui must have a matching .sig
+    # (or we must be able to generate one using keys/bootgate_rsa_priv.pem).
+    if [ -d "${RAMDISK_DIR}/system/ui" ]; then
+        for CXS_SRC in "${RAMDISK_DIR}/system/ui/"*.cxs "${RAMDISK_DIR}/system/ui/"*.CXS; do
+            if [ ! -f "${CXS_SRC}" ]; then
+                continue
+            fi
+
+            CXS_BASE=$(basename "${CXS_SRC}")
+            CXS_NAME="${CXS_BASE%.*}"
+            CXS_UPPER=$(echo "${CXS_NAME}" | tr '[:lower:]' '[:upper:]')
+
+            CXS_SIG_SRC=""
+            if [ -f "${CXS_SRC%.*}.SIG" ]; then
+                CXS_SIG_SRC="${CXS_SRC%.*}.SIG"
+            elif [ -f "${CXS_SRC%.*}.sig" ]; then
+                CXS_SIG_SRC="${CXS_SRC%.*}.sig"
+            fi
+
+            if [ -z "${CXS_SIG_SRC}" ]; then
+                BOOTGATE_PRIV_KEY=""
+                if [ -f "${PROJECT_DIR}/keys/bootgate_rsa_priv.pem" ]; then
+                    BOOTGATE_PRIV_KEY="${PROJECT_DIR}/keys/bootgate_rsa_priv.pem"
+                elif [ -f "${BUILD_DIR}/bootgate_rsa_priv.pem" ]; then
+                    BOOTGATE_PRIV_KEY="${BUILD_DIR}/bootgate_rsa_priv.pem"
+                fi
+
+                if command -v openssl >/dev/null 2>&1 && [ -n "${BOOTGATE_PRIV_KEY}" ]; then
+                    CXS_SIG_GEN="${BUILD_DIR}/CXS_${CXS_UPPER}.SIG"
+                    sign_sha256_rsa2048_no_prompt "${BOOTGATE_PRIV_KEY}" "${CXS_SRC}" "${CXS_SIG_GEN}" >/dev/null 2>&1 || true
+                    if [ -f "${CXS_SIG_GEN}" ]; then
+                        CXS_SIG_SRC="${CXS_SIG_GEN}"
+                    fi
+                fi
+            fi
+
+            if [ "$PRODUCTION" = true ]; then
+                if [ -z "${CXS_SIG_SRC}" ]; then
+                    echo -e "${RED}Production build requires a signature for CUIMLSS file ${CXS_BASE}, but none was found or generated.${NC}" >&2
+                    if ! command -v openssl >/dev/null 2>&1; then
+                        echo -e "${RED}Hint: install openssl to generate CUIMLSS signatures automatically.${NC}" >&2
+                    else
+                        echo -e "${RED}Hint: provide ${CXS_SRC%.*}.sig or create ${PROJECT_DIR}/keys/bootgate_rsa_priv.pem.${NC}" >&2
+                    fi
+                    exit 1
+                fi
+
+                CXS_SIG_SIZE=$(wc -c < "${CXS_SIG_SRC}" 2>/dev/null || echo 0)
+                if [ "${CXS_SIG_SIZE}" != "256" ]; then
+                    echo -e "${RED}Production build: CUIMLSS signature for ${CXS_BASE} must be exactly 256 bytes (RSA-2048). Got ${CXS_SIG_SIZE}.${NC}" >&2
+                    exit 1
+                fi
+            fi
+
+            if [ -n "${CXS_SIG_SRC}" ]; then
+                mcopy -o -i "${RAMDISK_TEMP}" "${CXS_SIG_SRC}" "::/SYSTEM/UI/${CXS_UPPER}.SIG" >/dev/null 2>&1
+            fi
+        done
     fi
 
     # Optional production overrides for desktop presentation.
@@ -240,12 +454,17 @@ if [ -d "${RAMDISK_DIR}" ]; then
 
     # Two-tier config trees (8.3-only; no LFN). These enable Step 9's production vs golden selection.
     # NOTE: today both tiers are populated identically; later, installers/updaters can diverge PROD.
-    mmd -i "${RAMDISK_TEMP}" ::/PROD >/dev/null 2>&1 || true
-    mmd -i "${RAMDISK_TEMP}" ::/GOLDEN >/dev/null 2>&1 || true
+    mdir -i "${RAMDISK_TEMP}" ::/PROD >/dev/null 2>&1 || mmd -i "${RAMDISK_TEMP}" ::/PROD >/dev/null 2>&1 || true
+    mdir -i "${RAMDISK_TEMP}" ::/GOLDEN >/dev/null 2>&1 || mmd -i "${RAMDISK_TEMP}" ::/GOLDEN >/dev/null 2>&1 || true
 
     if [ -f "${PROJECT_DIR}/desktop.json" ]; then
         mcopy -i "${RAMDISK_TEMP}" "${PROJECT_DIR}/desktop.json" ::/PROD/DESKTOP.JSN >/dev/null 2>&1
         mcopy -i "${RAMDISK_TEMP}" "${PROJECT_DIR}/desktop.json" ::/GOLDEN/DESKTOP.JSN >/dev/null 2>&1
+    fi
+
+    if [ -n "${CUI_DESKTOP_SRC}" ]; then
+        mcopy -i "${RAMDISK_TEMP}" "${CUI_DESKTOP_SRC}" ::/PROD/DESKTOP.CML >/dev/null 2>&1
+        mcopy -i "${RAMDISK_TEMP}" "${CUI_DESKTOP_SRC}" ::/GOLDEN/DESKTOP.CML >/dev/null 2>&1
     fi
 
     # Negative test hook: intentionally corrupt only the production tier desktop JSON so
@@ -347,7 +566,7 @@ if [ -d "${RAMDISK_DIR}" ]; then
 
             if command -v openssl >/dev/null 2>&1 && [ -n "${BOOTGATE_PRIV_KEY}" ]; then
                 BOOT_SIG_GEN="${BUILD_DIR}/BOOT.SIG"
-                openssl dgst -sha256 -sign "${BOOTGATE_PRIV_KEY}" -out "${BOOT_SIG_GEN}" "${BOOT_JSON_SRC}" >/dev/null 2>&1 || true
+                sign_sha256_rsa2048_no_prompt "${BOOTGATE_PRIV_KEY}" "${BOOT_JSON_SRC}" "${BOOT_SIG_GEN}" >/dev/null 2>&1 || true
                 if [ -f "${BOOT_SIG_GEN}" ]; then
                     BOOT_SIG_SRC="${BOOT_SIG_GEN}"
                 fi
@@ -406,7 +625,7 @@ if [ -d "${RAMDISK_DIR}" ]; then
 
             if command -v openssl >/dev/null 2>&1 && [ -n "${BOOTGATE_PRIV_KEY}" ]; then
                 SYSCFG_SIG_GEN="${BUILD_DIR}/SYSCFG.SIG"
-                openssl dgst -sha256 -sign "${BOOTGATE_PRIV_KEY}" -out "${SYSCFG_SIG_GEN}" "${SYSCONFIG_JSON_SRC}" >/dev/null 2>&1 || true
+                sign_sha256_rsa2048_no_prompt "${BOOTGATE_PRIV_KEY}" "${SYSCONFIG_JSON_SRC}" "${SYSCFG_SIG_GEN}" >/dev/null 2>&1 || true
                 if [ -f "${SYSCFG_SIG_GEN}" ]; then
                     SYSCFG_SIG_SRC="${SYSCFG_SIG_GEN}"
                 fi
@@ -530,6 +749,10 @@ if [ "$RUN_QEMU" = true ]; then
 
     # Start each run with a clean serial log.
     : > "${SERIAL_LOG}"
+
+    if [ "$PRODUCTION" = true ] && [ "$TPM" = false ]; then
+        echo -e "${YELLOW}Warning: --prod without --tpm will likely refuse to boot (TPM required for production enforcement).${NC}"
+    fi
 
     # Optional TPM2 emulation via swtpm
     SWTPM_PID=""

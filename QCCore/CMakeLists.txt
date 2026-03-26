@@ -4,6 +4,8 @@ add_library(QCCore STATIC
     Src/QCLogger.cpp
     Src/QCxxAbi.cpp
     Src/QCMemUtil.c
+    Src/QCSha256.cpp
+    Src/QCCanonicalArgs.cpp
 )
 
 target_include_directories(QCCore PUBLIC Include)

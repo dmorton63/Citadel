@@ -34,9 +34,18 @@
 #include "QWInterfaces/IControl.h"
 #include "QCVector.h"
 #include "QG/Image.h"
+#include "QKEventListener.h"
 #include "QDAccent.h"
 #include "QDTheme.h"
 #include "QDTerminal.h"
+
+namespace QW
+{
+    namespace Controls
+    {
+        class IconButton;
+    }
+}
 
 namespace QK
 {
@@ -62,6 +71,8 @@ namespace QD
     class ShutdownDialog;
     class SetupWizard;
     class LoginDialog;
+    class Browser;
+    class CuiMLViewer;
 
     // Layout constants
     constexpr QC::u32 TOP_BAR_HEIGHT = 32;
@@ -130,6 +141,22 @@ namespace QD
         /// Hide/close the login dialog if open
         void hideLoginDialog();
 
+        // ==================== Browser (HTML Viewer) ====================
+
+        /// Open (or focus) the HTML viewer and render an on-disk HTML file.
+        void openBrowserFile(const char *path);
+
+        /// Open (or focus) the HTML viewer and fetch+render a remote http:// URL (no TLS).
+        void openBrowserUrl(const char *url);
+
+        /// Open (or focus) the HTML viewer and render inline HTML content.
+        void openBrowserHtmlText(const char *htmlText);
+
+        // ==================== CUI-ML Viewer (MVP) ====================
+
+        /// Open (or focus) the CUI-ML viewer and render an on-disk .cuiml file.
+        void openCuiMLFile(const char *path);
+
         // ==================== Panels ====================
 
         QW::Controls::Panel *topBar() { return m_topBar; }
@@ -168,7 +195,11 @@ namespace QD
         bool isInitialized() const { return m_initialized; }
 
     private:
+        bool tryInitializeFromCuiML();
         bool tryInitializeFromJson();
+
+        bool tryLoadDesktopOverridesFromVfs(QC::JSON::Value &outRoot, const char *&outOpenedPath) const;
+        void applyDesktopOverridesObject(const QC::JSON::Value &ovrRoot, bool &ioBackgroundApplied);
 
         void clearJsonDesktopState();
         void resetThemeOverrides();
@@ -195,6 +226,8 @@ namespace QD
 
         void openTerminal();
         void toggleTerminal();
+        void openBrowser();
+        void openHelpWindow();
         void recomputeTaskbarWindowBase();
         void showShutdownPrompt(QK::Shutdown::Reason reason);
 
@@ -206,8 +239,20 @@ namespace QD
         static void onJsonTerminalClick(QW::Controls::Button *button, void *userData);
         static void onJsonShutdownClick(QW::Controls::Button *button, void *userData);
 
+        // CUI-ML IconButton action handlers
+        static void onJsonTerminalIconClick(QW::Controls::IconButton *button, void *userData);
+        static void onJsonShutdownIconClick(QW::Controls::IconButton *button, void *userData);
+
         // Taskbar button click handler
         static void onTaskbarClick(QW::Controls::Button *button, void *userData);
+        static void onTaskbarIconClick(QW::Controls::IconButton *button, void *userData);
+
+        static bool onWindowEvent(const QK::Event::Event &event, void *userData);
+        void ensureWindowEventListener();
+        void layoutTaskbarWindows();
+
+        // CUI-ML help window button handler
+        static void onHelpClick(QW::Controls::Button *button, void *userData);
 
         bool m_initialized;
         QC::u32 m_screenWidth;
@@ -380,6 +425,10 @@ namespace QD
         Theme m_themeDefinition;
         bool m_themeLoaded;
 
+        // Font loading (theme-selected family -> VFS bytes -> QG::FontManager)
+        bool m_lastAppliedFontFamilySet = false;
+        char m_lastAppliedFontFamily[48] = {};
+
         bool loadThemeDefinition(const QC::JSON::Value *themeValue);
         void applyLoadedThemeToOverrides();
 
@@ -397,8 +446,14 @@ namespace QD
         QW::Controls::Panel *m_taskbar;
 
         // JSON-specific buttons we track for layout offsets
-        QW::Controls::Button *m_jsonStartButton;
-        QW::Controls::Button *m_jsonShutdownButton;
+        QW::Controls::IControl *m_jsonStartButton;
+        QW::Controls::IControl *m_jsonShutdownButton;
+
+        // CUI-ML HelpWindow (optional)
+        QW::Controls::Button *m_helpButton = nullptr;
+        char *m_helpTitle = nullptr;
+        char *m_helpSrcOrUrl = nullptr;
+        char *m_helpInlineHtml = nullptr;
 
         // JSON-driven wallpaper (painted as a root control behind everything else)
         QW::Controls::ImageView *m_jsonWallpaperView;
@@ -420,16 +475,23 @@ namespace QD
         {
             QC::u32 windowId;
             QW::Controls::Button *button;
+            QW::Controls::IconButton *iconButton;
+            QC::u32 width;
+            QC::u32 height;
             bool isActive;
         };
         TaskbarEntry m_taskbarEntries[MAX_TASKBAR_WINDOWS];
         QC::u32 m_taskbarWindowCount;
+
+        QK::Event::ListenerId m_windowListenerId = QK::Event::InvalidListenerId;
 
         // Clock state
         QC::u32 m_hours;
         QC::u32 m_minutes;
 
         Terminal *m_terminal;
+        Browser *m_browser;
+        CuiMLViewer *m_cuimlViewer;
         class ShutdownDialog *m_shutdownDialog;
 
         SetupWizard *m_setupWizard;

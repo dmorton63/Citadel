@@ -18,6 +18,10 @@ namespace QK
 
         void initialize(Mode mode);
 
+        // Runtime flow governance toggle (MVP).
+        void setFlowEnforcementEnabled(bool enabled);
+        bool flowEnforcementEnabled() const { return m_mode == Mode::Enforce; }
+
         bool initialized() const { return m_initialized; }
         Mode mode() const { return m_mode; }
         bool bypassEnabled() const { return m_mode == Mode::Bypass; }

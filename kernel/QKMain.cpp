@@ -17,6 +17,115 @@
 #include "Boot/QKBoot.h"
 
 #include "QKMemHeap.h"
+#include "QCLogger.h"
+
+namespace
+{
+    static bool isSpace(char c)
+    {
+        return c == ' ' || c == '\t' || c == '\r' || c == '\n';
+    }
+
+    static bool tokenEqualsIgnoreCase(const char *tokenBegin, const char *tokenEnd, const char *lit)
+    {
+        if (!lit)
+            return false;
+
+        const char *p = tokenBegin;
+        const char *q = lit;
+        while (p < tokenEnd && *q)
+        {
+            char a = *p++;
+            char b = *q++;
+            if (a >= 'A' && a <= 'Z')
+                a = static_cast<char>(a - 'A' + 'a');
+            if (b >= 'A' && b <= 'Z')
+                b = static_cast<char>(b - 'A' + 'a');
+            if (a != b)
+                return false;
+        }
+        return (p == tokenEnd) && (*q == 0);
+    }
+
+    static QC::LogLevel parseLogLevelToken(const char *tokenBegin, const char *tokenEnd, QC::LogLevel fallback)
+    {
+        if (!tokenBegin || !tokenEnd || tokenEnd <= tokenBegin)
+            return fallback;
+
+        if (tokenEqualsIgnoreCase(tokenBegin, tokenEnd, "trace"))
+            return QC::LogLevel::Trace;
+        if (tokenEqualsIgnoreCase(tokenBegin, tokenEnd, "debug"))
+            return QC::LogLevel::Debug;
+        if (tokenEqualsIgnoreCase(tokenBegin, tokenEnd, "info"))
+            return QC::LogLevel::Info;
+        if (tokenEqualsIgnoreCase(tokenBegin, tokenEnd, "warn") || tokenEqualsIgnoreCase(tokenBegin, tokenEnd, "warning"))
+            return QC::LogLevel::Warning;
+        if (tokenEqualsIgnoreCase(tokenBegin, tokenEnd, "error") || tokenEqualsIgnoreCase(tokenBegin, tokenEnd, "err"))
+            return QC::LogLevel::Error;
+        if (tokenEqualsIgnoreCase(tokenBegin, tokenEnd, "fatal"))
+            return QC::LogLevel::Fatal;
+
+        return fallback;
+    }
+
+    static void applyCmdlineLogConfig(const char *cmdline)
+    {
+        if (!cmdline || !*cmdline)
+            return;
+
+        // Defaults remain unchanged unless explicitly overridden.
+        QC::LogLevel level = QC::Logger::instance().getLevel();
+
+        const char *p = cmdline;
+        while (*p)
+        {
+            while (*p && isSpace(*p))
+                ++p;
+            if (!*p)
+                break;
+
+            const char *tokBegin = p;
+            while (*p && !isSpace(*p))
+                ++p;
+            const char *tokEnd = p;
+
+            // Handle bare flags: quiet
+            if (tokenEqualsIgnoreCase(tokBegin, tokEnd, "quiet"))
+            {
+                level = QC::LogLevel::Warning;
+                continue;
+            }
+
+            // Handle key=value: loglevel=warn, log=debug (alias)
+            const char *eq = tokBegin;
+            while (eq < tokEnd && *eq != '=')
+                ++eq;
+            if (eq < tokEnd && *eq == '=')
+            {
+                const char *keyBegin = tokBegin;
+                const char *keyEnd = eq;
+                const char *valBegin = eq + 1;
+                const char *valEnd = tokEnd;
+
+                if (tokenEqualsIgnoreCase(keyBegin, keyEnd, "loglevel") || tokenEqualsIgnoreCase(keyBegin, keyEnd, "log"))
+                {
+                    level = parseLogLevelToken(valBegin, valEnd, level);
+                }
+            }
+        }
+
+        QC::Logger::instance().setLevel(level);
+    }
+
+    static const char *getLimineKernelCmdline(QC::u64 executableFileRequest[])
+    {
+        if (!executableFileRequest)
+            return nullptr;
+        const auto *resp = reinterpret_cast<const limine_executable_file_response *>(executableFileRequest[5]);
+        const limine_file *kf = resp ? resp->executable_file : nullptr;
+        return kf ? kf->cmdline : nullptr;
+    }
+}
 
 // Limine requests are defined in QKBoot.asm
 
@@ -78,6 +187,10 @@ extern "C" void kernel_main()
         QK::Debug::Serial::SetMirror(QK::Debug::Terminal::Write);
         QK::Debug::Terminal::Write("Boot terminal initialized\r\n");
     }
+
+    // Apply logging verbosity overrides from Limine kernel cmdline as early as possible,
+    // so they affect the entire boot (not just post-memory-init).
+    applyCmdlineLogConfig(getLimineKernelCmdline(limine_executable_file_request));
 
     // --- Early Boot ---
     QKBoot::setLogFn(QK::Debug::Serial::Write);

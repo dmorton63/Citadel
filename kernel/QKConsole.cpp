@@ -11,7 +11,7 @@
 #include "QKCommandCenter.h"
 
 #include "QKBootConfigTier.h"
-#include "QKBootStagedConfig.h"
+#include "Boot/Config/QKBootStagedConfig.h"
 
 namespace QK
 {

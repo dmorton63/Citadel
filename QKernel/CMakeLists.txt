@@ -13,5 +13,5 @@ add_library(QKernel STATIC
 )
 
 target_include_directories(QKernel PUBLIC Include)
-target_link_libraries(QKernel PUBLIC QCommon QEvent QFileSystem QNetwork)
+target_link_libraries(QKernel PUBLIC QCommon QArch QEvent QFileSystem QNetwork QQuantum QSecurityCenter)
 target_compile_options(QKernel PRIVATE ${KERNEL_COMPILE_FLAGS})

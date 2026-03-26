@@ -1,3 +1,11 @@
-add_library(QQuantum INTERFACE)
+add_library(QQuantum
+	Src/QQExecutor.cpp
+)
 
-target_include_directories(QQuantum INTERFACE Include)
+target_include_directories(QQuantum PUBLIC Include)
+
+target_link_libraries(QQuantum PUBLIC QCCore QKernel)
+
+target_include_directories(QQuantum PUBLIC
+	${CMAKE_CURRENT_LIST_DIR}/../QCCore/Include
+)

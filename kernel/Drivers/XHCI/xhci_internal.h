@@ -157,7 +157,7 @@ namespace QKDrv
 
             bool isAbsolute() const override { return true; }
 
-            void updatePosition(QC::i32 x, QC::i32 y, QC::u8 buttons);
+            void updatePosition(QC::i32 x, QC::i32 y, QC::i32 wheel, QC::u8 buttons);
 
         private:
             XHCIControllerImpl *m_controller;

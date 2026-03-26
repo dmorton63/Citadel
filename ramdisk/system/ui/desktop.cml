@@ -1,0 +1,158 @@
+<html lang="cuiml">
+    <head>
+        <meta charset="utf-8" />
+        <meta name="cuiml-version" content="1.0" />
+
+        <!-- Import shared components -->
+        <Import src="/system/ui/common.cui" />
+
+        <!-- Spring theme stylesheet -->
+        <link rel="stylesheet"
+              type="text/cuimlss"
+              href="/system/ui/SPRING.CXS" />
+    </head>
+
+    <body>
+        <Desktop>
+            <Background type="image"
+                        path=""
+                        mode="stretch" />
+
+            <Layout type="absolute">
+
+                <!-- HEADER BAR -->
+                <Panel id="headerBar"
+                       x="0"
+                       y="0"
+                       width="100%"
+                       height="56">
+                    <Label id="headerTitle"
+                           text="QAIOS++ Spring Desktop"
+                           x="20"
+                           y="16" />
+                    <Label id="clockLabel"
+                           text="12:45 PM"
+                           x="right-150"
+                           y="18" />
+                </Panel>
+
+                <!-- SIDEBAR -->
+                <Panel id="sidebar"
+                       x="0"
+                       y="56"
+                       width="200"
+                       height="100%-56"
+                       background="rgba(24, 28, 34, 0.35)">
+                    <Label id="sidebarTitle"
+                           text="Applications"
+                           x="20"
+                           y="20" />
+
+                  <IconButton id="btnFiles"
+                            icon="folder"
+                            text="File Manager"
+                            x="20"
+                            y="60"
+                            width="160"
+                            height="32"
+                            role="sidebar" />
+
+                  <IconButton id="btnSettings"
+                            icon="settings"
+                            text="Settings"
+                            x="20"
+                            y="100"
+                            width="160"
+                            height="32"
+                            role="sidebar" />
+
+                  <IconButton id="btnTerminal"
+                            icon="terminal"
+                            text="Terminal"
+                            x="20"
+                            y="140"
+                            width="160"
+                            height="32"
+                            role="sidebar" />
+                </Panel>
+
+                <!-- MAIN CONTENT -->
+                <Panel id="mainContent"
+                       x="200"
+                       y="56"
+                       width="100%-200"
+                       height="100%-104">
+
+                    <CardPanel id="cardPanel"
+                           x="208"
+                           y="0"
+                           width="538"
+                           height="200">
+                           <TitleLabel id="welcomeLabel"
+                               text="Welcome to Spring in QAIOS++!"
+                               x="61"
+                               y="7" />
+                           <BodyLabel id="infoLabel"
+                              text="Fresh colors, new energy, and a clean workspace."
+                              x="103"
+                              y="57" />
+                           <TitleLabel id="cardTitle"
+                               text="System Information"
+                               x="178"
+                               y="91" />
+                           <BodyLabel id="cardText"
+                               text="Kernel: QAIOS++ Experimental"
+                               x="163"
+                               y="134" />
+                          </CardPanel>
+                </Panel>
+
+                <!-- TASKBAR -->
+                <Panel id="taskbar"
+                       x="0"
+                       y="bottom-48"
+                       width="100%"
+                       height="48"
+                       background="rgba(24, 28, 34, 0.55)">
+                  <IconButton id="startButton"
+                            icon="start"
+                            text="Start"
+                            x="10"
+                            y="9"
+                            width="100"
+                            height="30"
+                            role="sidebar" />
+
+                  <IconButton id="shutDownButton"
+                            icon="power"
+                            text="Shut Down"
+                            x="120"
+                            y="9"
+                            width="120"
+                            height="30"
+                            role="destructive" />
+
+                    <Label id="taskbarClock"
+                           text="12:45 PM"
+                           x="right-80"
+                           y="14" />
+                </Panel>
+
+            </Layout>
+        </Desktop>
+
+        <!-- HELP WINDOW -->
+        <help-window title="Spring Desktop Help">
+            <![CDATA[
+                <h1>Welcome to the Spring Desktop</h1>
+                <p>This is the help panel for the QAIOS++ Spring desktop environment.</p>
+                <ul>
+                    <li><b>Start Menu:</b> Access applications and system tools.</li>
+                    <li><b>Sidebar:</b> Quick launch for common apps.</li>
+                    <li><b>Taskbar:</b> Shows system time and active tasks.</li>
+                </ul>
+            ]]>
+        </help-window>
+
+    </body>
+</html>

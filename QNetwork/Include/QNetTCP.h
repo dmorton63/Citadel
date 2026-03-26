@@ -104,6 +104,42 @@ namespace QNet
         QC::usize recvHead;
         QC::usize recvTail;
         QC::usize recvCount;
+
+        // Minimal TX retransmit tracking for one small in-flight data segment.
+        // Bring-up feature to improve reliability for simple clients like httpget.
+        QC::u8 *txInFlightData;
+        QC::u32 txInFlightSeq;
+        QC::u16 txInFlightLen;
+        QC::u8 txInFlightFlags;
+        QC::u64 txInFlightLastTxMs;
+        QC::u32 txInFlightRtoMs;
+        QC::u8 txInFlightRetries;
+    };
+
+    // Diagnostics view for active connections.
+    // Keep this POD and pointer-free so callers can safely copy snapshots.
+    struct TCPConnectionView
+    {
+        IPv4Address localAddr;
+        QC::u16 localPort;
+        IPv4Address remoteAddr;
+        QC::u16 remotePort;
+
+        TCPState state;
+
+        QC::u32 sendUnacked;
+        QC::u32 sendNext;
+        QC::u32 recvNext;
+
+        QC::u64 synLastTxMs;
+        QC::u32 synRtoMs;
+        QC::u8 synRetries;
+
+        QC::u32 txInFlightSeq;
+        QC::u16 txInFlightLen;
+        QC::u8 txInFlightRetries;
+        QC::u64 txInFlightLastTxMs;
+        QC::u32 txInFlightRtoMs;
     };
 
     class TCP
@@ -119,6 +155,13 @@ namespace QNet
 
         // Diagnostics: copy the most recent TCP events (oldest -> newest).
         QC::usize copyEventLog(TCPEvent *out, QC::usize max) const;
+
+        // Diagnostics: copy active connection snapshots.
+        QC::usize copyConnections(TCPConnectionView *out, QC::usize max) const;
+
+        // Diagnostics/bring-up: drop a connection by local port.
+        // Intended for command tools to clean up kept test connections.
+        bool dropByLocalPort(QC::u16 localPort);
 
         // Connection management
         TCPConnection *connect(IPv4Address remoteAddr, QC::u16 remotePort);

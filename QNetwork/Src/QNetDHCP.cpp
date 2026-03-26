@@ -347,6 +347,12 @@ namespace QNet
                 outLease->subnetMask.octets[3] = 0;
             }
             outLease->gateway = m_gateway;
+            // Some DHCP servers (or minimal implementations) may omit option 3 (Router).
+            // In our typical QEMU SLIRP environment, the DHCP server is also the gateway.
+            if (outLease->gateway.value == 0 && m_serverId.value != 0)
+            {
+                outLease->gateway = m_serverId;
+            }
             outLease->dnsServer = m_dnsServer;
             outLease->serverId = m_serverId;
             outLease->leaseTimeSec = m_leaseTimeSec;

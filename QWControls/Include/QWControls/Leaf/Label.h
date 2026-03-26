@@ -14,6 +14,10 @@ namespace QW
     namespace Controls
     {
 
+    class Label;
+
+    using LabelClickHandler = void (*)(Label *label, void *userData);
+
         // Text alignment (use the QEvent-compatible definition)
         enum class TextAlign : QC::u8
         {
@@ -61,8 +65,34 @@ namespace QW
             bool transparent() const { return m_transparent; }
             void setTransparent(bool transparent) { m_transparent = transparent; }
 
+            // Optional interactivity
+            void setClickHandler(LabelClickHandler handler, void *userData);
+
+            bool underline() const { return m_underline; }
+            void setUnderline(bool underline)
+            {
+                if (m_underline == underline)
+                    return;
+                m_underline = underline;
+                invalidate();
+            }
+
+            // Optional per-label text scale override (<= 0 disables override)
+            float textScaleOverride() const { return m_textScaleOverride; }
+            void setTextScaleOverride(float scale)
+            {
+                if (m_textScaleOverride == scale)
+                    return;
+                m_textScaleOverride = scale;
+                invalidate();
+            }
+
             // Labels are non-interactive by default; they should not intercept mouse hit tests.
-            bool hitTest(int, int) const override { return false; }
+            bool hitTest(int x, int y) const override;
+
+            // Event handling for interactive labels
+            bool onMouseDown(int x, int y, QK::Event::MouseButton button) override;
+            bool onMouseUp(int x, int y, QK::Event::MouseButton button) override;
 
             // Rendering (override from ControlBase)
             void paint(const PaintContext &context) override;
@@ -74,9 +104,14 @@ namespace QW
             VerticalAlign m_verticalAlign;
             bool m_wordWrap;
             bool m_transparent;
+            bool m_underline;
+            float m_textScaleOverride;
 
             Color m_textColor;
             Color m_bgColor;
+
+            LabelClickHandler m_clickHandler;
+            void *m_clickUserData;
         };
 
     } // namespace Controls

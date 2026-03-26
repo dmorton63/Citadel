@@ -4,6 +4,11 @@
 #include "QKEventTypes.h"
 #include "QWStyleTypes.h"
 
+namespace QG
+{
+    struct ImageSurface;
+}
+
 namespace QW
 {
     namespace Controls
@@ -24,11 +29,27 @@ namespace QW
             const char *text() const { return m_text; }
             void setText(const char *text);
 
+            const QG::ImageSurface *icon() const { return m_icon; }
+            void setIcon(const QG::ImageSurface *icon);
+
+            bool borderless() const { return m_borderless; }
+            void setBorderless(bool borderless);
+
             // Behavior
             void setClickHandler(ButtonClickHandler handler, void *userData);
 
             ButtonRole role() const { return m_role; }
             void setRole(ButtonRole role);
+
+            // Optional per-button text scale override (<= 0 disables override)
+            float textScaleOverride() const { return m_textScaleOverride; }
+            void setTextScaleOverride(float scale)
+            {
+                if (m_textScaleOverride == scale)
+                    return;
+                m_textScaleOverride = scale;
+                invalidate();
+            }
 
             // Rendering (delegated to StyleRenderer)
             void paint(const PaintContext &ctx) override;
@@ -40,6 +61,9 @@ namespace QW
 
         private:
             char m_text[256];
+            const QG::ImageSurface *m_icon = nullptr;
+            bool m_borderless = false;
+            float m_textScaleOverride = 0.0f;
             bool m_pressed = false;
             bool m_hovered = false;
             int m_pressX = 0;

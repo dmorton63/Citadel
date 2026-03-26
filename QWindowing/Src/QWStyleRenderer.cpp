@@ -3,6 +3,7 @@
 #include "QWStyleRenderer.h"
 #include "QGPainter.h"
 #include "QCUIStyle.h"
+#include "QG/Image.h"
 
 namespace QW
 {
@@ -516,6 +517,8 @@ namespace QW
         const auto &spec = buttonStyle(styleData, args.role);
         const auto &caps = m_backend->capabilities();
 
+        const bool borderless = args.borderless;
+
         const bool disabled = args.state == ButtonPaintArgs::State::Disabled;
         const bool hovered = args.state == ButtonPaintArgs::State::Hovered;
         const bool pressed = args.state == ButtonPaintArgs::State::Pressed;
@@ -530,7 +533,7 @@ namespace QW
             buttonRect.y += styleData.metrics.buttonPressDepth;
         }
 
-        if (args.defaultButton && spec.focusOutline.a > 0 && styleData.metrics.focusRingWidth > 0)
+        if (!borderless && args.defaultButton && spec.focusOutline.a > 0 && styleData.metrics.focusRingWidth > 0)
         {
             const QC::i32 inflate = static_cast<QC::i32>(styleData.metrics.focusRingWidth);
             QC::Rect focusRect = expandRect(buttonRect, inflate);
@@ -577,9 +580,9 @@ namespace QW
 
         // For material-driven glass, avoid a uniform solid border/outline.
         // The "edge" should be conveyed by reflections (inner strokes) and transparency.
-        const bool materialGlass = spec.materialLayers.enabled && caps.supportsAlpha && !disabled;
+        const bool materialGlass = !borderless && spec.materialLayers.enabled && caps.supportsAlpha && !disabled;
 
-        const bool hasShadow = !disabled && spec.castsShadow && caps.supportsShadows && spec.glow.a > 0 && styleData.metrics.buttonShadowSoftness > 0;
+        const bool hasShadow = !borderless && !disabled && spec.castsShadow && caps.supportsShadows && spec.glow.a > 0 && styleData.metrics.buttonShadowSoftness > 0;
         if (hasShadow)
         {
             m_backend->drawShadow(buttonRect,
@@ -608,11 +611,6 @@ namespace QW
             }
         };
 
-        drawShape(buttonRect,
-              fill,
-              materialGlass ? QC::Color::transparent() : borderColor,
-              materialGlass ? 0 : borderWidth);
-
         const auto overlayColorForState = [&]() -> QC::Color
         {
             if (disabled)
@@ -624,10 +622,99 @@ namespace QW
             return QC::Color::transparent();
         };
 
-        QC::Color overlay = overlayColorForState();
-        if (overlay.a > 0)
+        if (borderless)
         {
-            drawShape(buttonRect, overlay, QC::Color::transparent(), 0);
+            QC::Color overlay = overlayColorForState();
+            if (overlay.a > 0)
+            {
+                const bool hasText = (args.text && args.text[0]);
+                const bool hasIcon = (args.icon && args.icon->isValid());
+
+                QC::Size textSize{0, 0};
+                if (hasText && m_context.painter)
+                {
+                    textSize = m_context.painter->measureText(args.text);
+                }
+
+                QC::i32 iconW = 0;
+                QC::i32 iconH = 0;
+                if (hasIcon)
+                {
+                    QC::i32 maxIcon = static_cast<QC::i32>(buttonRect.height) - 12;
+                    if (maxIcon < 12)
+                        maxIcon = static_cast<QC::i32>(buttonRect.height);
+                    if (maxIcon > 24)
+                        maxIcon = 24;
+                    iconW = maxIcon;
+                    iconH = maxIcon;
+                }
+
+                const QC::i32 gap = (hasText && hasIcon) ? 6 : 0;
+                const QC::i32 contentW = (hasIcon ? iconW : 0) + gap + (hasText ? static_cast<QC::i32>(textSize.width) : 0);
+                const QC::i32 contentH = (iconH > static_cast<QC::i32>(textSize.height)) ? iconH : static_cast<QC::i32>(textSize.height);
+                QC::i32 contentX = buttonRect.x + (static_cast<QC::i32>(buttonRect.width) - contentW) / 2;
+                QC::i32 contentY = buttonRect.y + (static_cast<QC::i32>(buttonRect.height) - contentH) / 2;
+
+                QC::i32 contentYOffset = 0;
+                if (hovered && styleData.metrics.buttonTextHoverOffset != 0)
+                    contentYOffset -= styleData.metrics.buttonTextHoverOffset;
+                if (pressed && styleData.metrics.buttonTextPressedOffset != 0)
+                    contentYOffset += styleData.metrics.buttonTextPressedOffset;
+                contentY += contentYOffset;
+
+                const QC::i32 padX = (hasText && hasIcon) ? 10 : 8;
+                const QC::i32 padY = 6;
+                QC::Rect highlightRect{
+                    contentX - padX,
+                    contentY - padY,
+                    static_cast<QC::u32>(contentW + (padX * 2)),
+                    static_cast<QC::u32>(contentH + (padY * 2))};
+
+                auto clampToButton = [&](const QC::Rect &rect) -> QC::Rect
+                {
+                    QC::i32 l = rect.x;
+                    QC::i32 t = rect.y;
+                    QC::i32 r = rect.x + static_cast<QC::i32>(rect.width);
+                    QC::i32 b = rect.y + static_cast<QC::i32>(rect.height);
+
+                    const QC::i32 bl = buttonRect.x;
+                    const QC::i32 bt = buttonRect.y;
+                    const QC::i32 br = buttonRect.x + static_cast<QC::i32>(buttonRect.width);
+                    const QC::i32 bb = buttonRect.y + static_cast<QC::i32>(buttonRect.height);
+
+                    if (l < bl)
+                        l = bl;
+                    if (t < bt)
+                        t = bt;
+                    if (r > br)
+                        r = br;
+                    if (b > bb)
+                        b = bb;
+
+                    if (r <= l || b <= t)
+                        return QC::Rect{0, 0, 0, 0};
+                    return QC::Rect{l, t, static_cast<QC::u32>(r - l), static_cast<QC::u32>(b - t)};
+                };
+
+                highlightRect = clampToButton(highlightRect);
+                if (highlightRect.width > 0 && highlightRect.height > 0)
+                {
+                    drawShape(highlightRect, overlay, QC::Color::transparent(), 0);
+                }
+            }
+        }
+        else
+        {
+            drawShape(buttonRect,
+                      fill,
+                      materialGlass ? QC::Color::transparent() : borderColor,
+                      materialGlass ? 0 : borderWidth);
+
+            QC::Color overlay = overlayColorForState();
+            if (overlay.a > 0)
+            {
+                drawShape(buttonRect, overlay, QC::Color::transparent(), 0);
+            }
         }
 
         const auto outlineColorForState = [&]() -> QC::Color
@@ -639,13 +726,16 @@ namespace QW
             return spec.outline;
         };
 
-        QC::Color outlineColor = (!disabled && !materialGlass) ? outlineColorForState() : QC::Color::transparent();
-        if (outlineColor.a > 0)
+        if (!borderless)
         {
-            drawShape(buttonRect, QC::Color::transparent(), outlineColor, 1);
+            QC::Color outlineColor = (!disabled && !materialGlass) ? outlineColorForState() : QC::Color::transparent();
+            if (outlineColor.a > 0)
+            {
+                drawShape(buttonRect, QC::Color::transparent(), outlineColor, 1);
+            }
         }
 
-        const bool supportsAlpha = caps.supportsAlpha && !disabled;
+        const bool supportsAlpha = !borderless && caps.supportsAlpha && !disabled;
         if (supportsAlpha)
         {
             const QC::u32 inset = borderWidth > 0 ? borderWidth : 1;
@@ -852,20 +942,62 @@ namespace QW
             }
         }
 
-        if (m_context.painter && args.text)
+        if (m_context.painter)
         {
-            QC::Size textSize = m_context.painter->measureText(args.text);
-            QC::i32 textX = buttonRect.x + (static_cast<QC::i32>(buttonRect.width) - static_cast<QC::i32>(textSize.width)) / 2;
-            QC::i32 textY = buttonRect.y + (static_cast<QC::i32>(buttonRect.height) - static_cast<QC::i32>(textSize.height)) / 2;
-            if (hovered && styleData.metrics.buttonTextHoverOffset != 0)
+            const bool hasText = (args.text && args.text[0]);
+            const bool hasIcon = (args.icon && args.icon->isValid());
+            if (hasText || hasIcon)
             {
-                textY -= styleData.metrics.buttonTextHoverOffset;
+                QC::Vector<QC::u32> iconScratchRow;
+
+                QC::Size textSize{0, 0};
+                if (hasText)
+                {
+                    textSize = m_context.painter->measureText(args.text);
+                }
+
+                QC::i32 iconW = 0;
+                QC::i32 iconH = 0;
+                if (hasIcon)
+                {
+                    QC::i32 maxIcon = static_cast<QC::i32>(buttonRect.height) - 12;
+                    if (maxIcon < 12)
+                        maxIcon = static_cast<QC::i32>(buttonRect.height);
+                    if (maxIcon > 24)
+                        maxIcon = 24;
+                    iconW = maxIcon;
+                    iconH = maxIcon;
+                }
+
+                const QC::i32 gap = (hasText && hasIcon) ? 6 : 0;
+                const QC::i32 contentW = (hasIcon ? iconW : 0) + gap + (hasText ? static_cast<QC::i32>(textSize.width) : 0);
+                QC::i32 contentX = buttonRect.x + (static_cast<QC::i32>(buttonRect.width) - contentW) / 2;
+
+                QC::i32 contentYOffset = 0;
+                if (hovered && styleData.metrics.buttonTextHoverOffset != 0)
+                    contentYOffset -= styleData.metrics.buttonTextHoverOffset;
+                if (pressed && styleData.metrics.buttonTextPressedOffset != 0)
+                    contentYOffset += styleData.metrics.buttonTextPressedOffset;
+
+                if (hasIcon)
+                {
+                    const QC::i32 iconX = contentX;
+                    const QC::i32 iconY = buttonRect.y + (static_cast<QC::i32>(buttonRect.height) - iconH) / 2 + contentYOffset;
+                    QG::blitImage(m_context.painter,
+                                 *args.icon,
+                                 QC::Rect{iconX, iconY, static_cast<QC::u32>(iconW), static_cast<QC::u32>(iconH)},
+                                 QG::ImageScaleMode::Fit,
+                                 iconScratchRow);
+                    contentX += iconW + gap;
+                }
+
+                if (hasText)
+                {
+                    const QC::i32 textX = contentX;
+                    const QC::i32 textY = buttonRect.y + (static_cast<QC::i32>(buttonRect.height) - static_cast<QC::i32>(textSize.height)) / 2 + contentYOffset;
+                    m_context.painter->drawText(textX, textY, args.text, textColor);
+                }
             }
-            if (pressed && styleData.metrics.buttonTextPressedOffset != 0)
-            {
-                textY += styleData.metrics.buttonTextPressedOffset;
-            }
-            m_context.painter->drawText(textX, textY, args.text, textColor);
         }
     }
 

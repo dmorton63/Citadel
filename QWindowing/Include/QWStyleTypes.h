@@ -8,6 +8,11 @@
 #include "QCTypes.h"
 #include "QGPainter.h"
 
+namespace QG
+{
+    struct ImageSurface;
+}
+
 namespace QW
 {
 
@@ -175,7 +180,9 @@ namespace QW
 
         QC::Rect bounds;
         const char *text = nullptr;
+        const QG::ImageSurface *icon = nullptr;
         bool defaultButton = false;
+        bool borderless = false;
         ButtonRole role = ButtonRole::Default;
     };
 

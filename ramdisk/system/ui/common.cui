@@ -1,0 +1,80 @@
+<cui-ml-common>
+
+    <!-- ============================
+         GLOBAL REUSABLE COMPONENTS
+         ============================ -->
+
+    <!-- Accent Button -->
+    <Component name="AccentButton">
+        <Button
+            role="accent"
+            font-size: "14"
+            padding="4"
+        />
+    </Component>
+
+    <!-- Destructive Button -->
+    <Component name="DestructiveButton">
+        <Button
+            role="destructive"
+            font-size="14"
+            color="#FFFFFF"
+            background="#8F2E2E"
+            padding="4"
+        />
+    </Component>
+
+    <!-- Card Panel -->
+    <Component name="CardPanel">
+        <Panel
+            background="#E8F5E9"
+            border="#A5D6A7"
+            padding="12"
+        />
+    </Component>
+
+    <!-- Title Label -->
+    <Component name="TitleLabel">
+        <Label
+            font="roboto-regular"
+            font-size="18"
+            color="#1B5E20"
+        />
+    </Component>
+
+    <!-- Body Label -->
+    <Component name="BodyLabel">
+        <Label
+            font="roboto-regular"
+            font-size="14"
+            color="#2E7D32"
+        />
+    </Component>
+
+    <!-- ============================
+         COMMON ICON PATHS
+         ============================ -->
+
+    <Icons>
+        <Icon id="folder" path="/system/icons/folder.png" />
+        <Icon id="settings" path="/system/icons/settings.png" />
+        <Icon id="terminal" path="/system/icons/terminal.png" />
+        <Icon id="leaf" path="/system/icons/leaf.png" />
+        <Icon id="shutdown" path="/system/icons/svg/power.svg" />
+    </Icons>
+
+    <!-- ============================
+         COMMON ROLES
+         ============================ -->
+
+    <Roles>
+        <Role id="accent"
+            font="roboto-regular"
+            background="#4A8F4A" 
+            color="#FFFFFF" />
+
+        <Role id="sidebar" background="#4A8F4A" color="#E8F5E9" />
+        <Role id="destructive" background="#8F2E2E" color="#FFFFFF" />
+    </Roles>
+
+</cui-ml-common>

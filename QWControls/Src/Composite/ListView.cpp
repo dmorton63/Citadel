@@ -322,6 +322,17 @@ namespace QW
             Rect abs = absoluteBounds();
             auto *painter = context.painter;
 
+            const QC::Size glyphSize = painter->measureText("M");
+            const QC::i32 lineHeight = (glyphSize.height > 0) ? glyphSize.height : 16;
+
+            auto rowTextY = [&](QC::i32 rowY, QC::u32 rowH) -> QC::i32
+            {
+                QC::i32 y = rowY + (static_cast<QC::i32>(rowH) - lineHeight) / 2;
+                if (y < rowY)
+                    y = rowY;
+                return y;
+            };
+
             painter->fillRect(abs, m_bgColor);
             painter->drawRect(abs, Color(128, 128, 128, 255));
 
@@ -336,7 +347,7 @@ namespace QW
                 for (QC::usize i = 0; i < m_columns.size(); ++i)
                 {
                     painter->drawText(colX + 4,
-                                      currentY + static_cast<QC::i32>(m_itemHeight / 2),
+                                      rowTextY(currentY, m_itemHeight),
                                       m_columns[i].header,
                                       m_textColor);
                     colX += static_cast<QC::i32>(m_columns[i].width);
@@ -356,14 +367,14 @@ namespace QW
                 {
                     painter->fillRect(itemRect, m_selColor);
                     painter->drawText(abs.x + 4,
-                                      currentY + static_cast<QC::i32>(m_itemHeight / 2),
+                                      rowTextY(currentY, m_itemHeight),
                                       item.text,
                                       Color(255, 255, 255, 255));
                 }
                 else
                 {
                     painter->drawText(abs.x + 4,
-                                      currentY + static_cast<QC::i32>(m_itemHeight / 2),
+                                      rowTextY(currentY, m_itemHeight),
                                       item.text,
                                       m_textColor);
                 }

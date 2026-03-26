@@ -198,13 +198,29 @@ namespace QW
             Rect abs = absoluteBounds();
             auto *painter = context.painter;
 
+            const QC::Size glyphSize = painter->measureText("M");
+            const QC::i32 glyphAdvance = (glyphSize.width > 0) ? glyphSize.width : 8;
+            const QC::i32 lineHeight = (glyphSize.height > 0) ? glyphSize.height : 16;
+
             // Background + border
             painter->fillRect(abs, m_bgColor);
             painter->drawRect(abs, m_borderColor);
 
+            const QC::Rect painterBounds = painter->bounds();
+            const QC::Rect oldClip = painter->clipRect();
+            const bool oldWasFullClip = (oldClip == painterBounds);
+
+            // Clip is in pixel coordinates (after origin translation).
+            const QC::Point origin = painter->origin();
+            const QC::Rect absInPixels = abs.offset(origin.x, origin.y);
+            const QC::Rect clip = oldClip.intersection(absInPixels);
+            painter->setClipRect(clip);
+
             // Text drawing baseline (simple vertical centering)
             QC::i32 textX = abs.x + 4; // small left padding
-            QC::i32 textY = abs.y + static_cast<QC::i32>(abs.height / 2);
+            QC::i32 textY = abs.y + (static_cast<QC::i32>(abs.height) - lineHeight) / 2;
+            if (textY < abs.y)
+                textY = abs.y;
 
             if (m_textLength > 0)
             {
@@ -233,8 +249,8 @@ namespace QW
             {
                 QC::usize start = m_selStart < m_selEnd ? m_selStart : m_selEnd;
                 QC::usize end = m_selStart > m_selEnd ? m_selStart : m_selEnd;
-                QC::i32 selX = abs.x + 4 + static_cast<QC::i32>(start * 8);
-                QC::u32 selWidth = static_cast<QC::u32>((end - start) * 8);
+                QC::i32 selX = abs.x + 4 + static_cast<QC::i32>(start * static_cast<QC::usize>(glyphAdvance));
+                QC::u32 selWidth = static_cast<QC::u32>((end - start) * static_cast<QC::usize>(glyphAdvance));
                 Rect selRect = {selX, abs.y + 2, selWidth, abs.height - 4};
                 painter->fillRect(selRect, m_selectionColor);
             }
@@ -242,10 +258,15 @@ namespace QW
             // Caret last so it stays visible atop selection
             if (m_focused)
             {
-                QC::i32 cursorX = abs.x + 4 + static_cast<QC::i32>(m_cursorPos * 8);
+                QC::i32 cursorX = abs.x + 4 + static_cast<QC::i32>(m_cursorPos * static_cast<QC::usize>(glyphAdvance));
                 Rect cursorRect = {cursorX, abs.y + 2, 1, abs.height - 4};
                 painter->fillRect(cursorRect, m_textColor);
             }
+
+            if (oldWasFullClip)
+                painter->clearClipRect();
+            else
+                painter->setClipRect(oldClip);
         }
 
         bool TextBox::onKeyDown(QC::u8 scancode, QC::u8 keycode, char character, QK::Event::Modifiers mods)

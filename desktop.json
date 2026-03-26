@@ -46,6 +46,7 @@
                     }
                 },
                 "font": {
+                    "family": "OpenSans",
                     "size": 16
                 }
             }

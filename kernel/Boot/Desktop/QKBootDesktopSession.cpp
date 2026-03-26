@@ -761,9 +761,23 @@ namespace QK::Boot::Desktop
                 // NOTE: For our USB mouse path, the driver already maintains a clamped
                 // absolute cursor position even for relative devices (curX/curY). Windowing
                 // hit-testing relies on x/y being meaningful.
+                bool postedMove = false;
                 if (moved || buttonsChanged)
                 {
                     eventMgr.postMouseMove(curX, curY, dx, dy);
+                    postedMove = true;
+                }
+
+                // Scroll wheel (mouse wheel) -> mouse scroll event.
+                // Ensure hover is current even if the wheel moved without pointer movement.
+                if (report.wheel != 0)
+                {
+                    if (!postedMove)
+                    {
+                        eventMgr.postMouseMove(curX, curY, 0, 0);
+                        postedMove = true;
+                    }
+                    eventMgr.postMouseScroll(report.wheel, curX, curY);
                 }
 
                 // Check for button state changes.
@@ -906,15 +920,46 @@ namespace QK::Boot::Desktop
                     wm.render();
                 }
 
-                // No more immediate work to do; sleep until the next interrupt.
+                // No more immediate work to do; exit the inner loop and let the
+                // idle pacing logic decide how long to wait.
                 if (processed == 0 && !wm.needsRender())
                 {
                     break;
                 }
             }
 
-            // Halt until next interrupt.
-            asm volatile("hlt");
+            // Idle pacing:
+            // Previously this loop used `hlt` to wait for the next interrupt.
+            // In practice, when the next interrupt is delayed (e.g., sparse input,
+            // timer issues, or interrupt masking in drivers), this can stall UI
+            // presentation for multi-second intervals.
+            //
+            // Instead, run a small periodic tick that:
+            // - keeps driver polling/network alive,
+            // - processes events,
+            // - forces a render at a predictable cadence when idle.
+            //
+            // Minimal UX: target ~60Hz, but keep CPU usage bounded with short sleeps.
+            static constexpr QC::u64 kFrameIntervalMs = 16;
+            const QC::u64 nowMs = QDrv::Timer::instance().milliseconds();
+            static QC::u64 s_nextFrameMs = 0;
+            if (s_nextFrameMs == 0)
+                s_nextFrameMs = nowMs;
+
+            if (nowMs >= s_nextFrameMs)
+            {
+                // Force a compositor tick so hover/cursor/pointer feedback stays snappy.
+                wm.render();
+                s_nextFrameMs = nowMs + kFrameIntervalMs;
+            }
+            else
+            {
+                // Sleep in short slices so input interrupts can still wake us quickly.
+                const QC::u64 remainingMs = s_nextFrameMs - nowMs;
+                const QC::u64 sleepMs = (remainingMs > 2) ? 2 : remainingMs;
+                if (sleepMs > 0)
+                    QDrv::Timer::instance().sleep(static_cast<QC::u32>(sleepMs));
+            }
         }
     }
 

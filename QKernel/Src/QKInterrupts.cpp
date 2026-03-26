@@ -4,6 +4,7 @@
 #include "QKInterrupts.h"
 #include "QCLogger.h"
 #include "QCBuiltins.h"
+#include "QArchCPU.h"
 
 namespace QK
 {
@@ -142,7 +143,24 @@ namespace QK
         else if (vector < 32)
         {
             // Unhandled exception
-            QC_LOG_FATAL("QKInt", "Unhandled exception %u at RIP=%lx", vector, frame->rip);
+            if (vector == INT_PAGE_FAULT)
+            {
+                const QC::u64 cr2 = QArch::CPU::instance().readCR2();
+                const QC::u64 err = frame->errorCode;
+                const QC::u64 p = (err & 0x1u) ? 1u : 0u;          // 0=not-present,1=protection
+                const QC::u64 w = (err & 0x2u) ? 1u : 0u;          // 1=write,0=read
+                const QC::u64 u = (err & 0x4u) ? 1u : 0u;          // 1=user
+                const QC::u64 rsvd = (err & 0x8u) ? 1u : 0u;       // reserved bit violation
+                const QC::u64 ifetch = (err & 0x10u) ? 1u : 0u;    // instruction fetch
+
+                QC_LOG_FATAL("QKInt", "PageFault rip=%lx cr2=%lx err=%lx [P=%llu W=%llu U=%llu RSVD=%llu I=%llu] rsp=%lx",
+                             frame->rip, cr2, err, p, w, u, rsvd, ifetch, frame->rsp);
+            }
+            else
+            {
+                QC_LOG_FATAL("QKInt", "Unhandled exception %u at RIP=%lx err=%lx rsp=%lx",
+                             vector, frame->rip, frame->errorCode, frame->rsp);
+            }
             QC::halt();
         }
 

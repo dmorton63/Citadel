@@ -57,12 +57,18 @@
       "path": "/SYSCFG.JSN",
       "type": "sysconfig",
       "required": true
+    },
+    {
+      "id": "fs",
+      "path": "/PROD/MODULES/fs.mod",
+      "required": true
     }
   ],
   "boot": {
     "early": [
       "boot",
       "sysconfig",
+      "fs",
       "security",
       "services",
       "drivers",

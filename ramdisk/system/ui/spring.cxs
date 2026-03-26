@@ -1,0 +1,90 @@
+/* SPRING.CXS — CUIMLSS 8.3 stylesheet */
+
+/* Element defaults */
+Panel {
+    background: #1F2A1F;
+    border: #3A4A3A;
+    border-width: 1;
+}
+
+Label {
+    color: #FFFFFF;
+    font-family: roboto-regular;
+    font-size: 14;
+}
+
+/* Header */
+#headerBar {
+    background: #4A8F4A;
+    border: #2E5F2E;
+    border-width: 1;
+}
+
+#headerTitle {
+    font-size: 18;
+    color: #E8F5E9;
+}
+
+#headerFlower {
+    font-size: 24;
+    color: #FFFFFF;
+}
+
+#clockLabel {
+    font-size: 16;
+    color: #E8F5E9;
+}
+
+/* Sidebar */
+#sidebar {
+    background: #4A8F4A;
+    border: #3A4A3A;
+    border-width: 1;
+}
+
+#sidebarTitle {
+    color: #C8E6C9;
+}
+
+/* Main content */
+#mainContent {
+    background: rgba(255,255,255,0.25);
+}
+
+#welcomeLabel {
+    font-family: roboto-regular;
+    font-size: 28;
+    color: #1B5E20;
+}
+
+#infoLabel {
+    font-size: 16;
+    color: #2E7D32;
+}
+
+#cardPanel {
+    background: #E8F5E9;
+    border: #A5D6A7;
+    border-width: 1;
+}
+
+#cardTitle {
+    font-size: 18;
+    color: #1B5E20;
+}
+
+#cardText {
+    color: #2E7D32;
+}
+
+/* Taskbar */
+#taskbar {
+    background: #4A8F4A;
+    border: #2E5F2E;
+    border-width: 1;
+}
+
+#taskbarClock {
+    font-size: 16;
+    color: #E8F5E9;
+}

@@ -5,6 +5,7 @@
 #include "QWWindow.h"
 #include "QWWindowManager.h"
 #include "QCLogger.h"
+#include "QGPainter.h"
 #include <cstring>
 
 namespace QW
@@ -37,6 +38,22 @@ namespace QW
             }
         }
 
+        void Button::setIcon(const QG::ImageSurface *icon)
+        {
+            if (m_icon == icon)
+                return;
+            m_icon = icon;
+            invalidate();
+        }
+
+        void Button::setBorderless(bool borderless)
+        {
+            if (m_borderless == borderless)
+                return;
+            m_borderless = borderless;
+            invalidate();
+        }
+
         void Button::setClickHandler(ButtonClickHandler handler, void *userData)
         {
             m_clickHandler = handler;
@@ -57,11 +74,21 @@ namespace QW
             if (!ctx.styleRenderer || !m_window || !m_visible)
                 return;
 
+            const bool hasScaleOverride = (m_textScaleOverride > 0.0f);
+            float oldScale = 1.0f;
+            if (hasScaleOverride && ctx.painter)
+            {
+                oldScale = ctx.painter->textScale();
+                ctx.painter->setTextScale(m_textScaleOverride);
+            }
+
             ButtonPaintArgs args{};
             args.bounds = absoluteBounds();
             args.text = m_text;
+            args.icon = m_icon;
             args.role = m_role;
             args.defaultButton = m_focused;
+            args.borderless = m_borderless;
 
             // Map internal state to style state
             if (!m_enabled)
@@ -74,6 +101,11 @@ namespace QW
                 args.state = ButtonPaintArgs::State::Normal;
 
             ctx.styleRenderer->drawButton(args);
+
+            if (hasScaleOverride && ctx.painter)
+            {
+                ctx.painter->setTextScale(oldScale);
+            }
         }
 
         bool Button::onMouseMove(int x, int y, int dx, int dy)

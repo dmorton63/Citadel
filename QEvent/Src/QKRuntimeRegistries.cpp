@@ -38,6 +38,87 @@ namespace QK::Runtime
         m_bootSeed = seed;
     }
 
+    void Registries::dumpBootSeedModules(void (*log)(const char *)) const
+    {
+        if (!log)
+            return;
+
+        log("BootSeed: modules count=");
+        {
+            char buf[16];
+            QC::usize pos = 0;
+            QC::u32 v = m_bootSeed.moduleCount;
+            if (v == 0)
+                buf[pos++] = '0';
+            else
+            {
+                char tmp[12];
+                QC::usize t = 0;
+                while (v && t < sizeof(tmp))
+                {
+                    tmp[t++] = static_cast<char>('0' + (v % 10));
+                    v /= 10;
+                }
+                while (t)
+                    buf[pos++] = tmp[--t];
+            }
+            buf[pos] = 0;
+            log(buf);
+        }
+        log("\r\n");
+
+        QC::u32 n = m_bootSeed.moduleCount;
+        if (n > 16)
+            n = 16;
+
+        for (QC::u32 i = 0; i < n; ++i)
+        {
+            const auto &m = m_bootSeed.modules[i];
+            if (!m.id[0] && !m.resolvedPath[0])
+                continue;
+
+            log("  [");
+            {
+                char idx[16];
+                QC::usize pos = 0;
+                QC::u32 v = i;
+                if (v == 0)
+                    idx[pos++] = '0';
+                else
+                {
+                    char tmp[12];
+                    QC::usize t = 0;
+                    while (v && t < sizeof(tmp))
+                    {
+                        tmp[t++] = static_cast<char>('0' + (v % 10));
+                        v /= 10;
+                    }
+                    while (t)
+                        idx[pos++] = tmp[--t];
+                }
+                idx[pos] = 0;
+                log(idx);
+            }
+            log("] id='");
+            log(m.id[0] ? m.id : "(none)");
+            log("' type='");
+            log(m.type[0] ? m.type : "(none)");
+            log("' role='");
+            log(m.role[0] ? m.role : "(none)");
+            log("' status='");
+            log(m.status[0] ? m.status : "(none)");
+            log("' req_hash=");
+            log(m.hashRequired ? "1" : "0");
+            log(" req_sig=");
+            log(m.signatureRequired ? "1" : "0");
+            log(" required=");
+            log(m.required ? "1" : "0");
+            log(" path='");
+            log(m.resolvedPath[0] ? m.resolvedPath : "(none)");
+            log("'\r\n");
+        }
+    }
+
     QC::usize Registries::processCount() const
     {
         QC::usize n = 0;

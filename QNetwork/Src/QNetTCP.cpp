@@ -66,6 +66,37 @@ namespace QNet
     static constexpr QC::usize DEFAULT_RECV_BUFFER = 8192;
     static constexpr QC::usize DEFAULT_WINDOW = 65535;
 
+    static void clearInFlightTx(TCPConnection *conn)
+    {
+        if (!conn)
+            return;
+        if (conn->txInFlightData)
+        {
+            QK::Memory::Heap::instance().free(conn->txInFlightData);
+            conn->txInFlightData = nullptr;
+        }
+        conn->txInFlightSeq = 0;
+        conn->txInFlightLen = 0;
+        conn->txInFlightFlags = 0;
+        conn->txInFlightLastTxMs = 0;
+        conn->txInFlightRtoMs = 0;
+        conn->txInFlightRetries = 0;
+    }
+
+    static void onAckAdvance(TCPConnection *conn, QC::u32 ackNum)
+    {
+        if (!conn)
+            return;
+        if (conn->txInFlightLen == 0)
+            return;
+
+        const QC::u32 end = conn->txInFlightSeq + static_cast<QC::u32>(conn->txInFlightLen);
+        if (ackNum >= end)
+        {
+            clearInFlightTx(conn);
+        }
+    }
+
     static QC::usize ringWrite(QC::u8 *buf, QC::usize bufSize, QC::usize &tail, QC::usize &count, const QC::u8 *src, QC::usize len)
     {
         if (!buf || bufSize == 0)
@@ -175,6 +206,48 @@ namespace QNet
             conn->synLastTxMs = nowMs;
             conn->synRtoMs = (rto < 4000) ? (rto * 2) : 4000;
         }
+
+        // Minimal data retransmit logic for one in-flight small segment.
+        constexpr QC::u8 kMaxDataRetries = 5;
+        for (QC::usize i = 0; i < MAX_CONNECTIONS; ++i)
+        {
+            TCPConnection *conn = m_connections[i];
+            if (!conn)
+                continue;
+            if (conn->txInFlightLen == 0 || !conn->txInFlightData)
+                continue;
+            if (conn->state != TCPState::Established && conn->state != TCPState::CloseWait && conn->state != TCPState::FinWait1 && conn->state != TCPState::FinWait2)
+                continue;
+
+            if (conn->txInFlightLastTxMs == 0)
+            {
+                conn->txInFlightLastTxMs = nowMs;
+                continue;
+            }
+
+            const QC::u64 elapsed = nowMs - conn->txInFlightLastTxMs;
+            const QC::u32 rto = (conn->txInFlightRtoMs != 0) ? conn->txInFlightRtoMs : 500;
+            if (elapsed < static_cast<QC::u64>(rto))
+                continue;
+
+            if (conn->txInFlightRetries >= kMaxDataRetries)
+            {
+                // Give up: mark closed so callers can observe failure.
+                clearInFlightTx(conn);
+                conn->state = TCPState::Closed;
+                continue;
+            }
+
+            // Retransmit with the original sequence.
+            sendSegment(conn, conn->txInFlightFlags,
+                        conn->txInFlightData,
+                        conn->txInFlightLen,
+                        conn->txInFlightSeq,
+                        conn->recvNext);
+            conn->txInFlightRetries++;
+            conn->txInFlightLastTxMs = nowMs;
+            conn->txInFlightRtoMs = (rto < 4000) ? (rto * 2) : 4000;
+        }
     }
 
     void TCP::pushEvent(TCPEvent::Dir dir, IPv4Address addr,
@@ -214,6 +287,60 @@ namespace QNet
             out[i] = m_events[(start + i) % EVENT_LOG_SIZE];
         }
         return n;
+    }
+
+    QC::usize TCP::copyConnections(TCPConnectionView *out, QC::usize max) const
+    {
+        if (!out || max == 0)
+            return 0;
+
+        QC::usize n = 0;
+        for (QC::usize i = 0; i < MAX_CONNECTIONS && n < max; ++i)
+        {
+            TCPConnection *conn = m_connections[i];
+            if (!conn)
+                continue;
+
+            TCPConnectionView &v = out[n++];
+            memset(&v, 0, sizeof(v));
+
+            v.localAddr = conn->localAddr;
+            v.localPort = conn->localPort;
+            v.remoteAddr = conn->remoteAddr;
+            v.remotePort = conn->remotePort;
+            v.state = conn->state;
+
+            v.sendUnacked = conn->sendUnacked;
+            v.sendNext = conn->sendNext;
+            v.recvNext = conn->recvNext;
+
+            v.synLastTxMs = conn->synLastTxMs;
+            v.synRtoMs = conn->synRtoMs;
+            v.synRetries = conn->synRetries;
+
+            v.txInFlightSeq = conn->txInFlightSeq;
+            v.txInFlightLen = conn->txInFlightLen;
+            v.txInFlightRetries = conn->txInFlightRetries;
+            v.txInFlightLastTxMs = conn->txInFlightLastTxMs;
+            v.txInFlightRtoMs = conn->txInFlightRtoMs;
+        }
+
+        return n;
+    }
+
+    bool TCP::dropByLocalPort(QC::u16 localPort)
+    {
+        for (QC::usize i = 0; i < MAX_CONNECTIONS; ++i)
+        {
+            TCPConnection *conn = m_connections[i];
+            if (!conn)
+                continue;
+            if (conn->localPort != localPort)
+                continue;
+            drop(conn);
+            return true;
+        }
+        return false;
     }
 
     TCPConnection *TCP::connect(IPv4Address remoteAddr, QC::u16 remotePort)
@@ -285,6 +412,14 @@ namespace QNet
         conn->recvTail = 0;
         conn->recvCount = 0;
 
+        conn->txInFlightData = nullptr;
+        conn->txInFlightSeq = 0;
+        conn->txInFlightLen = 0;
+        conn->txInFlightFlags = 0;
+        conn->txInFlightLastTxMs = 0;
+        conn->txInFlightRtoMs = 0;
+        conn->txInFlightRetries = 0;
+
         m_connections[slot] = conn;
 
         // Send SYN
@@ -341,6 +476,14 @@ namespace QNet
         conn->recvTail = 0;
         conn->recvCount = 0;
 
+        conn->txInFlightData = nullptr;
+        conn->txInFlightSeq = 0;
+        conn->txInFlightLen = 0;
+        conn->txInFlightFlags = 0;
+        conn->txInFlightLastTxMs = 0;
+        conn->txInFlightRtoMs = 0;
+        conn->txInFlightRetries = 0;
+
         m_connections[slot] = conn;
 
         return conn;
@@ -350,6 +493,8 @@ namespace QNet
     {
         if (!conn)
             return;
+
+        clearInFlightTx(conn);
 
         const bool havePeer = (conn->remoteAddr.value != 0 && conn->remotePort != 0);
         if (havePeer)
@@ -376,6 +521,8 @@ namespace QNet
                     QK::Memory::Heap::instance().free(conn->sendBuffer);
                 if (conn->recvBuffer)
                     QK::Memory::Heap::instance().free(conn->recvBuffer);
+                if (conn->txInFlightData)
+                    QK::Memory::Heap::instance().free(conn->txInFlightData);
                 QK::Memory::Heap::instance().free(conn);
                 m_connections[i] = nullptr;
                 break;
@@ -415,6 +562,7 @@ namespace QNet
         // If closed, clean up
         if (conn->state == TCPState::Closed)
         {
+            clearInFlightTx(conn);
             for (QC::usize i = 0; i < MAX_CONNECTIONS; i++)
             {
                 if (m_connections[i] == conn)
@@ -423,6 +571,8 @@ namespace QNet
                         QK::Memory::Heap::instance().free(conn->sendBuffer);
                     if (conn->recvBuffer)
                         QK::Memory::Heap::instance().free(conn->recvBuffer);
+                    if (conn->txInFlightData)
+                        QK::Memory::Heap::instance().free(conn->txInFlightData);
                     QK::Memory::Heap::instance().free(conn);
                     m_connections[i] = nullptr;
                     break;
@@ -436,12 +586,39 @@ namespace QNet
         if (!conn || conn->state != TCPState::Established)
             return -1;
 
+        if (!data || length == 0)
+            return 0;
+
+        // Only support one in-flight tracked data segment for now.
+        if (conn->txInFlightLen != 0)
+            return 0;
+
         // For simplicity, send data in one segment (real implementation would segment)
         QC::usize toSend = length;
         if (toSend > conn->sendWindow)
             toSend = conn->sendWindow;
 
-        sendSegment(conn, TCPFlags::PSH | TCPFlags::ACK, data, toSend);
+        const QC::u32 seq = conn->sendNext;
+        const QC::u8 flags = TCPFlags::PSH | TCPFlags::ACK;
+        sendSegment(conn, flags, data, toSend);
+
+        // Track small payloads for retransmit.
+        // (We don't segment yet; this is just for simple clients.)
+        if (toSend > 0 && toSend <= 1460)
+        {
+            conn->txInFlightData = static_cast<QC::u8 *>(QK::Memory::Heap::instance().allocate(toSend));
+            if (conn->txInFlightData)
+            {
+                memcpy(conn->txInFlightData, data, toSend);
+                conn->txInFlightSeq = seq;
+                conn->txInFlightLen = static_cast<QC::u16>(toSend);
+                conn->txInFlightFlags = flags;
+                conn->txInFlightLastTxMs = m_nowMs;
+                conn->txInFlightRtoMs = 500;
+                conn->txInFlightRetries = 0;
+            }
+        }
+
         conn->sendNext += static_cast<QC::u32>(toSend);
 
         return static_cast<QC::isize>(toSend);
@@ -612,6 +789,7 @@ namespace QNet
             {
                 conn->recvNext = seqNum + 1;
                 conn->sendUnacked = ackNum;
+                onAckAdvance(conn, ackNum);
 
                 conn->synRetries = 0;
                 conn->synLastTxMs = 0;
@@ -626,6 +804,7 @@ namespace QNet
             if (flags & TCPFlags::ACK)
             {
                 conn->sendUnacked = ackNum;
+                onAckAdvance(conn, ackNum);
                 conn->state = TCPState::Established;
             }
             break;
@@ -633,7 +812,10 @@ namespace QNet
         case TCPState::Established:
         {
             if (flags & TCPFlags::ACK)
+            {
                 conn->sendUnacked = ackNum;
+                onAckAdvance(conn, ackNum);
+            }
 
             bool shouldAck = false;
 
@@ -681,6 +863,14 @@ namespace QNet
         }
             break;
 
+        case TCPState::CloseWait:
+            if (flags & TCPFlags::ACK)
+            {
+                conn->sendUnacked = ackNum;
+                onAckAdvance(conn, ackNum);
+            }
+            break;
+
         case TCPState::FinWait1:
             if ((flags & TCPFlags::ACK) && (flags & TCPFlags::FIN))
             {
@@ -690,6 +880,8 @@ namespace QNet
             }
             else if (flags & TCPFlags::ACK)
             {
+                conn->sendUnacked = ackNum;
+                onAckAdvance(conn, ackNum);
                 conn->state = TCPState::FinWait2;
             }
             else if (flags & TCPFlags::FIN)
@@ -706,6 +898,11 @@ namespace QNet
                 conn->recvNext = seqNum + 1;
                 sendSegment(conn, TCPFlags::ACK, nullptr, 0);
                 conn->state = TCPState::TimeWait;
+            }
+            if (flags & TCPFlags::ACK)
+            {
+                conn->sendUnacked = ackNum;
+                onAckAdvance(conn, ackNum);
             }
             break;
 

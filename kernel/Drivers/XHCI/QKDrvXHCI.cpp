@@ -143,7 +143,7 @@ namespace QKDrv
             m_maxY = maxY;
         }
 
-        void TabletDriver::updatePosition(QC::i32 x, QC::i32 y, QC::u8 buttons)
+        void TabletDriver::updatePosition(QC::i32 x, QC::i32 y, QC::i32 wheel, QC::u8 buttons)
         {
             // Clamp to bounds
             if (x < m_minX)
@@ -164,7 +164,7 @@ namespace QKDrv
                 MouseReport report;
                 report.x = m_x;
                 report.y = m_y;
-                report.wheel = 0;
+                report.wheel = wheel;
                 report.buttons = m_buttons;
                 report.isAbsolute = true;
                 m_callback(report);
@@ -1182,6 +1182,11 @@ namespace QKDrv
                                 QC::u8 buttons = data[0];
                                 QC::u16 absX = data[1] | (data[2] << 8);
                                 QC::u16 absY = data[3] | (data[4] << 8);
+                                QC::i32 wheel = 0;
+                                if (dev.hidMaxPacket >= 6)
+                                {
+                                    wheel = static_cast<QC::i8>(data[5]);
+                                }
 
                                 QC::u32 logicalMaxX = dev.logicalMaxX ? dev.logicalMaxX : 0x7FFF;
                                 QC::u32 logicalMaxY = dev.logicalMaxY ? dev.logicalMaxY : 0x7FFF;
@@ -1212,7 +1217,7 @@ namespace QKDrv
                                                              logicalMaxY);
                                 }
 
-                                m_tabletDriver->updatePosition(x, y, buttons);
+                                m_tabletDriver->updatePosition(x, y, wheel, buttons);
                             }
                         }
                         else if (dev.isMouse)

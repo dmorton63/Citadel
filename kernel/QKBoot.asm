@@ -145,7 +145,7 @@ align 16
 
 ; Kernel stack (backup, Limine provides one)
 stack_bottom:
-    resb 16384  ; 16 KB stack
+    resb 65536  ; 64 KB stack
 stack_top:
 
 ; ============================================================================

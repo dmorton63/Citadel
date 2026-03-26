@@ -185,4 +185,67 @@ namespace QK::Boot::Security
         QC::String::memset(block, 0, sizeof(block));
         QC::String::memset(state, 0, sizeof(state));
     }
+
+    static QC::u8 FromHexDigit(char c)
+    {
+        if (c >= '0' && c <= '9')
+            return static_cast<QC::u8>(c - '0');
+        if (c >= 'a' && c <= 'f')
+            return static_cast<QC::u8>(10 + (c - 'a'));
+        if (c >= 'A' && c <= 'F')
+            return static_cast<QC::u8>(10 + (c - 'A'));
+        return 0xFF;
+    }
+
+    bool Sha256DigestToLowerHex(const QC::u8 Digest[32], char *Out, QC::usize OutCap)
+    {
+        if (!Digest || !Out || OutCap < 65)
+            return false;
+
+        static const char kHex[] = "0123456789abcdef";
+        for (QC::usize i = 0; i < 32; ++i)
+        {
+            const QC::u8 b = Digest[i];
+            Out[i * 2 + 0] = kHex[(b >> 4) & 0xF];
+            Out[i * 2 + 1] = kHex[b & 0xF];
+        }
+        Out[64] = 0;
+        return true;
+    }
+
+    bool Sha256DigestEqualsHex(const QC::u8 Digest[32], const char *Hex)
+    {
+        if (!Digest || !Hex)
+            return false;
+
+        // Skip optional 0x prefix.
+        if (Hex[0] == '0' && (Hex[1] == 'x' || Hex[1] == 'X'))
+            Hex += 2;
+
+        for (QC::usize i = 0; i < 32; ++i)
+        {
+            const QC::u8 hi = FromHexDigit(Hex[i * 2 + 0]);
+            const QC::u8 lo = FromHexDigit(Hex[i * 2 + 1]);
+            if (hi == 0xFF || lo == 0xFF)
+                return false;
+
+            const QC::u8 b = static_cast<QC::u8>((hi << 4) | lo);
+            if (b != Digest[i])
+                return false;
+        }
+
+        // Ensure no extra trailing hex digits (allow trailing spaces/tabs/newlines).
+        const char tail = Hex[64];
+        if (tail == 0)
+            return true;
+        if (tail != ' ' && tail != '\t' && tail != '\r' && tail != '\n')
+            return false;
+        for (QC::usize i = 65; Hex[i]; ++i)
+        {
+            const char c = Hex[i];
+            if (c != ' ' && c != '\t' && c != '\r' && c != '\n')
+                return false;
+        }
+        return true;
+    }
 }

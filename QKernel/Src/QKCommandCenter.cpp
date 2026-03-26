@@ -16,11 +16,16 @@
 
 #include "QKBootConfigTier.h"
 #include "QKBootStagedConfig.h"
+
+#include "QCCanonicalArgs.h"
+#include "QCSha256.h"
 #include "QKBootLog.h"
 #include "QKBootEventLog.h"
 #include "QKRuntimeRegistries.h"
 
 #include "QKTime.h"
+#include "QQExecutor.h"
+#include "QKSecurityCenter.h"
 #include "QKSystemPump.h"
 
 #include "QNetStack.h"
@@ -399,25 +404,21 @@ namespace QK::CmdCenter
 
             auto appendDec = [&](QC::u32 v)
             {
-                char tmp[4];
+                char rev[10];
+                int ri = 0;
+                if (v == 0)
+                    rev[ri++] = '0';
+                while (v > 0 && ri < (int)sizeof(rev))
+                {
+                    rev[ri++] = (char)('0' + (v % 10));
+                    v /= 10;
+                }
+
+                char tmp[12];
                 QC::String::memset(tmp, 0, sizeof(tmp));
                 int ti = 0;
-                if (v == 0)
-                {
-                    tmp[ti++] = '0';
-                }
-                else
-                {
-                    char rev[4];
-                    int ri = 0;
-                    while (v > 0 && ri < 3)
-                    {
-                        rev[ri++] = static_cast<char>('0' + (v % 10));
-                        v /= 10;
-                    }
-                    while (ri > 0)
-                        tmp[ti++] = rev[--ri];
-                }
+                while (ri > 0)
+                    tmp[ti++] = rev[--ri];
                 tmp[ti] = '\0';
                 (void)appendString(out, outSize, tmp);
             };
@@ -1233,6 +1234,8 @@ namespace QK::CmdCenter
             QC::String::memset(tok, 0, sizeof(tok));
             bool haveTok = readToken(p, tok, sizeof(tok));
 
+            bool keep = false;
+
             QC::u32 timeoutMs = 7000;
             if (haveTok)
             {
@@ -1245,6 +1248,21 @@ namespace QK::CmdCenter
                         return true;
                     }
                     timeoutMs = v;
+
+                    // Optional: keep
+                    QC::String::memset(tok, 0, sizeof(tok));
+                    if (readToken(p, tok, sizeof(tok)))
+                    {
+                        if (streqIgnoreCase(tok, "keep"))
+                        {
+                            keep = true;
+                        }
+                        else
+                        {
+                            ctx.writeLine("httpget: usage: httpget <host> [path] [timeout_ms 100..60000] [keep]");
+                            return true;
+                        }
+                    }
                 }
                 else
                 {
@@ -1252,16 +1270,44 @@ namespace QK::CmdCenter
                     QC::String::strncpy(path, tok, sizeof(path) - 1);
                     path[sizeof(path) - 1] = '\0';
 
-                    if (p && *p)
+                    // Optional: timeout
+                    QC::String::memset(tok, 0, sizeof(tok));
+                    if (readToken(p, tok, sizeof(tok)))
                     {
-                        p = skipSpaces(p);
                         QC::u32 tv = 0;
-                        if (!parseU32(p, tv) || tv < 100 || tv > 60000)
+                        if (parseU32(tok, tv))
                         {
-                            ctx.writeLine("httpget: usage: httpget <host> [path] [timeout_ms 100..60000]");
+                            if (tv < 100 || tv > 60000)
+                            {
+                                ctx.writeLine("httpget: usage: httpget <host> [path] [timeout_ms 100..60000] [keep]");
+                                return true;
+                            }
+                            timeoutMs = tv;
+
+                            // Optional: keep
+                            QC::String::memset(tok, 0, sizeof(tok));
+                            if (readToken(p, tok, sizeof(tok)))
+                            {
+                                if (streqIgnoreCase(tok, "keep"))
+                                {
+                                    keep = true;
+                                }
+                                else
+                                {
+                                    ctx.writeLine("httpget: usage: httpget <host> [path] [timeout_ms 100..60000] [keep]");
+                                    return true;
+                                }
+                            }
+                        }
+                        else if (streqIgnoreCase(tok, "keep"))
+                        {
+                            keep = true;
+                        }
+                        else
+                        {
+                            ctx.writeLine("httpget: usage: httpget <host> [path] [timeout_ms 100..60000] [keep]");
                             return true;
                         }
-                        timeoutMs = tv;
                     }
                 }
             }
@@ -1571,6 +1617,18 @@ namespace QK::CmdCenter
             (void)appendU64Dec(done, sizeof(done), totalRx);
             ctx.writeLine(done);
 
+            if (keep)
+            {
+                char keepLine[96];
+                QC::String::memset(keepLine, 0, sizeof(keepLine));
+                (void)appendString(keepLine, sizeof(keepLine), "httpget: kept connection (lp=");
+                (void)appendU64Dec(keepLine, sizeof(keepLine), conn->localPort);
+                (void)appendString(keepLine, sizeof(keepLine), ")");
+                ctx.writeLine(keepLine);
+                ctx.writeLine("httpget: use tcpdrop <local_port> to free it");
+                return true;
+            }
+
             // Graceful close: send FIN and give the stack a moment to exchange final ACKs.
             if (conn->state == QNet::TCPState::Established || conn->state == QNet::TCPState::CloseWait)
             {
@@ -1586,6 +1644,149 @@ namespace QK::CmdCenter
             }
 
             tcp->drop(conn);
+            return true;
+        }
+
+        static bool cmdTcpDrop(const char *args, const QC::Cmd::Context &ctx, void *)
+        {
+            QNet::Stack::instance().initialize();
+
+            auto *tcp = QNet::Stack::instance().tcp();
+            if (!tcp)
+            {
+                ctx.writeLine("tcpdrop: tcp unavailable");
+                return true;
+            }
+
+            const char *p = args ? skipSpaces(args) : nullptr;
+            QC::u32 port32 = 0;
+            if (!p || !*p || !parseU32(p, port32) || port32 > 65535)
+            {
+                ctx.writeLine("tcpdrop: usage: tcpdrop <local_port>");
+                return true;
+            }
+
+            if (tcp->dropByLocalPort(static_cast<QC::u16>(port32)))
+                ctx.writeLine("tcpdrop: dropped");
+            else
+                ctx.writeLine("tcpdrop: not found");
+            return true;
+        }
+
+        // Forward declarations (cmdNetLog convenience wrapper).
+        static bool cmdTcpLog(const char *args, const QC::Cmd::Context &ctx, void *);
+        static bool cmdArp(const char *args, const QC::Cmd::Context &ctx, void *);
+
+        static bool cmdNetLog(const char *, const QC::Cmd::Context &ctx, void *)
+        {
+            ctx.writeLine("netlog:");
+            (void)cmdIp(nullptr, ctx, nullptr);
+            (void)cmdArp(nullptr, ctx, nullptr);
+            (void)cmdTcpLog(nullptr, ctx, nullptr);
+            return true;
+        }
+
+        static const char *tcpStateName(QNet::TCPState st)
+        {
+            switch (st)
+            {
+            case QNet::TCPState::Closed:
+                return "Closed";
+            case QNet::TCPState::Listen:
+                return "Listen";
+            case QNet::TCPState::SynSent:
+                return "SynSent";
+            case QNet::TCPState::SynReceived:
+                return "SynRecv";
+            case QNet::TCPState::Established:
+                return "Estab";
+            case QNet::TCPState::FinWait1:
+                return "FinW1";
+            case QNet::TCPState::FinWait2:
+                return "FinW2";
+            case QNet::TCPState::CloseWait:
+                return "CloseW";
+            case QNet::TCPState::Closing:
+                return "Closing";
+            case QNet::TCPState::LastAck:
+                return "LastAck";
+            case QNet::TCPState::TimeWait:
+                return "TimeW";
+            default:
+                return "?";
+            }
+        }
+
+        static bool cmdTcpState(const char *, const QC::Cmd::Context &ctx, void *)
+        {
+            QNet::Stack::instance().initialize();
+
+            auto *tcp = QNet::Stack::instance().tcp();
+            if (!tcp)
+            {
+                ctx.writeLine("tcpstate: tcp unavailable");
+                return true;
+            }
+
+            QNet::TCPConnectionView views[32];
+            QC::String::memset(views, 0, sizeof(views));
+            const QC::usize n = tcp->copyConnections(views, sizeof(views) / sizeof(views[0]));
+
+            char head[64];
+            QC::String::memset(head, 0, sizeof(head));
+            (void)appendString(head, sizeof(head), "tcpstate: count=");
+            (void)appendU64Dec(head, sizeof(head), static_cast<QC::u64>(n));
+            ctx.writeLine(head);
+
+            for (QC::usize i = 0; i < n; ++i)
+            {
+                char rip[32];
+                ipv4ToString(views[i].remoteAddr, rip, sizeof(rip));
+
+                char line[256];
+                QC::String::memset(line, 0, sizeof(line));
+                (void)appendString(line, sizeof(line), tcpStateName(views[i].state));
+                (void)appendString(line, sizeof(line), " lp=");
+                (void)appendU64Dec(line, sizeof(line), views[i].localPort);
+                (void)appendString(line, sizeof(line), " rp=");
+                (void)appendString(line, sizeof(line), rip);
+                (void)appendString(line, sizeof(line), ":");
+                (void)appendU64Dec(line, sizeof(line), views[i].remotePort);
+                (void)appendString(line, sizeof(line), " snduna=");
+                (void)appendU64Dec(line, sizeof(line), views[i].sendUnacked);
+                (void)appendString(line, sizeof(line), " sndnxt=");
+                (void)appendU64Dec(line, sizeof(line), views[i].sendNext);
+                (void)appendString(line, sizeof(line), " rcvnxt=");
+                (void)appendU64Dec(line, sizeof(line), views[i].recvNext);
+
+                if (views[i].synRetries)
+                {
+                    (void)appendString(line, sizeof(line), " synret=");
+                    (void)appendU64Dec(line, sizeof(line), views[i].synRetries);
+                }
+                if (views[i].txInFlightLen)
+                {
+                    (void)appendString(line, sizeof(line), " inflight=");
+                    (void)appendU64Dec(line, sizeof(line), views[i].txInFlightLen);
+                    (void)appendString(line, sizeof(line), " retr=");
+                    (void)appendU64Dec(line, sizeof(line), views[i].txInFlightRetries);
+                }
+
+                ctx.writeLine(line);
+            }
+
+            return true;
+        }
+
+        // Forward declarations (cmdNetStat convenience wrapper).
+        static bool cmdTcpState(const char *args, const QC::Cmd::Context &ctx, void *);
+
+        static bool cmdNetStat(const char *, const QC::Cmd::Context &ctx, void *)
+        {
+            ctx.writeLine("netstat:");
+            (void)cmdIp(nullptr, ctx, nullptr);
+            (void)cmdArp(nullptr, ctx, nullptr);
+            (void)cmdTcpState(nullptr, ctx, nullptr);
             return true;
         }
 
@@ -2009,6 +2210,789 @@ namespace QK::CmdCenter
             return true;
         }
 
+        static bool cmdBootModules(const char *, const QC::Cmd::Context &ctx, void *)
+        {
+            const auto &seed = QK::Runtime::Registries::instance().bootSeed();
+            ctx.writeLine("BootSeed: early artifacts (from registries)");
+
+            ctx.writeLine("--- Config Artifacts (.JSN) ---");
+
+            char line[640];
+            for (QC::u32 i = 0; i < seed.moduleCount && i < 16; ++i)
+            {
+                const auto &m = seed.modules[i];
+                if (!m.id[0] && !m.resolvedPath[0])
+                    continue;
+
+                const QC::usize pathLen = static_cast<QC::usize>(QC::String::strlen(m.resolvedPath));
+                const bool isJsn = (pathLen >= 4) && (m.resolvedPath[pathLen - 4] == '.') &&
+                                   ((m.resolvedPath[pathLen - 3] == 'J') || (m.resolvedPath[pathLen - 3] == 'j')) &&
+                                   ((m.resolvedPath[pathLen - 2] == 'S') || (m.resolvedPath[pathLen - 2] == 's')) &&
+                                   ((m.resolvedPath[pathLen - 1] == 'N') || (m.resolvedPath[pathLen - 1] == 'n'));
+                if (!isJsn)
+                    continue;
+
+                QC::String::memset(line, 0, sizeof(line));
+                (void)appendString(line, sizeof(line), "[");
+                (void)appendU64Dec(line, sizeof(line), static_cast<QC::u64>(i));
+                (void)appendString(line, sizeof(line), "] id='");
+                (void)appendString(line, sizeof(line), m.id[0] ? m.id : "(none)");
+                (void)appendString(line, sizeof(line), "' type='");
+                (void)appendString(line, sizeof(line), m.type[0] ? m.type : "(none)");
+                (void)appendString(line, sizeof(line), "' role='");
+                (void)appendString(line, sizeof(line), m.role[0] ? m.role : "(none)");
+                (void)appendString(line, sizeof(line), "' status='");
+                (void)appendString(line, sizeof(line), m.status[0] ? m.status : "(none)");
+                (void)appendString(line, sizeof(line), "' req_hash=");
+                (void)appendString(line, sizeof(line), m.hashRequired ? "1" : "0");
+                (void)appendString(line, sizeof(line), " req_sig=");
+                (void)appendString(line, sizeof(line), m.signatureRequired ? "1" : "0");
+                (void)appendString(line, sizeof(line), " required=");
+                (void)appendString(line, sizeof(line), m.required ? "1" : "0");
+                ctx.writeLine(line);
+
+                // Print path on its own line to avoid horizontal wrapping issues in the fixed-size terminal.
+                QC::String::memset(line, 0, sizeof(line));
+                (void)appendString(line, sizeof(line), "    path='");
+                (void)appendString(line, sizeof(line), m.resolvedPath[0] ? m.resolvedPath : "(none)");
+                (void)appendString(line, sizeof(line), "'");
+                ctx.writeLine(line);
+            }
+
+            ctx.writeLine("--- Loadable Modules (Layer 2 trust) ---");
+
+            for (QC::u32 i = 0; i < seed.moduleCount && i < 16; ++i)
+            {
+                const auto &m = seed.modules[i];
+                if (!m.id[0] && !m.resolvedPath[0])
+                    continue;
+
+                const QC::usize pathLen = static_cast<QC::usize>(QC::String::strlen(m.resolvedPath));
+                const bool isJsn = (pathLen >= 4) && (m.resolvedPath[pathLen - 4] == '.') &&
+                                   ((m.resolvedPath[pathLen - 3] == 'J') || (m.resolvedPath[pathLen - 3] == 'j')) &&
+                                   ((m.resolvedPath[pathLen - 2] == 'S') || (m.resolvedPath[pathLen - 2] == 's')) &&
+                                   ((m.resolvedPath[pathLen - 1] == 'N') || (m.resolvedPath[pathLen - 1] == 'n'));
+                if (isJsn)
+                    continue;
+
+                QC::String::memset(line, 0, sizeof(line));
+                (void)appendString(line, sizeof(line), "[");
+                (void)appendU64Dec(line, sizeof(line), static_cast<QC::u64>(i));
+                (void)appendString(line, sizeof(line), "] id='");
+                (void)appendString(line, sizeof(line), m.id[0] ? m.id : "(none)");
+                (void)appendString(line, sizeof(line), "' type='");
+                (void)appendString(line, sizeof(line), m.type[0] ? m.type : "(none)");
+                (void)appendString(line, sizeof(line), "' role='");
+                (void)appendString(line, sizeof(line), m.role[0] ? m.role : "(none)");
+                (void)appendString(line, sizeof(line), "' status='");
+                (void)appendString(line, sizeof(line), m.status[0] ? m.status : "(none)");
+                (void)appendString(line, sizeof(line), "' req_hash=");
+                (void)appendString(line, sizeof(line), m.hashRequired ? "1" : "0");
+                (void)appendString(line, sizeof(line), " req_sig=");
+                (void)appendString(line, sizeof(line), m.signatureRequired ? "1" : "0");
+                (void)appendString(line, sizeof(line), " required=");
+                (void)appendString(line, sizeof(line), m.required ? "1" : "0");
+                ctx.writeLine(line);
+
+                QC::String::memset(line, 0, sizeof(line));
+                (void)appendString(line, sizeof(line), "    path='");
+                (void)appendString(line, sizeof(line), m.resolvedPath[0] ? m.resolvedPath : "(none)");
+                (void)appendString(line, sizeof(line), "'");
+                ctx.writeLine(line);
+            }
+
+            return true;
+        }
+
+        static QQ::TaskResult flowTestTaskFn(void *context, void *arg)
+        {
+            (void)context;
+            (void)arg;
+            return QQ::TaskResult{true, 1, nullptr, 0};
+        }
+
+        static const char *decisionName(QQ::FlowDecisionType t)
+        {
+            switch (t)
+            {
+            case QQ::FlowDecisionType::Allow:
+                return "ALLOW";
+            case QQ::FlowDecisionType::ThrottleDelay:
+                return "DELAY";
+            case QQ::FlowDecisionType::IsolateSuspend:
+                return "SUSPEND";
+            case QQ::FlowDecisionType::IsolateCancel:
+                return "CANCEL";
+            default:
+                return "UNKNOWN";
+            }
+        }
+
+        static const char *stateName(QQ::TaskState s)
+        {
+            switch (s)
+            {
+            case QQ::TaskState::Pending:
+                return "Pending";
+            case QQ::TaskState::Queued:
+                return "Queued";
+            case QQ::TaskState::Running:
+                return "Running";
+            case QQ::TaskState::Suspended:
+                return "Suspended";
+            case QQ::TaskState::Completed:
+                return "Completed";
+            case QQ::TaskState::Failed:
+                return "Failed";
+            case QQ::TaskState::Cancelled:
+                return "Cancelled";
+            default:
+                return "Unknown";
+            }
+        }
+
+        static const QC::Cmd::Context *g_flowTestCtx = nullptr;
+        static QQ::FlowPolicyFn g_flowTestPrevPolicy = nullptr;
+
+        static QQ::FlowDecision flowTestLoggingPolicy(const QQ::TaskDescriptor &td)
+        {
+            // Wrap the currently-installed policy (if any), so flowcontrol bypass/enforce is respected.
+            const char *name = td.name;
+            const char *origin = td.origin[0] ? td.origin : nullptr;
+            const char *moduleId = td.moduleId[0] ? td.moduleId : nullptr;
+
+            QQ::FlowDecision d{};
+            if (g_flowTestPrevPolicy)
+                d = g_flowTestPrevPolicy(td);
+
+            if (g_flowTestCtx)
+            {
+                char line[256];
+                QC::String::memset(line, 0, sizeof(line));
+                (void)appendString(line, sizeof(line), "policy: name=");
+                (void)appendString(line, sizeof(line), name ? name : "(null)");
+                if (origin)
+                {
+                    (void)appendString(line, sizeof(line), " origin=");
+                    (void)appendString(line, sizeof(line), origin);
+                }
+                if (moduleId)
+                {
+                    (void)appendString(line, sizeof(line), " module=");
+                    (void)appendString(line, sizeof(line), moduleId);
+                }
+                (void)appendString(line, sizeof(line), " decision=");
+                (void)appendString(line, sizeof(line), decisionName(d.type));
+                if (d.type == QQ::FlowDecisionType::ThrottleDelay)
+                {
+                    (void)appendString(line, sizeof(line), " ms=");
+                    (void)appendU64Dec(line, sizeof(line), d.throttleDelayMs);
+                }
+                g_flowTestCtx->writeLine(line);
+            }
+
+            return d;
+        }
+
+        static bool cmdFlowTest(const char *, const QC::Cmd::Context &ctx, void *)
+        {
+            ctx.writeLine("flowtest: submitting 4 tasks (allow/delay/suspend/cancel)");
+
+            auto &ex = QQ::Executor::instance();
+
+            // Temporarily install a logging policy wrapper so we can print the decision.
+            const QQ::FlowPolicyFn prev = ex.flowPolicy();
+            g_flowTestCtx = &ctx;
+            g_flowTestPrevPolicy = prev;
+            ex.setFlowPolicy(&flowTestLoggingPolicy);
+
+            const QC::u64 t0 = QK::Time::milliseconds();
+
+            const QQ::TaskId allowId = ex.submitWithOrigin("flow_allow", "ui", "desktop", &flowTestTaskFn, nullptr, nullptr);
+            const QQ::TaskId delayId = ex.submitWithOrigin("flow_delay", "ui", "delay", &flowTestTaskFn, nullptr, nullptr);
+            const QQ::TaskId suspId = ex.submitWithOrigin("flow_suspend", "ui", "suspend", &flowTestTaskFn, nullptr, nullptr);
+            const QQ::TaskId cancId = ex.submitWithOrigin("flow_cancel", "ui", "cancel", &flowTestTaskFn, nullptr, nullptr);
+
+            char line[256];
+            QC::String::memset(line, 0, sizeof(line));
+            (void)appendString(line, sizeof(line), "t0_ms=");
+            (void)appendU64Dec(line, sizeof(line), t0);
+            ctx.writeLine(line);
+
+            auto dumpOne = [&](const char *name, QQ::TaskId id) {
+                const QQ::TaskState st = ex.state(id);
+                QC::String::memset(line, 0, sizeof(line));
+                (void)appendString(line, sizeof(line), "- name=");
+                (void)appendString(line, sizeof(line), name);
+                (void)appendString(line, sizeof(line), " id=");
+                (void)appendU64Dec(line, sizeof(line), static_cast<QC::u64>(id));
+                (void)appendString(line, sizeof(line), " state=");
+                (void)appendString(line, sizeof(line), stateName(st));
+                ctx.writeLine(line);
+            };
+
+            dumpOne("flow_allow", allowId);
+            dumpOne("flow_delay", delayId);
+            dumpOne("flow_suspend", suspId);
+            dumpOne("flow_cancel", cancId);
+
+            // Resume suspended and wait a little to observe completion.
+            ctx.writeLine("flowtest: resuming suspended task");
+            ex.resume(suspId);
+            QK::Time::sleep(50);
+
+            dumpOne("flow_suspend", suspId);
+            dumpOne("flow_delay", delayId);
+            dumpOne("flow_allow", allowId);
+            dumpOne("flow_cancel", cancId);
+
+            const QC::u64 t1 = QK::Time::milliseconds();
+            QC::String::memset(line, 0, sizeof(line));
+            (void)appendString(line, sizeof(line), "t1_ms=");
+            (void)appendU64Dec(line, sizeof(line), t1);
+            (void)appendString(line, sizeof(line), " dt_ms=");
+            (void)appendU64Dec(line, sizeof(line), (t1 >= t0) ? (t1 - t0) : 0);
+            ctx.writeLine(line);
+
+            ctx.writeLine("flowtest: NOTE state enum values are numeric (Pending/Queued/Running/Suspended/Completed/Failed/Cancelled)");
+
+            // Restore previous policy.
+            ex.setFlowPolicy(prev);
+            g_flowTestPrevPolicy = nullptr;
+            g_flowTestCtx = nullptr;
+            return true;
+        }
+
+        static bool cmdFlowControl(const char *args, const QC::Cmd::Context &ctx, void *)
+        {
+            // MVP surface:
+            // - flowcontrol status
+            // - flowcontrol bypass
+            // - flowcontrol enforce
+            const char *a = args;
+            while (a && (*a == ' ' || *a == '\t'))
+                ++a;
+
+            if (!a || *a == 0 || (a[0] == 's' && a[1] == 't'))
+            {
+                char line[128];
+                QC::String::memset(line, 0, sizeof(line));
+                (void)appendString(line, sizeof(line), "flowcontrol: mode=");
+                (void)appendString(line, sizeof(line), QK::SecurityCenter::modeName(QK::SecurityCenter::instance().mode()));
+                ctx.writeLine(line);
+                ctx.writeLine("usage: flowcontrol status|bypass|enforce");
+                return true;
+            }
+
+            auto equalsIgnoreCaseToken = [](const char *s, const char *token) -> bool {
+                if (!s || !token)
+                    return false;
+                auto lower = [](char c) -> char {
+                    if (c >= 'A' && c <= 'Z')
+                        return static_cast<char>(c - 'A' + 'a');
+                    return c;
+                };
+                while (*s && (*s == ' ' || *s == '\t'))
+                    ++s;
+                const char *t = token;
+                while (*s && *t && lower(*s) == lower(*t))
+                {
+                    ++s;
+                    ++t;
+                }
+                if (*t != 0)
+                    return false;
+                // token must end at whitespace or string end
+                return (*s == 0) || (*s == ' ') || (*s == '\t');
+            };
+
+            if (equalsIgnoreCaseToken(a, "bypass"))
+            {
+                QK::SecurityCenter::instance().setFlowEnforcementEnabled(false);
+                ctx.writeLine("flowcontrol: mode=BYPASS");
+                return true;
+            }
+            if (equalsIgnoreCaseToken(a, "enforce"))
+            {
+                QK::SecurityCenter::instance().setFlowEnforcementEnabled(true);
+                ctx.writeLine("flowcontrol: mode=ENFORCE");
+                return true;
+            }
+
+            ctx.writeLine("flowcontrol: unknown arg (use status|bypass|enforce)");
+            return true;
+        }
+
+        static bool cmdCanonicalArgTest(const char *, const QC::Cmd::Context &ctx, void *)
+        {
+            ctx.writeLine("canonargtest: submitting 2 tasks with identical canonical args");
+
+            // Build a canonical payload in a stable buffer.
+            static QC::u8 argBuf[128];
+            QC::usize wrote = 0;
+            const char payload[] = "hello";
+
+            if (!QC::CanonicalArgs::build(argBuf, sizeof(argBuf),
+                                         /*schemaId=*/1,
+                                         /*version=*/1,
+                                         payload,
+                                         sizeof(payload) - 1,
+                                         wrote))
+            {
+                ctx.writeLine("canonargtest: failed to build canonical args");
+                return true;
+            }
+
+            auto &ex = QQ::Executor::instance();
+
+            const QQ::TaskId a = ex.submitWithOriginAndArgSize("canon_a", "ui", "desktop", &flowTestTaskFn, nullptr, argBuf, wrote);
+            const QQ::TaskId b = ex.submitWithOriginAndArgSize("canon_b", "ui", "desktop", &flowTestTaskFn, nullptr, argBuf, wrote);
+
+            const QQ::TaskDescriptor *ta = ex.taskDescriptor(a);
+            const QQ::TaskDescriptor *tb = ex.taskDescriptor(b);
+
+            if (!ta || !tb)
+            {
+                ctx.writeLine("canonargtest: failed to resolve task descriptors");
+                return true;
+            }
+
+            char sigA[65], inA[65], sigB[65], inB[65];
+            (void)QC::Sha256DigestToLowerHex(ta->signatureHash, sigA, sizeof(sigA));
+            (void)QC::Sha256DigestToLowerHex(ta->inputHash, inA, sizeof(inA));
+            (void)QC::Sha256DigestToLowerHex(tb->signatureHash, sigB, sizeof(sigB));
+            (void)QC::Sha256DigestToLowerHex(tb->inputHash, inB, sizeof(inB));
+
+            char line[256];
+            QC::String::memset(line, 0, sizeof(line));
+            (void)appendString(line, sizeof(line), "A sig=");
+            (void)appendString(line, sizeof(line), sigA);
+            (void)appendString(line, sizeof(line), " in=");
+            (void)appendString(line, sizeof(line), inA);
+            ctx.writeLine(line);
+
+            QC::String::memset(line, 0, sizeof(line));
+            (void)appendString(line, sizeof(line), "B sig=");
+            (void)appendString(line, sizeof(line), sigB);
+            (void)appendString(line, sizeof(line), " in=");
+            (void)appendString(line, sizeof(line), inB);
+            ctx.writeLine(line);
+
+            ctx.writeLine("canonargtest: expected: input hashes match; signature hashes match (same function + schema/version)");
+            return true;
+        }
+
+        static bool cmdMemoCache(const char *args, const QC::Cmd::Context &ctx, void *)
+        {
+            const char *a = args;
+            while (a && (*a == ' ' || *a == '\t'))
+                ++a;
+
+            auto &ex = QQ::Executor::instance();
+
+            if (!a || *a == 0 || (a[0] == 's' && a[1] == 't'))
+            {
+                char line[192];
+                QC::String::memset(line, 0, sizeof(line));
+                (void)appendString(line, sizeof(line), "memocache: enabled=");
+                (void)appendString(line, sizeof(line), ex.memoizationEnabled() ? "1" : "0");
+                (void)appendString(line, sizeof(line), " hits=");
+                (void)appendU64Dec(line, sizeof(line), ex.memoizationHits());
+                (void)appendString(line, sizeof(line), " misses=");
+                (void)appendU64Dec(line, sizeof(line), ex.memoizationMisses());
+                (void)appendString(line, sizeof(line), " refused=");
+                (void)appendU64Dec(line, sizeof(line), ex.memoizationRefused());
+                (void)appendString(line, sizeof(line), " allowlist=");
+                (void)appendString(line, sizeof(line), ex.memoizationAllowlistEnabled() ? "1" : "0");
+                (void)appendString(line, sizeof(line), " allowcnt=");
+                (void)appendU64Dec(line, sizeof(line), ex.memoizationAllowlistCount());
+                ctx.writeLine(line);
+                ctx.writeLine("usage: memocache status|on|off|clear");
+                return true;
+            }
+
+            auto equalsIgnoreCaseToken = [](const char *s, const char *token) -> bool {
+                if (!s || !token)
+                    return false;
+                auto lower = [](char c) -> char {
+                    if (c >= 'A' && c <= 'Z')
+                        return static_cast<char>(c - 'A' + 'a');
+                    return c;
+                };
+                while (*s && (*s == ' ' || *s == '\t'))
+                    ++s;
+                const char *t = token;
+                while (*s && *t && lower(*s) == lower(*t))
+                {
+                    ++s;
+                    ++t;
+                }
+                if (*t != 0)
+                    return false;
+                return (*s == 0) || (*s == ' ') || (*s == '\t');
+            };
+
+            if (equalsIgnoreCaseToken(a, "on"))
+            {
+                ex.setMemoizationEnabled(true);
+                ctx.writeLine("memocache: enabled=1");
+                return true;
+            }
+            if (equalsIgnoreCaseToken(a, "off"))
+            {
+                ex.setMemoizationEnabled(false);
+                ctx.writeLine("memocache: enabled=0");
+                return true;
+            }
+            if (equalsIgnoreCaseToken(a, "clear"))
+            {
+                ex.clearMemoizationCache();
+                ctx.writeLine("memocache: cleared");
+                return true;
+            }
+
+            ctx.writeLine("memocache: unknown arg (use status|on|off|clear)");
+            return true;
+        }
+
+        static bool cmdMemoAllow(const char *args, const QC::Cmd::Context &ctx, void *)
+        {
+            const char *a = args;
+            while (a && (*a == ' ' || *a == '\t'))
+                ++a;
+
+            auto &ex = QQ::Executor::instance();
+
+            auto equalsIgnoreCaseToken = [](const char *s, const char *token) -> bool {
+                if (!s || !token)
+                    return false;
+                auto lower = [](char c) -> char {
+                    if (c >= 'A' && c <= 'Z')
+                        return static_cast<char>(c - 'A' + 'a');
+                    return c;
+                };
+                while (*s && (*s == ' ' || *s == '\t'))
+                    ++s;
+                const char *t = token;
+                while (*s && *t && lower(*s) == lower(*t))
+                {
+                    ++s;
+                    ++t;
+                }
+                if (*t != 0)
+                    return false;
+                return (*s == 0) || (*s == ' ') || (*s == '\t');
+            };
+
+            if (!a || *a == 0 || equalsIgnoreCaseToken(a, "status"))
+            {
+                char line[192];
+                QC::String::memset(line, 0, sizeof(line));
+                (void)appendString(line, sizeof(line), "memoallow: enabled=");
+                (void)appendString(line, sizeof(line), ex.memoizationAllowlistEnabled() ? "1" : "0");
+                (void)appendString(line, sizeof(line), " count=");
+                (void)appendU64Dec(line, sizeof(line), ex.memoizationAllowlistCount());
+                ctx.writeLine(line);
+                ctx.writeLine("usage: memoallow status|on|off|clear|add <taskId>|del <taskId>");
+                return true;
+            }
+
+            if (equalsIgnoreCaseToken(a, "on"))
+            {
+                ex.setMemoizationAllowlistEnabled(true);
+                ctx.writeLine("memoallow: enabled=1");
+                return true;
+            }
+            if (equalsIgnoreCaseToken(a, "off"))
+            {
+                ex.setMemoizationAllowlistEnabled(false);
+                ctx.writeLine("memoallow: enabled=0");
+                return true;
+            }
+            if (equalsIgnoreCaseToken(a, "clear"))
+            {
+                ex.clearMemoizationAllowlist();
+                ctx.writeLine("memoallow: cleared");
+                return true;
+            }
+
+            auto isCommandWithArg = [&](const char *cmd, const char *&outArg) -> bool {
+                const char *s = a;
+                while (*s && (*s == ' ' || *s == '\t'))
+                    ++s;
+
+                auto lower = [](char c) -> char {
+                    if (c >= 'A' && c <= 'Z')
+                        return static_cast<char>(c - 'A' + 'a');
+                    return c;
+                };
+
+                const char *t = cmd;
+                while (*s && *t && lower(*s) == lower(*t))
+                {
+                    ++s;
+                    ++t;
+                }
+                if (*t != 0)
+                    return false;
+                if (!(*s == 0 || *s == ' ' || *s == '\t'))
+                    return false;
+                while (*s == ' ' || *s == '\t')
+                    ++s;
+                outArg = s;
+                return true;
+            };
+
+            const char *arg = nullptr;
+            const bool isAdd = isCommandWithArg("add", arg);
+            const bool isDel = isCommandWithArg("del", arg);
+            if (isAdd || isDel)
+            {
+                const char *p = arg;
+                if (!p || !*p)
+                {
+                    ctx.writeLine("memoallow: missing taskId");
+                    return true;
+                }
+
+                auto parseU64 = [](const char *s, QC::u64 &out) -> bool {
+                    if (!s)
+                        return false;
+                    while (*s == ' ' || *s == '\t')
+                        ++s;
+                    if (*s < '0' || *s > '9')
+                        return false;
+                    QC::u64 v = 0;
+                    while (*s >= '0' && *s <= '9')
+                    {
+                        v = (v * 10) + (QC::u64)(*s - '0');
+                        ++s;
+                    }
+                    out = v;
+                    return true;
+                };
+
+                QC::u64 parsed = 0;
+                if (!parseU64(p, parsed))
+                {
+                    ctx.writeLine("memoallow: invalid taskId");
+                    return true;
+                }
+                const QQ::TaskId id = (QQ::TaskId)parsed;
+                const QQ::TaskDescriptor *td = ex.taskDescriptor(id);
+                if (!td)
+                {
+                    ctx.writeLine("memoallow: unknown taskId");
+                    return true;
+                }
+
+                const bool ok = isAdd ? ex.memoizationAllowlistAdd(td->signatureHash) : ex.memoizationAllowlistRemove(td->signatureHash);
+                if (!ok)
+                {
+                    ctx.writeLine(isAdd ? "memoallow: add failed" : "memoallow: del failed");
+                    return true;
+                }
+                ctx.writeLine(isAdd ? "memoallow: added" : "memoallow: removed");
+                return true;
+            }
+
+            ctx.writeLine("memoallow: unknown arg");
+            ctx.writeLine("usage: memoallow status|on|off|clear|add <taskId>|del <taskId>");
+            return true;
+        }
+
+        static QQ::TaskResult memoTestFnSmall(void *, void *)
+        {
+            QQ::TaskResult r{};
+            r.success = true;
+            r.value = 1234;
+            r.data = nullptr;
+            r.dataSize = 0;
+            return r;
+        }
+        
+        static QC::u8 g_memoTestBigBlob[512];
+        
+        static QQ::TaskResult memoTestFnBig(void *, void *)
+        {
+            for (QC::usize i = 0; i < sizeof(g_memoTestBigBlob); ++i)
+                g_memoTestBigBlob[i] = (QC::u8)(i & 0xFF);
+            
+            QQ::TaskResult r{};
+            r.success = true;
+            r.value = 0xBEEF;
+            r.data = g_memoTestBigBlob;
+            r.dataSize = sizeof(g_memoTestBigBlob);
+            return r;
+        }
+
+        static bool cmdMemoTest(const char *, const QC::Cmd::Context &ctx, void *)
+        {
+            ctx.writeLine("memotest: enabling memoization + submitting same cached task twice");
+            auto &ex = QQ::Executor::instance();
+            ex.setMemoizationEnabled(true);
+            ex.setMemoizationAllowlistEnabled(false);
+
+            static QC::u8 argBuf[128];
+            QC::usize wrote = 0;
+            const char payload[] = "hello";
+            if (!QC::CanonicalArgs::build(argBuf, sizeof(argBuf), 1, 1, payload, sizeof(payload) - 1, wrote))
+            {
+                ctx.writeLine("memotest: failed to build canonical args");
+                return true;
+            }
+
+            const QC::u64 h0 = ex.memoizationHits();
+            const QC::u64 m0 = ex.memoizationMisses();
+            const QQ::TaskId idA = ex.submitWithOriginAndArgSizeCached("memo_small_a", "ui", "desktop", &memoTestFnSmall, nullptr, argBuf, wrote);
+            const QQ::TaskId idB = ex.submitWithOriginAndArgSizeCached("memo_small_b", "ui", "desktop", &memoTestFnSmall, nullptr, argBuf, wrote);
+            {
+                char ids[128];
+                QC::String::memset(ids, 0, sizeof(ids));
+                (void)appendString(ids, sizeof(ids), "memotest: small ids=");
+                (void)appendU64Dec(ids, sizeof(ids), (QC::u64)idA);
+                (void)appendString(ids, sizeof(ids), ",");
+                (void)appendU64Dec(ids, sizeof(ids), (QC::u64)idB);
+                ctx.writeLine(ids);
+            }
+
+            char deltaA[192];
+            QC::String::memset(deltaA, 0, sizeof(deltaA));
+            (void)appendString(deltaA, sizeof(deltaA), "memotest: small delta hits=");
+            (void)appendU64Dec(deltaA, sizeof(deltaA), ex.memoizationHits() - h0);
+            (void)appendString(deltaA, sizeof(deltaA), " misses=");
+            (void)appendU64Dec(deltaA, sizeof(deltaA), ex.memoizationMisses() - m0);
+            (void)appendString(deltaA, sizeof(deltaA), " refused=");
+            (void)appendU64Dec(deltaA, sizeof(deltaA), ex.memoizationRefused());
+            ctx.writeLine(deltaA);
+
+            // Case B: oversized blob should be refused (no caching)
+
+            QC::usize wrote2 = 0;
+            if (!QC::CanonicalArgs::build(argBuf, sizeof(argBuf), 2, 1, payload, sizeof(payload) - 1, wrote2))
+            {
+                ctx.writeLine("memotest: failed to build canonical args (big)");
+                return true;
+            }
+
+            const QC::u64 h1 = ex.memoizationHits();
+            const QC::u64 m1 = ex.memoizationMisses();
+            const QQ::TaskId idC = ex.submitWithOriginAndArgSizeCached("memo_big_a", "ui", "desktop", &memoTestFnBig, nullptr, argBuf, wrote2);
+            const QQ::TaskId idD = ex.submitWithOriginAndArgSizeCached("memo_big_b", "ui", "desktop", &memoTestFnBig, nullptr, argBuf, wrote2);
+            {
+                char ids[128];
+                QC::String::memset(ids, 0, sizeof(ids));
+                (void)appendString(ids, sizeof(ids), "memotest: big ids=");
+                (void)appendU64Dec(ids, sizeof(ids), (QC::u64)idC);
+                (void)appendString(ids, sizeof(ids), ",");
+                (void)appendU64Dec(ids, sizeof(ids), (QC::u64)idD);
+                ctx.writeLine(ids);
+            }
+
+            char deltaB[192];
+            QC::String::memset(deltaB, 0, sizeof(deltaB));
+            (void)appendString(deltaB, sizeof(deltaB), "memotest: big delta hits=");
+            (void)appendU64Dec(deltaB, sizeof(deltaB), ex.memoizationHits() - h1);
+            (void)appendString(deltaB, sizeof(deltaB), " misses=");
+            (void)appendU64Dec(deltaB, sizeof(deltaB), ex.memoizationMisses() - m1);
+            (void)appendString(deltaB, sizeof(deltaB), " refused=");
+            (void)appendU64Dec(deltaB, sizeof(deltaB), ex.memoizationRefused());
+            (void)appendString(deltaB, sizeof(deltaB), " (expect hits=0)");
+            ctx.writeLine(deltaB);
+
+            char line[192];
+            QC::String::memset(line, 0, sizeof(line));
+            (void)appendString(line, sizeof(line), "memotest: hits=");
+            (void)appendU64Dec(line, sizeof(line), ex.memoizationHits());
+            (void)appendString(line, sizeof(line), " misses=");
+            (void)appendU64Dec(line, sizeof(line), ex.memoizationMisses());
+            (void)appendString(line, sizeof(line), " refused=");
+            (void)appendU64Dec(line, sizeof(line), ex.memoizationRefused());
+            ctx.writeLine(line);
+            return true;
+        }
+
+        static bool cmdTaskLs(const char *args, const QC::Cmd::Context &ctx, void *)
+        {
+            QC::u64 n = 20;
+            const char *a = args;
+            while (a && (*a == ' ' || *a == '\t'))
+                ++a;
+            if (a && *a)
+            {
+                auto parseU64 = [](const char *s, QC::u64 &out) -> bool {
+                    if (!s)
+                        return false;
+                    while (*s == ' ' || *s == '\t')
+                        ++s;
+                    if (*s < '0' || *s > '9')
+                        return false;
+                    QC::u64 v = 0;
+                    while (*s >= '0' && *s <= '9')
+                    {
+                        v = (v * 10) + (QC::u64)(*s - '0');
+                        ++s;
+                    }
+                    out = v;
+                    return true;
+                };
+                (void)parseU64(a, n);
+                if (n == 0)
+                    n = 1;
+                if (n > 100)
+                    n = 100;
+            }
+
+            auto &ex = QQ::Executor::instance();
+            {
+                char head[192];
+                QC::String::memset(head, 0, sizeof(head));
+                (void)appendString(head, sizeof(head), "taskls: recent tasks (count=");
+                (void)appendU64Dec(head, sizeof(head), ex.recentTaskIdCount());
+                (void)appendString(head, sizeof(head), " nextId=");
+                (void)appendU64Dec(head, sizeof(head), (QC::u64)ex.nextTaskIdForDebug());
+                (void)appendString(head, sizeof(head), ")");
+                ctx.writeLine(head);
+            }
+
+            const QC::usize avail = ex.recentTaskIdCount();
+            QC::u64 printed = 0;
+            for (QC::usize i = 0; i < avail && printed < n; ++i)
+            {
+                const QQ::TaskId id = ex.recentTaskIdAt(i);
+                if (id == QQ::INVALID_TASK)
+                    continue;
+                const QQ::TaskDescriptor *td = ex.taskDescriptor(id);
+                if (!td)
+                    continue;
+
+                char sigHex[72];
+                char inHex[72];
+                QC::String::memset(sigHex, 0, sizeof(sigHex));
+                QC::String::memset(inHex, 0, sizeof(inHex));
+                (void)QC::Sha256DigestToLowerHex(td->signatureHash, sigHex, sizeof(sigHex));
+                (void)QC::Sha256DigestToLowerHex(td->inputHash, inHex, sizeof(inHex));
+
+                char line[256];
+                QC::String::memset(line, 0, sizeof(line));
+                (void)appendString(line, sizeof(line), "id=");
+                (void)appendU64Dec(line, sizeof(line), (QC::u64)id);
+                (void)appendString(line, sizeof(line), " name=");
+                (void)appendString(line, sizeof(line), td->name);
+                (void)appendString(line, sizeof(line), " sig=");
+                (void)appendString(line, sizeof(line), sigHex);
+                (void)appendString(line, sizeof(line), " in=");
+                (void)appendString(line, sizeof(line), inHex);
+                ctx.writeLine(line);
+                ++printed;
+            }
+
+            if (printed == 0)
+                ctx.writeLine("taskls: (no tasks found)");
+
+            return true;
+        }
+
         static bool cmdBevDump(const char *, const QC::Cmd::Context &ctx, void *)
         {
             const QC::usize total = QK::Boot::Events::Count();
@@ -2089,6 +3073,14 @@ namespace QK::CmdCenter
         // Boot/config helpers.
         (void)reg.registerCommandEx("tier", &cmdTier, nullptr, "Show active config tier + staged early modules");
         (void)reg.registerCommandEx("bootlog", &cmdBootLog, nullptr, "Dump captured boot log output");
+        (void)reg.registerCommandEx("bootmodules", &cmdBootModules, nullptr, "Dump early module trust metadata (role/status/hash/signature)");
+        (void)reg.registerCommandEx("flowtest", &cmdFlowTest, nullptr, "Smoke test Security Center flow policy (allow/delay/suspend/cancel)");
+        (void)reg.registerCommandEx("flowcontrol", &cmdFlowControl, nullptr, "Control Security Center flow enforcement (status|bypass|enforce)");
+        (void)reg.registerCommandEx("canonargtest", &cmdCanonicalArgTest, nullptr, "Submit tasks with canonical args and print hashes");
+        (void)reg.registerCommandEx("taskls", &cmdTaskLs, nullptr, "List recent tasks (taskls [N])");
+        (void)reg.registerCommandEx("memocache", &cmdMemoCache, nullptr, "Control memoization cache (status|on|off|clear)");
+        (void)reg.registerCommandEx("memoallow", &cmdMemoAllow, nullptr, "Control memoization allowlist (status|on|off|clear|add|del)");
+        (void)reg.registerCommandEx("memotest", &cmdMemoTest, nullptr, "Submit cached tasks twice to demonstrate a memoization hit");
         (void)reg.registerCommandExAccess("bevdump", QC::Cmd::AccessLevel::Admin, &cmdBevDump, nullptr, "Dump boot event log (structured events)");
         (void)reg.registerCommandEx("regdump", &cmdRegdump, nullptr, "Dump runtime registries snapshot (counts + windows + boot seed)");
 
@@ -2100,7 +3092,12 @@ namespace QK::CmdCenter
         (void)reg.registerCommandEx("nslookup", &cmdNslookup, nullptr, "Resolve DNS A record (nslookup <name> [timeout_ms])");
         (void)reg.registerCommandEx("tcpconnect", &cmdTcpConnect, nullptr, "Test TCP connect (tcpconnect <ip|host> <port> [timeout_ms])");
         (void)reg.registerCommandEx("httpget", &cmdHttpGet, nullptr, "Minimal HTTP GET over TCP (httpget <host> <path> [timeout_ms])");
+        (void)reg.registerCommandEx("tcpdrop", &cmdTcpDrop, nullptr, "Drop TCP connection by local port (tcpdrop <local_port>)");
         (void)reg.registerCommandEx("tcplog", &cmdTcpLog, nullptr, "Dump recent TCP TX/RX events (tcplog)");
+        (void)reg.registerCommandEx("netlog", &cmdNetLog, nullptr, "Dump net state (ip + arp + tcplog)");
+        (void)reg.registerCommandEx("tcpstate", &cmdTcpState, nullptr, "Dump active TCP connections (tcpstate)");
+        (void)reg.registerCommandEx("netstat", &cmdNetStat, nullptr, "Dump net summary (ip + arp + tcpstate)");
+        (void)reg.registerCommandEx("netstart", &cmdNetStat, nullptr, "Dump net summary (alias of netstat)");
 
         registered = true;
     }

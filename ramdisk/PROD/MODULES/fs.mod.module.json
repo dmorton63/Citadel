@@ -1,0 +1,8 @@
+{
+  "id": "fs",
+  "role": "fs",
+  "status": "trusted",
+  "hashRequired": true,
+  "signatureRequired": false,
+  "contentValidationCode": "85838851b65cb7f529dd879575a3508921b74d70665f120b0f83f79b33ef55cd"
+}

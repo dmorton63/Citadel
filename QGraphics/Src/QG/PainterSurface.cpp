@@ -1,5 +1,7 @@
 #include "QG/PainterSurface.h"
 
+#include "QG/FontManager.h"
+
 #include <algorithm>
 #include <cstring>
 
@@ -810,6 +812,82 @@ namespace QG
         if (!text || !m_pixels || m_pitch == 0)
             return;
 
+        auto textPixelHeight = [&]() -> QC::i32 {
+            float scale = m_textScale;
+            if (scale < 0.5f)
+                scale = 0.5f;
+            if (scale > 4.0f)
+                scale = 4.0f;
+            const float px = 12.0f * scale;
+            QC::i32 h = static_cast<QC::i32>(px + 0.5f);
+            if (h < 6)
+                h = 6;
+            if (h > 96)
+                h = 96;
+            return h;
+        };
+
+        auto blitGlyphAlpha = [&](QC::i32 dstX, QC::i32 dstY,
+                                  const QC::u8 *alpha,
+                                  QC::i32 w,
+                                  QC::i32 h,
+                                  QC::Color baseColor)
+        {
+            if (!alpha || w <= 0 || h <= 0)
+                return;
+            for (QC::i32 gy = 0; gy < h; ++gy)
+            {
+                const QC::u8 *row = alpha + static_cast<QC::usize>(gy * w);
+                for (QC::i32 gx = 0; gx < w; ++gx)
+                {
+                    const QC::u8 a = row[gx];
+                    if (a == 0)
+                        continue;
+                    QC::Color c = baseColor;
+                    c.a = static_cast<QC::u8>((static_cast<QC::u16>(baseColor.a) * a) / 255u);
+                    setPixel(dstX + gx, dstY + gy, c);
+                }
+            }
+        };
+
+        FontManager &fm = FontManager::instance();
+        if (fm.hasDefaultFont())
+        {
+            const QC::i32 pixelHeight = textPixelHeight();
+            FontManager::Metrics metrics;
+            if (fm.getMetrics(pixelHeight, &metrics))
+            {
+                QC::i32 cursorX = x;
+                QC::i32 cursorY = y;
+
+                for (const char *p = text; *p; ++p)
+                {
+                    if (*p == '\n')
+                    {
+                        cursorX = x;
+                        cursorY += metrics.lineAdvancePx;
+                        continue;
+                    }
+
+                    const unsigned char ch = static_cast<unsigned char>(*p);
+                    FontManager::GlyphBitmap glyph;
+                    if (fm.getGlyph(pixelHeight, ch, &glyph) && glyph.alpha)
+                    {
+                        const QC::i32 baselineY = cursorY + metrics.ascentPx;
+                        blitGlyphAlpha(cursorX + glyph.xOff,
+                                      baselineY + glyph.yOff,
+                                      glyph.alpha,
+                                      glyph.width,
+                                      glyph.height,
+                                      color);
+                    }
+
+                    cursorX += metrics.fixedAdvancePx;
+                }
+                return;
+            }
+        }
+
         const QC::i32 scale = textPixelScale();
         const QC::i32 advanceX = kGlyphW * scale;
         const QC::i32 advanceY = kGlyphH * scale;
@@ -851,9 +929,7 @@ namespace QG
         if (!text || rect.isEmpty())
             return;
 
-        const QC::i32 scale = textPixelScale();
-        const QC::Size baseSize = measureTextMono5x7(text);
-        const QC::Size textSize(baseSize.width * scale, baseSize.height * scale);
+        const QC::Size textSize = measureText(text);
 
         QC::i32 startX = rect.x;
         QC::i32 startY = rect.y;
@@ -874,7 +950,27 @@ namespace QG
 
         if (format.ellipsis && static_cast<QC::i32>(rect.width) > 0)
         {
-            const QC::i32 glyphAdvance = kGlyphW * scale;
+            const QC::i32 glyphAdvance = [&]() -> QC::i32 {
+                FontManager &fm = FontManager::instance();
+                if (fm.hasDefaultFont())
+                {
+                    float s = m_textScale;
+                    if (s < 0.5f)
+                        s = 0.5f;
+                    if (s > 4.0f)
+                        s = 4.0f;
+                    QC::i32 ph = static_cast<QC::i32>(12.0f * s + 0.5f);
+                    if (ph < 6)
+                        ph = 6;
+                    if (ph > 96)
+                        ph = 96;
+                    FontManager::Metrics m;
+                    if (fm.getMetrics(ph, &m) && m.fixedAdvancePx > 0)
+                        return m.fixedAdvancePx;
+                }
+                const QC::i32 scale = textPixelScale();
+                return kGlyphW * scale;
+            }();
             const QC::i32 maxChars = glyphAdvance > 0 ? static_cast<QC::i32>(rect.width) / glyphAdvance : 0;
             if (maxChars > 0)
             {
@@ -891,38 +987,68 @@ namespace QG
 
                     QC::i32 cursorX = startX;
                     QC::i32 cursorY = startY;
+
+                    const bool useTtf = FontManager::instance().hasDefaultFont();
+                    auto drawOne = [&](char ch)
+                    {
+                        if (useTtf)
+                        {
+                            float s = m_textScale;
+                            if (s < 0.5f)
+                                s = 0.5f;
+                            if (s > 4.0f)
+                                s = 4.0f;
+                            QC::i32 ph = static_cast<QC::i32>(12.0f * s + 0.5f);
+                            if (ph < 6)
+                                ph = 6;
+                            if (ph > 96)
+                                ph = 96;
+
+                            FontManager &fm = FontManager::instance();
+                            FontManager::Metrics m;
+                            FontManager::GlyphBitmap glyph;
+                            if (fm.getMetrics(ph, &m) && fm.getGlyph(ph, static_cast<unsigned char>(ch), &glyph) && glyph.alpha)
+                            {
+                                const QC::i32 baselineY = cursorY + m.ascentPx;
+                                for (QC::i32 gy = 0; gy < glyph.height; ++gy)
+                                {
+                                    const QC::u8 *row = glyph.alpha + static_cast<QC::usize>(gy * glyph.width);
+                                    for (QC::i32 gx = 0; gx < glyph.width; ++gx)
+                                    {
+                                        const QC::u8 a = row[gx];
+                                        if (a == 0)
+                                            continue;
+                                        QC::Color c = color;
+                                        c.a = static_cast<QC::u8>((static_cast<QC::u16>(color.a) * a) / 255u);
+                                        setPixel(cursorX + glyph.xOff + gx, baselineY + glyph.yOff + gy, c);
+                                    }
+                                }
+                            }
+                            cursorX += glyphAdvance;
+                            return;
+                        }
+
+                        const QC::i32 scale = textPixelScale();
+                        const Glyph5x7 g = glyphForChar(ch);
+                        for (QC::i32 row = 0; row < 7; ++row)
+                        {
+                            QC::u8 bits = g.rows[row];
+                            for (QC::i32 col = 0; col < 5; ++col)
+                                if (bits & (1u << col))
+                                    stampGlyphPixel(cursorX + col * scale,
+                                                    cursorY + row * scale,
+                                                    scale,
+                                                    color);
+                        }
+                        cursorX += glyphAdvance;
+                    };
+
                     const char *p = text;
                     for (QC::i32 i = 0; i < keep && *p && *p != '\n'; ++i, ++p)
-                    {
-                        const Glyph5x7 g = glyphForChar(*p);
-                        for (QC::i32 row = 0; row < 7; ++row)
-                        {
-                            QC::u8 bits = g.rows[row];
-                            for (QC::i32 col = 0; col < 5; ++col)
-                                if (bits & (1u << col))
-                                    stampGlyphPixel(cursorX + col * scale,
-                                                    cursorY + row * scale,
-                                                    scale,
-                                                    color);
-                        }
-                        cursorX += glyphAdvance;
-                    }
+                        drawOne(*p);
 
                     for (QC::i32 i = 0; i < dots; ++i)
-                    {
-                        const Glyph5x7 g = glyphForChar('.');
-                        for (QC::i32 row = 0; row < 7; ++row)
-                        {
-                            QC::u8 bits = g.rows[row];
-                            for (QC::i32 col = 0; col < 5; ++col)
-                                if (bits & (1u << col))
-                                    stampGlyphPixel(cursorX + col * scale,
-                                                    cursorY + row * scale,
-                                                    scale,
-                                                    color);
-                        }
-                        cursorX += glyphAdvance;
-                    }
+                        drawOne('.');
 
                     if (hadClip)
                         m_clip = oldClip, m_hasClip = true;
@@ -943,6 +1069,50 @@ namespace QG
 
     QC::Size PainterSurface::measureText(const char *text) const
     {
+        FontManager &fm = FontManager::instance();
+        if (fm.hasDefaultFont())
+        {
+            float s = m_textScale;
+            if (s < 0.5f)
+                s = 0.5f;
+            if (s > 4.0f)
+                s = 4.0f;
+            QC::i32 ph = static_cast<QC::i32>(12.0f * s + 0.5f);
+            if (ph < 6)
+                ph = 6;
+            if (ph > 96)
+                ph = 96;
+
+            FontManager::Metrics m;
+            if (fm.getMetrics(ph, &m) && m.fixedAdvancePx > 0 && m.lineAdvancePx > 0)
+            {
+                if (!text)
+                    return QC::Size(0, m.lineAdvancePx);
+
+                QC::i32 maxLineChars = 0;
+                QC::i32 lineChars = 0;
+                QC::i32 lines = 1;
+
+                for (const char *p = text; *p; ++p)
+                {
+                    if (*p == '\n')
+                    {
+                        if (lineChars > maxLineChars)
+                            maxLineChars = lineChars;
+                        lineChars = 0;
+                        ++lines;
+                        continue;
+                    }
+                    ++lineChars;
+                }
+
+                if (lineChars > maxLineChars)
+                    maxLineChars = lineChars;
+
+                return QC::Size(maxLineChars * m.fixedAdvancePx, lines * m.lineAdvancePx);
+            }
+        }
+
         const QC::Size base = measureTextMono5x7(text);
         const QC::i32 scale = textPixelScale();
         return QC::Size(base.width * scale, base.height * scale);

@@ -1,0 +1,44 @@
+{
+  "version": 3,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 21,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "citadel-dev",
+      "displayName": "Citadel (Dev)",
+      "generator": "Unix Makefiles",
+      "binaryDir": "${sourceDir}/build/cmake-dev",
+      "cacheVariables": {
+        "CITADEL_PRODUCTION": "OFF"
+      }
+    },
+    {
+      "name": "citadel-prod",
+      "displayName": "Citadel (Production)",
+      "generator": "Unix Makefiles",
+      "binaryDir": "${sourceDir}/build/cmake-prod",
+      "cacheVariables": {
+        "CITADEL_PRODUCTION": "ON"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "citadel-dev",
+      "configurePreset": "citadel-dev",
+      "targets": [
+        "citadel_kernel"
+      ]
+    },
+    {
+      "name": "citadel-prod",
+      "configurePreset": "citadel-prod",
+      "targets": [
+        "citadel_kernel"
+      ]
+    }
+  ]
+}

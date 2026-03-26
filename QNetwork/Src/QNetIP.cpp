@@ -167,6 +167,13 @@ namespace QNet
 
         // Determine next hop
         IPv4Address nextHopAddr = nextHop(dest);
+        // No route configured (e.g., before DHCP/static config).
+        // Allow IPv4 limited broadcast (handled by nextHop), otherwise drop.
+        if (nextHopAddr.value == 0)
+        {
+            QK::Memory::Heap::instance().free(packet);
+            return;
+        }
 
         // Resolve MAC and send
         MACAddress destMAC;
@@ -212,11 +219,20 @@ namespace QNet
 
     bool IP::isLocal(IPv4Address addr) const
     {
+        // If unconfigured, do not guess locality: treat everything as off-link.
+        // (DHCP uses IPv4 limited broadcast which is handled separately.)
+        if (m_address.value == 0 || m_subnetMask.value == 0)
+            return false;
+
         return (addr.value & m_subnetMask.value) == (m_address.value & m_subnetMask.value);
     }
 
     IPv4Address IP::nextHop(IPv4Address dest) const
     {
+        // IPv4 limited broadcast (255.255.255.255) is always on-link.
+        if (dest.isBroadcast())
+            return dest;
+
         // If destination is on local network, send directly
         if (isLocal(dest))
         {

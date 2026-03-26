@@ -8,9 +8,12 @@
 #include "Boot/Config/QKBootRamdiskFile.h"
 #include "Boot/Config/QKBootSysConfig.h"
 #include "QKBootConfigTier.h"
-#include "QKBootStagedConfig.h"
+#include "Boot/Config/QKBootStagedConfig.h"
 
 #include "Boot/Security/QKBootJsonSignature.h"
+#include "Boot/Security/QKBootSha256.h"
+
+#include "QCMemUtil.h"
 
 #include "Boot/ACPI/QKBootACPITables.h"
 #include "Boot/Arch/QKBootArchInit.h"
@@ -1315,6 +1318,8 @@ namespace
             }
 
             // Stage metadata (even for non-JSON modules) for deterministic commit.
+            // NOTE: This must happen before the Layer-2 trust gate so manifest-derived fields
+            // can be persisted onto the staged slot.
             if (outStage.moduleCount < 16)
             {
                 stagedIndex = outStage.moduleCount;
@@ -1328,6 +1333,173 @@ namespace
                 dst.required = m->required;
                 stagedThisModule = true;
             }
+
+            // Layer 2: kernel-side early modules trust gate.
+            // Convention: manifest is adjacent to the module at "<modulePath>.module.json".
+            // - contentValidationCode: SHA-256 hex of module bytes (required in production by default)
+            // - signatureRequired/hashRequired: optional booleans
+            // - status: trusted|quarantined|revoked (production refuses quarantined/revoked for required modules)
+            {
+                // This gate is intended for loadable kernel subsystems/modules.
+                // Do NOT apply it to core boot policy/config JSON artifacts (BOOT.JSN, SYSCFG.JSN, etc.);
+                // those are already handled by existing boot signature policy.
+                const bool isJsonConfig = EndsWithJsn(resolvedPath);
+                const bool isCoreBootConfig = (QC::String::strcmp(m->id, "boot") == 0) || (QC::String::strcmp(m->id, "sysconfig") == 0);
+                if (isJsonConfig || isCoreBootConfig)
+                    goto skip_layer2_module_trust_gate;
+
+                char manifestPath[384] = {0};
+                QC::String::strncpy(manifestPath, resolvedPath, sizeof(manifestPath) - 1);
+                manifestPath[sizeof(manifestPath) - 1] = 0;
+
+                const QC::usize baseLen = static_cast<QC::usize>(QC::String::strlen(manifestPath));
+                if (baseLen + 12 < sizeof(manifestPath))
+                {
+                    QC::String::strncpy(manifestPath + baseLen, ".module.json", sizeof(manifestPath) - 1 - baseLen);
+                    manifestPath[sizeof(manifestPath) - 1] = 0;
+
+                    char *manifestBuf = nullptr;
+                    QC::usize manifestLen = 0;
+                    bool haveManifest = QK::Boot::Config::ReadFileFromLimineRamdiskModule(nullptr, ModuleRequest, manifestPath, manifestBuf, manifestLen);
+                    (void)0;
+
+                    bool requireHash = kProductionMode;
+                    bool requireSig = kProductionMode;
+                    const char *manifestRole = nullptr;
+                    const char *manifestStatus = nullptr;
+                    const char *manifestCvc = nullptr;
+
+                    if (!haveManifest)
+                    {
+                        if (kProductionMode && m->required)
+                        {
+                            Log("SysConfig: early module manifest missing; refusing (production mode)\r\n");
+                            outTierOk = false;
+                            SetFirstFailureReason(outFirstFailure, outFirstFailureCap, "manifest missing", m->id, resolvedPath);
+                            operator delete[](buffer);
+                            continue;
+                        }
+                    }
+                    else
+                    {
+                        QC::JSON::Value manifestRoot;
+                        const bool parseOk = QC::JSON::parse(manifestBuf, manifestRoot);
+                        operator delete[](manifestBuf);
+
+                        if (!parseOk || !manifestRoot.isObject())
+                        {
+                            if (kProductionMode && m->required)
+                            {
+                                Log("SysConfig: early module manifest parse failed; refusing (production mode)\r\n");
+                                outTierOk = false;
+                                SetFirstFailureReason(outFirstFailure, outFirstFailureCap, "manifest parse failed", m->id, manifestPath);
+                                operator delete[](buffer);
+                                continue;
+                            }
+                        }
+                        else
+                        {
+                            if (const auto *sigReq = manifestRoot.find("signatureRequired"); sigReq && sigReq->isBool())
+                                requireSig = sigReq->asBool();
+                            if (const auto *hashReq = manifestRoot.find("hashRequired"); hashReq && hashReq->isBool())
+                                requireHash = hashReq->asBool();
+
+                            if (const auto *r = manifestRoot.find("role"); r && r->isString())
+                                manifestRole = r->asString();
+
+                            if (const auto *st = manifestRoot.find("status"); st && st->isString())
+                                manifestStatus = st->asString();
+
+                            const bool quarantined = manifestStatus && QC::String::strcmp(manifestStatus, "quarantined") == 0;
+                            const bool revoked = manifestStatus && QC::String::strcmp(manifestStatus, "revoked") == 0;
+                            if (kProductionMode && (quarantined || revoked) && m->required)
+                            {
+                                Log("SysConfig: early module status not trusted; refusing (production mode)\r\n");
+                                outTierOk = false;
+                                SetFirstFailureReason(outFirstFailure, outFirstFailureCap, "status not trusted", m->id, resolvedPath);
+                                operator delete[](buffer);
+                                continue;
+                            }
+
+                            if (const auto *c = manifestRoot.find("contentValidationCode"); c && c->isString())
+                                manifestCvc = c->asString();
+
+                            if (requireHash)
+                            {
+                                if (!manifestCvc || !*manifestCvc)
+                                {
+                                    if (kProductionMode && m->required)
+                                    {
+                                        Log("SysConfig: early module missing contentValidationCode; refusing (production mode)\r\n");
+                                        outTierOk = false;
+                                        SetFirstFailureReason(outFirstFailure, outFirstFailureCap, "missing contentValidationCode", m->id, resolvedPath);
+                                        operator delete[](buffer);
+                                        continue;
+                                    }
+                                }
+                                else
+                                {
+                                    QC::u8 digest[32];
+                                    QK::Boot::Security::Sha256(reinterpret_cast<const QC::u8 *>(buffer), len, digest);
+                                    if (!QK::Boot::Security::Sha256DigestEqualsHex(digest, manifestCvc))
+                                    {
+                                        if (kProductionMode && m->required)
+                                        {
+                                            Log("SysConfig: early module hash mismatch; refusing (production mode)\r\n");
+                                            outTierOk = false;
+                                            SetFirstFailureReason(outFirstFailure, outFirstFailureCap, "hash mismatch", m->id, resolvedPath);
+                                            operator delete[](buffer);
+                                            continue;
+                                        }
+                                    }
+                                }
+                            }
+
+                            if (requireSig)
+                            {
+                                const auto policy = kProductionMode ? QK::Boot::Security::SigPolicy::RequireValid : QK::Boot::Security::SigPolicy::WarnOnly;
+                                if (!QK::Boot::Security::VerifySignedFileFromLimineRamdiskPath(Log, ModuleRequest, resolvedPath, policy))
+                                {
+                                    if (kProductionMode && m->required)
+                                    {
+                                        Log("SysConfig: early module signature invalid; refusing (production mode)\r\n");
+                                        outTierOk = false;
+                                        SetFirstFailureReason(outFirstFailure, outFirstFailureCap, "signature invalid", m->id, resolvedPath);
+                                        operator delete[](buffer);
+                                        continue;
+                                    }
+                                }
+                            }
+
+                            // Persist manifest-derived trust metadata into the staged module snapshot.
+                            if (stagedThisModule)
+                            {
+                                auto &dst = outStage.modules[stagedIndex];
+                                dst.hashRequired = requireHash;
+                                dst.signatureRequired = requireSig;
+                                if (manifestRole && manifestRole[0])
+                                {
+                                    QC::String::strncpy(dst.role, manifestRole, sizeof(dst.role));
+                                    dst.role[sizeof(dst.role) - 1] = 0;
+                                }
+                                if (manifestStatus && manifestStatus[0])
+                                {
+                                    QC::String::strncpy(dst.status, manifestStatus, sizeof(dst.status));
+                                    dst.status[sizeof(dst.status) - 1] = 0;
+                                }
+                                if (manifestCvc && manifestCvc[0])
+                                {
+                                    QC::String::strncpy(dst.contentValidationCode, manifestCvc, sizeof(dst.contentValidationCode));
+                                    dst.contentValidationCode[sizeof(dst.contentValidationCode) - 1] = 0;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+        skip_layer2_module_trust_gate:
+            (void)0;
 
             if (EndsWithJsn(resolvedPath))
             {
@@ -1665,10 +1837,21 @@ namespace
 
                 seed.modules[i].required = m.required;
                 seed.modules[i].hasJson = m.hasJson;
+
+                if (m.role[0])
+                    QC::String::strncpy(seed.modules[i].role, m.role, sizeof(seed.modules[i].role) - 1);
+                if (m.status[0])
+                    QC::String::strncpy(seed.modules[i].status, m.status, sizeof(seed.modules[i].status) - 1);
+                seed.modules[i].hashRequired = m.hashRequired;
+                seed.modules[i].signatureRequired = m.signatureRequired;
             }
         }
 
         QK::Runtime::Registries::instance().rebuildFromBootSeed(seed);
+
+        // Debug visibility: dump early modules and their trust metadata.
+        if (g_Log)
+            QK::Runtime::Registries::instance().dumpBootSeedModules(g_Log);
     }
 
     static const char *firmwareTypeToString(QC::u64 t)
@@ -1751,6 +1934,8 @@ namespace QKBoot
         QK::Boot::Arch::InitCpuGdtIdtAndInterrupts(g_Log);
     }
 
+    [[noreturn]] static void RefusalHaltWithScreen(const char *title, const char *detailsLine1 = nullptr, const char *detailsLine2 = nullptr);
+
     void initializeBootPolicyAndGate()
     {
         if (!QK::Boot::Security::VerifyBootJsnSignatureFromLimineRamdiskModule(g_Log, g_Req.modules, g_Req.executableFile))
@@ -1760,8 +1945,7 @@ namespace QKBoot
                 g_Log("Refusal Mode: boot config signature invalid\r\n");
                 g_Log("Will not run in this configuration!  This machine does not meet the hardware requirements as listed above.\r\n");
             }
-            for (;;)
-                asm volatile("hlt");
+            RefusalHaltWithScreen("Refusal Mode", "boot config signature invalid", "Will not run in this configuration!");
         }
 
         QK::Boot::Config::BootPolicy policy{};
@@ -1782,8 +1966,7 @@ namespace QKBoot
                 g_Log("Required: SSE2\r\n");
                 g_Log("Will not run in this configuration!  This machine does not meet the hardware requirements as listed above.\r\n");
             }
-            for (;;)
-                asm volatile("hlt");
+            RefusalHaltWithScreen("Refusal Mode", "missing CPU feature", "Required: SSE2");
         }
 
         if (cpuReq.requireNx && !CpuHasNx())
@@ -1794,8 +1977,7 @@ namespace QKBoot
                 g_Log("Required: NX\r\n");
                 g_Log("Will not run in this configuration!  This machine does not meet the hardware requirements as listed above.\r\n");
             }
-            for (;;)
-                asm volatile("hlt");
+            RefusalHaltWithScreen("Refusal Mode", "missing CPU feature", "Required: NX");
         }
 
         if ((cpuReq.require64bit || cpuReq.requireLongmode) && !CpuHasLongMode())
@@ -1806,8 +1988,7 @@ namespace QKBoot
                 g_Log("Required: Long Mode (x86_64)\r\n");
                 g_Log("Will not run in this configuration!  This machine does not meet the hardware requirements as listed above.\r\n");
             }
-            for (;;)
-                asm volatile("hlt");
+            RefusalHaltWithScreen("Refusal Mode", "missing CPU feature", "Required: Long Mode (x86_64)");
         }
 
         const QC::u64 compiledMinMiB = QK::Boot::Config::kCompiledMinRamMiB;
@@ -1856,14 +2037,32 @@ namespace QKBoot
                 g_Log("Will not run in this configuration!  This machine does not meet the hardware requirements as listed above.\r\n");
             }
 
-            for (;;)
-                asm volatile("hlt");
+            RefusalHaltWithScreen("Refusal Mode", "insufficient RAM", "Will not run in this configuration!");
         }
 
         if (syscfgLoaded)
         {
             QK::Boot::Config::ConfigTier activeTier = QK::Boot::Config::ConfigTier::Unknown;
             const char *activeRoot = "";
+            char tierReason[192] = {0};
+            {
+                // Mirror the tier validation logic to capture the first failure reason for display.
+                // Uses the same silent logging policy as selection.
+                const auto StageLog = &SilentLog;
+                bool prodOk = true;
+                if (syscfg.productionRoot[0] != 0)
+                {
+                    QK::Boot::Config::StagedEarlyConfig prodStage{};
+                    (void)SysConfigEarlyStageForRoot(StageLog, g_Req.modules, syscfg, "production", syscfg.productionRoot, prodOk, tierReason, sizeof(tierReason), prodStage);
+                }
+                if (!prodOk && syscfg.goldenRoot[0] != 0)
+                {
+                    bool goldenOk = true;
+                    QK::Boot::Config::StagedEarlyConfig goldenStage{};
+                    (void)SysConfigEarlyStageForRoot(StageLog, g_Req.modules, syscfg, "golden", syscfg.goldenRoot, goldenOk, tierReason, sizeof(tierReason), goldenStage);
+                }
+            }
+
             if (!SysConfigSelectActiveTier(g_Log, g_Req.modules, syscfg, activeTier, activeRoot))
             {
                 if (g_Log)
@@ -1871,8 +2070,7 @@ namespace QKBoot
                     g_Log("Refusal Mode: sysconfig early load failed\r\n");
                     g_Log("Will not run in this configuration!\r\n");
                 }
-                for (;;)
-                    asm volatile("hlt");
+                RefusalHaltWithScreen("Refusal Mode", "sysconfig early load failed", tierReason[0] ? tierReason : "Will not run in this configuration!");
             }
 
             QK::Boot::Config::SetActiveConfigTier(activeTier, activeRoot);
@@ -1883,6 +2081,13 @@ namespace QKBoot
                 g_Log("' root='");
                 g_Log(QK::Boot::Config::GetActiveConfigTierRoot());
                 g_Log("'\r\n");
+            }
+
+            if (!QK::Boot::Security::VerifyDesktopCmlSignatureFromLimineRamdiskModule(g_Log, g_Req.modules))
+            {
+                if (g_Log)
+                    g_Log("Refusal Mode: desktop signature invalid\r\n");
+                RefusalHaltWithScreen("Refusal Mode", "desktop signature invalid", "Will not run in this configuration!");
             }
 
             RebuildRuntimeRegistriesFromCommittedEarlyConfig();
@@ -1964,5 +2169,287 @@ namespace QKBoot
         {
             asm volatile("hlt");
         }
+    }
+
+    struct EarlyFramebufferInfo
+    {
+        QC::uptr address = 0;
+        QC::u32 width = 0;
+        QC::u32 height = 0;
+        QC::u32 pitch = 0;
+    };
+
+    static bool TryGetEarlyFramebufferInfo(QC::u64 FramebufferRequest[], EarlyFramebufferInfo &out)
+    {
+        out = {};
+        if (!FramebufferRequest)
+            return false;
+
+        // Limine framebuffer response pointer is stored at index 5 in our request array.
+        QC::u64 *fb_response = reinterpret_cast<QC::u64 *>(FramebufferRequest[5]);
+        if (!fb_response)
+            return false;
+
+        const QC::u64 fb_count = fb_response[1];
+        if (fb_count == 0)
+            return false;
+
+        QC::u64 **fb_array = reinterpret_cast<QC::u64 **>(fb_response[2]);
+        if (!fb_array)
+            return false;
+
+        QC::u64 *fb = fb_array[0];
+        if (!fb)
+            return false;
+
+        out.address = static_cast<QC::uptr>(fb[0]);
+        out.width = static_cast<QC::u32>(fb[1]);
+        out.height = static_cast<QC::u32>(fb[2]);
+        out.pitch = static_cast<QC::u32>(fb[3]);
+        return out.address != 0 && out.width != 0 && out.height != 0 && out.pitch != 0;
+    }
+
+    static void EarlyFbFill(const EarlyFramebufferInfo &fb, QC::u32 argb)
+    {
+        if (!fb.address)
+            return;
+        volatile QC::u8 *base = reinterpret_cast<volatile QC::u8 *>(fb.address);
+        for (QC::u32 y = 0; y < fb.height; ++y)
+        {
+            volatile QC::u8 *rowBytes = base + static_cast<QC::usize>(y) * fb.pitch;
+            volatile QC::u32 *row = reinterpret_cast<volatile QC::u32 *>(rowBytes);
+            for (QC::u32 x = 0; x < fb.width; ++x)
+                row[x] = argb;
+        }
+    }
+
+    static void EarlyFbDrawRect(const EarlyFramebufferInfo &fb, QC::u32 x, QC::u32 y, QC::u32 w, QC::u32 h, QC::u32 argb)
+    {
+        if (!fb.address)
+            return;
+        if (x >= fb.width || y >= fb.height)
+            return;
+        if (x + w > fb.width)
+            w = fb.width - x;
+        if (y + h > fb.height)
+            h = fb.height - y;
+
+        volatile QC::u8 *base = reinterpret_cast<volatile QC::u8 *>(fb.address);
+        for (QC::u32 yy = 0; yy < h; ++yy)
+        {
+            volatile QC::u8 *rowBytes = base + static_cast<QC::usize>(y + yy) * fb.pitch;
+            volatile QC::u32 *row = reinterpret_cast<volatile QC::u32 *>(rowBytes);
+            for (QC::u32 xx = 0; xx < w; ++xx)
+                row[x + xx] = argb;
+        }
+    }
+
+    static void EarlyFbDrawChar8x16(const EarlyFramebufferInfo &fb, QC::u32 x, QC::u32 y, char c, QC::u32 fg, QC::u32 bg)
+    {
+        // Tiny built-in 8x16 font for refusal mode.
+        // Scope: enough glyphs to display our refusal strings cleanly (A-Z, 0-9, space and a few punctuations).
+        // Unsupported chars fall back to a boxed glyph.
+
+        const auto drawFallback = [&]() {
+            EarlyFbDrawRect(fb, x, y, 8, 16, bg);
+            EarlyFbDrawRect(fb, x, y, 8, 1, fg);
+            EarlyFbDrawRect(fb, x, y + 15, 8, 1, fg);
+            EarlyFbDrawRect(fb, x, y, 1, 16, fg);
+            EarlyFbDrawRect(fb, x + 7, y, 1, 16, fg);
+            EarlyFbDrawRect(fb, x + 3, y + 5, 2, 6, fg);
+        };
+
+        // Normalize to uppercase for simplicity.
+        if (c >= 'a' && c <= 'z')
+            c = static_cast<char>(c - 'a' + 'A');
+
+        // 8x8 glyphs, expanded vertically to 16 scanlines (each row doubled).
+        // Bit 7 is left-most pixel.
+        struct Glyph8x8
+        {
+            char ch;
+            QC::u8 rows[8];
+        };
+
+        static const Glyph8x8 kGlyphs[] = {
+            {' ', {0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00}},
+            {'?', {0x3C,0x66,0x06,0x0C,0x18,0x00,0x18,0x00}},
+            {'\'',{0x18,0x18,0x10,0x00,0x00,0x00,0x00,0x00}},
+            {':', {0x00,0x18,0x18,0x00,0x00,0x18,0x18,0x00}},
+            {'!', {0x18,0x18,0x18,0x18,0x18,0x00,0x18,0x00}},
+            {'-', {0x00,0x00,0x00,0x7E,0x00,0x00,0x00,0x00}},
+            {'(', {0x0C,0x18,0x30,0x30,0x30,0x18,0x0C,0x00}},
+            {')', {0x30,0x18,0x0C,0x0C,0x0C,0x18,0x30,0x00}},
+            {'.', {0x00,0x00,0x00,0x00,0x00,0x18,0x18,0x00}},
+            {',', {0x00,0x00,0x00,0x00,0x00,0x18,0x18,0x30}},
+            {'/', {0x06,0x0C,0x18,0x30,0x60,0x40,0x00,0x00}},
+            {'_', {0x00,0x00,0x00,0x00,0x00,0x00,0x7E,0x00}},
+            {'=', {0x00,0x00,0x7E,0x00,0x7E,0x00,0x00,0x00}},
+
+            {'0', {0x3C,0x66,0x6E,0x76,0x66,0x66,0x3C,0x00}},
+            {'1', {0x18,0x38,0x18,0x18,0x18,0x18,0x7E,0x00}},
+            {'2', {0x3C,0x66,0x06,0x0C,0x18,0x30,0x7E,0x00}},
+            {'3', {0x3C,0x66,0x06,0x1C,0x06,0x66,0x3C,0x00}},
+            {'4', {0x0C,0x1C,0x3C,0x6C,0x7E,0x0C,0x0C,0x00}},
+            {'5', {0x7E,0x60,0x7C,0x06,0x06,0x66,0x3C,0x00}},
+            {'6', {0x1C,0x30,0x60,0x7C,0x66,0x66,0x3C,0x00}},
+            {'7', {0x7E,0x06,0x0C,0x18,0x30,0x30,0x30,0x00}},
+            {'8', {0x3C,0x66,0x66,0x3C,0x66,0x66,0x3C,0x00}},
+            {'9', {0x3C,0x66,0x66,0x3E,0x06,0x0C,0x38,0x00}},
+
+            {'A', {0x18,0x3C,0x66,0x66,0x7E,0x66,0x66,0x00}},
+            {'B', {0x7C,0x66,0x66,0x7C,0x66,0x66,0x7C,0x00}},
+            {'C', {0x3C,0x66,0x60,0x60,0x60,0x66,0x3C,0x00}},
+            {'D', {0x78,0x6C,0x66,0x66,0x66,0x6C,0x78,0x00}},
+            {'E', {0x7E,0x60,0x60,0x7C,0x60,0x60,0x7E,0x00}},
+            {'F', {0x7E,0x60,0x60,0x7C,0x60,0x60,0x60,0x00}},
+            {'G', {0x3C,0x66,0x60,0x6E,0x66,0x66,0x3C,0x00}},
+            {'H', {0x66,0x66,0x66,0x7E,0x66,0x66,0x66,0x00}},
+            {'I', {0x3C,0x18,0x18,0x18,0x18,0x18,0x3C,0x00}},
+            {'J', {0x1E,0x0C,0x0C,0x0C,0x0C,0x6C,0x38,0x00}},
+            {'K', {0x66,0x6C,0x78,0x70,0x78,0x6C,0x66,0x00}},
+            {'L', {0x60,0x60,0x60,0x60,0x60,0x60,0x7E,0x00}},
+            {'M', {0x63,0x77,0x7F,0x6B,0x63,0x63,0x63,0x00}},
+            {'N', {0x66,0x76,0x7E,0x7E,0x6E,0x66,0x66,0x00}},
+            {'O', {0x3C,0x66,0x66,0x66,0x66,0x66,0x3C,0x00}},
+            {'P', {0x7C,0x66,0x66,0x7C,0x60,0x60,0x60,0x00}},
+            {'Q', {0x3C,0x66,0x66,0x66,0x6E,0x3C,0x0E,0x00}},
+            {'R', {0x7C,0x66,0x66,0x7C,0x78,0x6C,0x66,0x00}},
+            {'S', {0x3C,0x66,0x60,0x3C,0x06,0x66,0x3C,0x00}},
+            {'T', {0x7E,0x18,0x18,0x18,0x18,0x18,0x18,0x00}},
+            {'U', {0x66,0x66,0x66,0x66,0x66,0x66,0x3C,0x00}},
+            {'V', {0x66,0x66,0x66,0x66,0x66,0x3C,0x18,0x00}},
+            {'W', {0x63,0x63,0x63,0x6B,0x7F,0x77,0x63,0x00}},
+            {'X', {0x66,0x66,0x3C,0x18,0x3C,0x66,0x66,0x00}},
+            {'Y', {0x66,0x66,0x3C,0x18,0x18,0x18,0x18,0x00}},
+            {'Z', {0x7E,0x06,0x0C,0x18,0x30,0x60,0x7E,0x00}},
+        };
+
+        const Glyph8x8 *glyph = nullptr;
+        for (QC::usize i = 0; i < (sizeof(kGlyphs) / sizeof(kGlyphs[0])); ++i)
+        {
+            if (kGlyphs[i].ch == c)
+            {
+                glyph = &kGlyphs[i];
+                break;
+            }
+        }
+
+        if (!glyph)
+        {
+            drawFallback();
+            return;
+        }
+
+        // Clear background.
+        EarlyFbDrawRect(fb, x, y, 8, 16, bg);
+
+        volatile QC::u8 *base = reinterpret_cast<volatile QC::u8 *>(fb.address);
+        for (QC::u32 row8 = 0; row8 < 8; ++row8)
+        {
+            const QC::u8 bits = glyph->rows[row8];
+            for (QC::u32 dy = 0; dy < 2; ++dy)
+            {
+                const QC::u32 yy = y + row8 * 2 + dy;
+                if (yy >= fb.height)
+                    continue;
+                volatile QC::u8 *rowBytes = base + static_cast<QC::usize>(yy) * fb.pitch;
+                volatile QC::u32 *row = reinterpret_cast<volatile QC::u32 *>(rowBytes);
+                for (QC::u32 col = 0; col < 8; ++col)
+                {
+                    const bool on = (bits & (0x80u >> col)) != 0;
+                    const QC::u32 xx = x + col;
+                    if (xx < fb.width)
+                        row[xx] = on ? fg : bg;
+                }
+            }
+        }
+    }
+
+    static void EarlyFbDrawText(const EarlyFramebufferInfo &fb, QC::u32 x, QC::u32 y, const char *text, QC::u32 fg, QC::u32 bg)
+    {
+        if (!text)
+            return;
+        QC::u32 cx = x;
+        QC::u32 cy = y;
+        for (const char *p = text; *p; ++p)
+        {
+            unsigned char uch = static_cast<unsigned char>(*p);
+            char ch = static_cast<char>(uch);
+
+            // Sanitize to a small printable subset. This prevents odd bytes
+            // (from encoding, or from invalid chars in reason strings) from
+            // rendering as fallback boxes.
+            if (ch == '\t')
+                ch = ' ';
+            if (ch >= 'a' && ch <= 'z')
+                ch = static_cast<char>(ch - 'a' + 'A');
+            const bool okPrintable =
+                (ch == ' ') || (ch == '?') || (ch == '\'') || (ch == ':') || (ch == '!') || (ch == '-') ||
+                (ch == '(') || (ch == ')') || (ch == '.') || (ch == ',') || (ch == '/') || (ch == '_') || (ch == '=') ||
+                (ch >= '0' && ch <= '9') || (ch >= 'A' && ch <= 'Z');
+            if (!okPrintable)
+                ch = '?';
+            if (ch == '\r')
+                continue;
+            if (ch == '\n')
+            {
+                cx = x;
+                cy += 16;
+                continue;
+            }
+            if (cx + 8 > fb.width)
+            {
+                cx = x;
+                cy += 16;
+            }
+            if (cy + 16 > fb.height)
+                break;
+            EarlyFbDrawChar8x16(fb, cx, cy, ch, fg, bg);
+            cx += 8;
+        }
+    }
+
+    [[noreturn]] static void RefusalHaltWithScreen(const char *title, const char *detailsLine1, const char *detailsLine2)
+    {
+        EarlyFramebufferInfo fb{};
+        const bool haveFb = TryGetEarlyFramebufferInfo(g_Req.framebuffer, fb);
+        if (haveFb)
+        {
+            const QC::u32 kBg = 0xFF000000; // black
+            const QC::u32 kFg = 0xFFFFFFFF; // white
+            const QC::u32 kPanel = 0xFF202020; // dark gray
+            EarlyFbFill(fb, kBg);
+
+            // Center-ish panel
+            const QC::u32 margin = 24;
+            const QC::u32 px = margin;
+            const QC::u32 py = margin;
+            const QC::u32 pw = (fb.width > margin * 2) ? (fb.width - margin * 2) : fb.width;
+            const QC::u32 ph = (fb.height > margin * 2) ? (fb.height - margin * 2) : fb.height;
+            EarlyFbDrawRect(fb, px, py, pw, ph, kPanel);
+
+            // Compose text lines (simple; avoids dynamic allocation)
+            char line0[160] = {0};
+            char line1[200] = {0};
+            char line2[200] = {0};
+
+            QC::String::strncpy(line0, title ? title : "Refusal Mode", sizeof(line0) - 1);
+            if (detailsLine1)
+                QC::String::strncpy(line1, detailsLine1, sizeof(line1) - 1);
+            if (detailsLine2)
+                QC::String::strncpy(line2, detailsLine2, sizeof(line2) - 1);
+
+            EarlyFbDrawText(fb, px + 16, py + 16, line0, kFg, kPanel);
+            if (line1[0])
+                EarlyFbDrawText(fb, px + 16, py + 48, line1, kFg, kPanel);
+            if (line2[0])
+                EarlyFbDrawText(fb, px + 16, py + 80, line2, kFg, kPanel);
+
+            EarlyFbDrawText(fb, px + 16, py + 128, "System halted.", kFg, kPanel);
+        }
+
+        for (;;)
+            asm volatile("hlt");
     }
 }

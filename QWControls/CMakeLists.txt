@@ -3,7 +3,9 @@ add_library(QWControls STATIC
     Src/Containers/Container.cpp
     Src/Containers/Frame.cpp
     Src/Containers/Panel.cpp
+    Src/Containers/ScrollPanel.cpp
     Src/Leaf/Button.cpp
+    Src/Leaf/IconButton.cpp
     Src/Leaf/Label.cpp
     Src/Leaf/ImageView.cpp
     Src/Leaf/ScrollBar.cpp

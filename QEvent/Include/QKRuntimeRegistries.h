@@ -19,6 +19,12 @@ namespace QK::Runtime
         char resolvedPath[320] = {0};
         bool required = false;
         bool hasJson = false;
+
+        // Layer-2 module trust metadata
+        char role[16] = {0};
+        char status[16] = {0};
+        bool hashRequired = false;
+        bool signatureRequired = false;
     };
 
     struct BootSeedConfig
@@ -140,6 +146,9 @@ namespace QK::Runtime
         // Boot-time atomic seed/commit.
         void rebuildFromBootSeed(const BootSeedConfig &seed);
         const BootSeedConfig &bootSeed() const { return m_bootSeed; }
+
+        // Debug helpers
+        void dumpBootSeedModules(void (*log)(const char *)) const;
 
         QC::usize processCount() const;
         QC::usize serviceCount() const;

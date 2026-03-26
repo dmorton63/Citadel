@@ -1,0 +1,14 @@
+{
+  "type": "window",
+  "title": "HTML Viewer",
+  "layout": "vertical",
+  "children": [
+    {
+      "id": "html_root",
+      "type": "panel",
+      "layout": "flow",
+      "scroll": true,
+      "padding": 8
+    }
+  ]
+}

@@ -2,7 +2,9 @@
 
 add_library(QGraphics STATIC
 	Src/QG/PainterSurface.cpp
+	Src/QG/FontManager.cpp
 	Src/QG/Image.cpp
+	Src/QG/SVG.cpp
 	${CMAKE_SOURCE_DIR}/shared/third_party/miniz_tinfl.c
 )
 

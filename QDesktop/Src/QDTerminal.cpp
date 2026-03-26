@@ -1182,6 +1182,61 @@ namespace QD
             return;
         }
 
+        if (streqIgnoreCase(cmd, "browsefile"))
+        {
+            char pathBuf[256];
+            QC::String::memset(pathBuf, 0, sizeof(pathBuf));
+            (void)readWord(p, pathBuf, sizeof(pathBuf));
+
+            if (pathBuf[0] == '\0')
+            {
+                appendLine("usage: browsefile <path | http://url>");
+                appendLine("  (paths default to /shared if no slash; URLs are plain HTTP only)");
+                return;
+            }
+
+            if (!m_desktop)
+            {
+                appendLine("browsefile: no desktop");
+                return;
+            }
+
+            if (startsWith(pathBuf, "http://") || startsWith(pathBuf, "https://"))
+            {
+                m_desktop->openBrowserUrl(pathBuf);
+            }
+            else
+            {
+                m_desktop->openBrowserFile(pathBuf);
+            }
+            appendLine("browsefile: opened");
+            return;
+        }
+
+        if (streqIgnoreCase(cmd, "cuiml"))
+        {
+            char pathBuf[256];
+            QC::String::memset(pathBuf, 0, sizeof(pathBuf));
+            (void)readWord(p, pathBuf, sizeof(pathBuf));
+
+            if (pathBuf[0] == '\0')
+            {
+                appendLine("usage: cuiml <path>");
+                appendLine("  (paths default to /shared if no slash)");
+                return;
+            }
+
+            if (!m_desktop)
+            {
+                appendLine("cuiml: no desktop");
+                return;
+            }
+
+            m_desktop->openCuiMLFile(pathBuf);
+            appendLine("cuiml: opened");
+            return;
+        }
+
         // All other commands go through CommandProcessor.
         if (!m_window)
         {
