@@ -10,6 +10,8 @@
 #include "QCCommandRegistry.h"
 #include "QKCommandCenter.h"
 
+#include "QKSystemVolumeCommands.h"
+
 #include "QKBootConfigTier.h"
 #include "Boot/Config/QKBootStagedConfig.h"
 
@@ -50,6 +52,10 @@ namespace QK
 
             constexpr QC::usize kCwdSize = 128;
             char g_cwd[kCwdSize] = "/";
+
+            // Minimal role model (MVP): affects registry command access + help filtering.
+            // Default to Admin until real auth/session model exists.
+            QC::Cmd::AccessLevel g_role = QC::Cmd::AccessLevel::Admin;
 
             constexpr QC::usize kMaxArgs = 16;
 
@@ -448,6 +454,7 @@ namespace QK
 
             void handleHelp(int argc, const char *const *argv)
             {
+                const QC::Cmd::AccessLevel caller = g_role;
                 const char *query = (argc >= 2) ? argv[1] : nullptr;
                 if (query && *query)
                 {
@@ -455,21 +462,35 @@ namespace QK
                     if (!cmd)
                     {
                         QK::CmdCenter::registerMvpCommands();
-                        const char *desc = QC::Cmd::Registry::instance().findDescription(query);
-                        if (!desc)
+                        auto &reg = QC::Cmd::Registry::instance();
+                        bool found = false;
+                        for (QC::usize i = 0; i < reg.commandCount(); ++i)
                         {
-                            print("\r\nCommand not found\r\n");
+                            const char *name = reg.commandNameAt(i);
+                            if (!name)
+                                continue;
+                            if (!streqIgnoreCase(name, query))
+                                continue;
+                            found = true;
+                            if (static_cast<QC::u8>(caller) < static_cast<QC::u8>(reg.commandAccessAt(i)))
+                            {
+                                print("\r\nPermission denied\r\n");
+                                return;
+                            }
+
+                            const char *desc = reg.commandDescriptionAt(i);
+                            print("\r\n");
+                            print(query);
+                            if (desc && *desc)
+                            {
+                                print(" - ");
+                                print(desc);
+                            }
+                            print("\r\n");
                             return;
                         }
-
-                        print("\r\n");
-                        print(query);
-                        if (desc && *desc)
-                        {
-                            print(" - ");
-                            print(desc);
-                        }
-                        print("\r\n");
+                        if (!found)
+                            print("\r\nCommand not found\r\n");
                         return;
                     }
                     print("\r\n");
@@ -505,6 +526,8 @@ namespace QK
                     if (!name)
                         continue;
                     if (findCommand(name))
+                        continue;
+                    if (static_cast<QC::u8>(caller) < static_cast<QC::u8>(reg.commandAccessAt(i)))
                         continue;
 
                     print("  ");
@@ -616,6 +639,40 @@ namespace QK
 
                 QFS::VFS::instance().close(file);
                 print("\r\n");
+            }
+
+            void handleTouch(int argc, const char *const *argv)
+            {
+                if (argc < 2 || !argv[1] || !*argv[1])
+                {
+                    print("touch: missing file operand\r\n");
+                    return;
+                }
+
+                char path[256];
+                QC::String::memset(path, 0, sizeof(path));
+                if (!resolvePath(argv[1], path, sizeof(path)))
+                {
+                    print("touch: invalid path\r\n");
+                    return;
+                }
+
+                const QC::usize len = QC::String::strlen(path);
+                if (len == 0 || path[len - 1] == '/')
+                {
+                    print("touch: invalid path\r\n");
+                    return;
+                }
+
+                // Create if missing; if it already exists, do not truncate.
+                QFS::File *file = QFS::VFS::instance().open(path, QFS::OpenMode::Write | QFS::OpenMode::Create);
+                if (!file)
+                {
+                    print("touch: cannot create file\r\n");
+                    return;
+                }
+
+                QFS::VFS::instance().close(file);
             }
 
             void handleSaveTerm(int argc, const char *const *argv)
@@ -830,8 +887,53 @@ namespace QK
                 addCommandInternal({"pwd", handlePwd, "Print current working directory"});
                 addCommandInternal({"cd", handleCd, "Change current directory"});
                 addCommandInternal({"cat", handleCat, "Print file contents"});
+                addCommandInternal({"touch", handleTouch, "Create empty file"});
                 addCommandInternal({"saveterm", handleSaveTerm, "Save console transcript to /shared"});
                 addCommandInternal({"tier", handleTier, "Show active config tier + staged early modules"});
+
+                addCommandInternal({"whoami",
+                                    [](int, const char *const *) {
+                                        print("\r\nrole=");
+                                        switch (g_role)
+                                        {
+                                        case QC::Cmd::AccessLevel::User:
+                                            print("user");
+                                            break;
+                                        case QC::Cmd::AccessLevel::Admin:
+                                            print("admin");
+                                            break;
+                                        case QC::Cmd::AccessLevel::SysAdmin:
+                                            print("su");
+                                            break;
+                                        case QC::Cmd::AccessLevel::System:
+                                            print("system");
+                                            break;
+                                        default:
+                                            print("?");
+                                            break;
+                                        }
+                                        print("\r\n");
+                                    },
+                                    "Show current role"});
+
+                addCommandInternal({"user",
+                                    [](int, const char *const *) {
+                                        g_role = QC::Cmd::AccessLevel::User;
+                                        print("\r\nrole=user\r\n");
+                                    },
+                                    "Set role to user"});
+                addCommandInternal({"admin",
+                                    [](int, const char *const *) {
+                                        g_role = QC::Cmd::AccessLevel::Admin;
+                                        print("\r\nrole=admin\r\n");
+                                    },
+                                    "Set role to admin"});
+                addCommandInternal({"su",
+                                    [](int, const char *const *) {
+                                        g_role = QC::Cmd::AccessLevel::SysAdmin;
+                                        print("\r\nrole=su\r\n");
+                                    },
+                                    "Set role to su (SysAdmin)"});
             }
 
             void executeCommand()
@@ -866,7 +968,7 @@ namespace QK
                             print(text);
                         print("\r\n");
                     };
-                    ctx.callerAccess = QC::Cmd::AccessLevel::System;
+                    ctx.callerAccess = g_role;
                     const bool handled = QC::Cmd::Registry::instance().execute(original, ctx);
                     if (!handled)
                         print("\r\nUnknown command\r\n");
@@ -884,6 +986,7 @@ namespace QK
             resetCommandTable();
             registerBuiltIns();
             QK::CmdCenter::registerMvpCommands();
+            QK::CmdCenter::registerSystemVolumeCommands();
             QC::String::strncpy(g_cwd, "/", sizeof(g_cwd) - 1);
             g_cwd[sizeof(g_cwd) - 1] = '\0';
             QC::String::memset(g_transcript, 0, sizeof(g_transcript));
@@ -893,6 +996,7 @@ namespace QK
             g_savetermHasBaseline = false;
             QC::String::memset(g_savetermLastPath, 0, sizeof(g_savetermLastPath));
             g_inputEnabled = true;
+            g_role = QC::Cmd::AccessLevel::Admin;
             print("\r\nCITADEL console ready\r\n");
             printPrompt();
         }

@@ -67,19 +67,51 @@ If provisioning fails:
 This model replaces the earlier “three-pass pairing ritual” with a simpler token approach.
 
 4.1 System Security Token (SST)
-- Define a **System Security Token (SST)** as a rotatable secret
-- SST is not stored in plaintext; SC stores only **wrapped SST** in protected storage
-- Key hierarchy sketch:
-  - TAS → derives SC root key material
-  - SC root key unwraps current SST
-  - SST derives per-subsystem runtime keys
+- Define a **System Security Token (SST)** as a rotatable, high-entropy secret used to derive runtime keys.
+- SST is never persisted in plaintext; SC persists only a **wrapped SST** blob in protected storage.
+
+Goals:
+- Provide a single, machine-bound root for runtime key derivation.
+- Allow scheduled and forced secret rotation without reinstall.
+- Keep the kernel surface minimal (SST should not be broadly accessible).
+
+Non-goals (v1):
+- Defining TPM PCR policies and measured boot binding in detail.
+- Defining user vault storage formats beyond the key-derivation relationship.
+
+Terminology:
+- TAS: TPM Anchor Secret (machine-bound, sealed/wrapped at rest).
+- SC Root Key (SRK): key material derived from TAS, used only to wrap/unwrap SST.
+- Wrapped SST: authenticated-encrypted blob containing SST material and metadata.
+
+Key hierarchy sketch:
+- TAS → derives SRK
+- SRK unwraps current SST
+- SST derives per-subsystem runtime keys
+
+Wrapped SST blob format (conceptual, v1):
+- Header: magic, version, algorithm ids
+- Metadata: generation counter, created time, optional rotation reason
+- Nonce/IV
+- Ciphertext: SST bytes
+- Auth tag / MAC
+
+Security invariants:
+- Only SC may unwrap SST.
+- SST plaintext exists only in volatile memory and must be zeroized on retire.
+- Rotation must be atomic from the perspective of dependent key derivation (no partial states).
 
 4.2 Startup (Boot Trust Gate)
 At every boot:
 - SC is silently initialized
 - SC unseals/unwraps TAS
 - If TAS access fails → SAFE_MODE / RECOVERY
-- Derive/load current SST and expose only the minimum needed to kernel/SC internals
+- Derive/load current SST and expose only the minimum needed to kernel/SC internals.
+
+Startup rules:
+- If wrapped SST is missing/invalid, SC may enter provisioning flow to create a new SST (policy-gated).
+- If wrapped SST exists, SC must validate integrity/authenticity before unwrapping.
+- If SRK derivation fails, do not attempt fallback derivations using weaker sources.
 
 4.3 Runtime Token Rotation (Scheduled + Forced)
 During normal operation:
@@ -90,6 +122,16 @@ Cutover principles:
 - Rewrap dependent headers/keys to SST’
 - Allow in-flight tasks to finish under old SST (retiring state)
 - After task completion boundary: securely destroy old SST
+
+Rotation protocol (v1):
+- Rotation request creates SST’ and produces new wrapped SST’ (under SRK).
+- Persist wrapped SST’ first, then switch “current generation” pointer/record.
+- Keep old SST in-memory only while needed for retirement window.
+- Retirement window ends at a defined quiescence boundary (e.g., no active secure sessions / tasks).
+
+Suggested API boundaries:
+- Kernel-facing: request rotation, query status (generation, next due), derive scoped keys by label.
+- SC-internal: unwrap current SST, generate new SST, wrap SST, zeroize retired SST.
 
 ##
 5. User Security (Identity + Vault)

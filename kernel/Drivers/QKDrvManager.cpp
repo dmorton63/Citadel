@@ -66,6 +66,8 @@ namespace QKDrv
 
     void Manager::probeStorage()
     {
+        // Prefer a persistent system volume if present.
+        IDE::probeAndRegisterSystemVolume();
         IDE::probeAndRegisterSharedVolume();
     }
 

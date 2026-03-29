@@ -93,15 +93,18 @@ namespace QFS
         const QC::u32 totalClusters = dataSectors / sectorsPerCluster;
         out.totalClusters = totalClusters;
 
-        FATKind kind = classifyByClusters(totalClusters);
+        const FATKind kindByClusters = classifyByClusters(totalClusters);
 
-        // Cross-check common BPB expectations; if they disagree, keep the cluster-count classification.
-        // FAT32 typically has rootEntryCount==0 and fatSz16==0.
-        if (kind == FATKind::FAT32)
-        {
-            // If these are obviously inconsistent, still allow cluster-based classification.
-            // (vvfat and some tools can produce quirky values.)
-        }
+        // Prefer explicit BPB indicators when present. This helps with small FAT32 volumes that
+        // are forced by mkfs.fat (which may warn about being below the suggested FAT32 minimum).
+        const bool bpbLooksFAT32 = (rootEntryCount == 0 && fatSz16 == 0 && fatSz32 != 0);
+        const bool bpbLooksFAT16 = (rootEntryCount != 0 && fatSz16 != 0);
+
+        FATKind kind = kindByClusters;
+        if (bpbLooksFAT32)
+            kind = FATKind::FAT32;
+        else if (bpbLooksFAT16)
+            kind = FATKind::FAT16;
 
         out.kind = kind;
         return (kind == FATKind::FAT16 || kind == FATKind::FAT32 || kind == FATKind::FAT12);

@@ -9,11 +9,15 @@ Sources scanned: 28 Markdown files (excluding build/, backups/, .git/; including
 - [x] Create a signing/hash check so only trusted modules load during secure boot. (sources: [backups/todo_archive_2026-03-25/TODO_MAIN.md](backups/todo_archive_2026-03-25/TODO_MAIN.md#L43))
 - [x] Allow Security Center to throttle or isolate flows (sources: [backups/todo_archive_2026-03-25/CITADEL_TASKFLOW_TODO.md](backups/todo_archive_2026-03-25/CITADEL_TASKFLOW_TODO.md#L37))
 - [x] Create project structure for Security Center (SC) subsystem (sources: [backups/todo_archive_2026-03-25/TODO_S_LIST.md](backups/todo_archive_2026-03-25/TODO_S_LIST.md#L19))
-- [ ] Define **SST (System Security Token)** as a rotatable secret used to derive runtime keys (sources: [backups/todo_archive_2026-03-25/TODO_S_LIST.md](backups/todo_archive_2026-03-25/TODO_S_LIST.md#L73))
+- [x] Define **SST (System Security Token)** as a rotatable secret used to derive runtime keys (implemented in `QSecurityCenter/*` + wired via `QKernel/Src/QKSecurityCenter.cpp`; wrapped SST stored in SecureStore under `/system/sc`). (sources: [backups/todo_archive_2026-03-25/TODO_S_LIST.md](backups/todo_archive_2026-03-25/TODO_S_LIST.md#L73))
+- [ ] Implement minimal Owner credential backend for elevation (no DB): persist salted verifier + KDF params in SC storage; add `SYS_USER_ENROLL` / `SYS_USER_UNLOCK` / `SYS_USER_LOCK` + attempt backoff; expose “unlocked session” state for `chmode admin/system` checks.
+
+  - Dev note (dev persistence): prefer running with `./build.sh -r --system-vol` so `/system` is backed by `build/system.qcow2` and SecureStore blobs (e.g., `/system/sc/OWNERCRD`) persist across reboots and rebuilds. Use `sysformat` once to initialize the volume, and `sysmount` to re-mount without formatting.
+  - Fallback dev note: `./build.sh -r` regenerates the ramdisk each run; if you are not using `--system-vol`, you can seed the SecureStore blob in `ramdisk/system/sc/OWNERCRD`.
 - [ ] Expose Task_Flow metrics to Security Center (sources: [backups/todo_archive_2026-03-25/CITADEL_TASKFLOW_TODO.md](backups/todo_archive_2026-03-25/CITADEL_TASKFLOW_TODO.md#L36))
 - [ ] Define non-TPM secure-bootstrapping path (still encrypted-at-rest, but weaker): recovery code → KDF → wraps the anchor secret (sources: [backups/todo_archive_2026-03-25/TODO_S_LIST.md](backups/todo_archive_2026-03-25/TODO_S_LIST.md#L55))
 - [ ] Implement `seal_secret()` / `unseal_secret()` abstraction (TPM-backed; stubbed fallback) (sources: [backups/todo_archive_2026-03-25/TODO_S_LIST.md](backups/todo_archive_2026-03-25/TODO_S_LIST.md#L51))
-- [ ] Implement `tpm_present()` probe (sources: [backups/todo_archive_2026-03-25/TODO_S_LIST.md](backups/todo_archive_2026-03-25/TODO_S_LIST.md#L50))
+- [x] Implement `tpm_present()` probe (implemented as `QK::SecureStore::tpm_present()` in `QKernel/*`; runtime state wired via `QKernel/Src/QKSecurityCenter.cpp`). (sources: [backups/todo_archive_2026-03-25/TODO_S_LIST.md](backups/todo_archive_2026-03-25/TODO_S_LIST.md#L50))
 - [ ] Add TPM‑accelerated sealing for AI metadata (optional) (sources: [backups/todo_archive_2026-03-25/CITADEL_TASKFLOW_TODO.md](backups/todo_archive_2026-03-25/CITADEL_TASKFLOW_TODO.md#L38))
 - [ ] Define “TPM Anchor Secret” (TAS): persistent secret sealed to the machine (optionally to measurements/PCRs later) (sources: [backups/todo_archive_2026-03-25/TODO_S_LIST.md](backups/todo_archive_2026-03-25/TODO_S_LIST.md#L52))
 
@@ -193,6 +197,14 @@ Sources scanned: 28 Markdown files (excluding build/, backups/, .git/; including
 - [ ] Add predictive caching (optional) (sources: [backups/todo_archive_2026-03-25/CITADEL_TASKFLOW_TODO.md](backups/todo_archive_2026-03-25/CITADEL_TASKFLOW_TODO.md#L26))
 
 ## Not Now
+- [ ] Refactor `QKernel/Src/QKCommandCenter.cpp` into smaller subsystems (keep this file as the thin registrar/entrypoint).
+- [ ] Split out AUTH/SESSION/ACCESS CONTROL into a dedicated module (e.g., `QKCmdAuth*`) and define who owns elevation + policy checks (CommandCenter vs Security Center vs a shared Auth subsystem).
+- [ ] Split out STRING/TOKEN/PARSING UTILITIES into a shared command parsing utility (so both kernel console + desktop terminal can reuse it).
+- [ ] Split out PATH + FILESYSTEM RESOLUTION helpers into a filesystem/CLI utility layer (incl. path canonicalization + protected-path policy like `/system` + `/PROD`).
+- [ ] Split out BUILT-IN COMMAND IMPLEMENTATIONS into topic files (fs commands, system commands, debug commands) to reduce include churn and compile time.
+- [ ] Move FLOW ENGINE + MEMOIZATION tests/helpers into a clearly-labeled “debug/test commands” compilation unit (and decide whether it ships in release builds).
+- [ ] Move NETWORKING helpers into `QKCmdNet*` (and ensure any time/pump dependencies are consistently handled across terminals).
+
 - [ ] Finalize JSON canonicalization rules (for hashing/signing) (sources: [jsonFunctionTemplate.md](jsonFunctionTemplate.md#L18))
 - [ ] Resize handles with cursor changes (sources: [QDesktop/TODO_README.md](QDesktop/TODO_README.md#L293))
 - [ ] Support for file watching (detect changes) (sources: [QDesktop/TODO_README.md](QDesktop/TODO_README.md#L72))
@@ -219,6 +231,7 @@ Sources scanned: 28 Markdown files (excluding build/, backups/, .git/; including
 - [ ] #12 (MVP part A)** Compute `golden_manifest_digest` deterministically and log/measure it (even before sealing exists). (sources: [backups/todo_archive_2026-03-25/TODO_BRAINSTORM_2026-03-08.md](backups/todo_archive_2026-03-25/TODO_BRAINSTORM_2026-03-08.md#L47))
 - [ ] #12 (MVP part B, BLOCKED on persistence)** Seal + store blob; implement unseal policy checks. (sources: [backups/todo_archive_2026-03-25/TODO_BRAINSTORM_2026-03-08.md](backups/todo_archive_2026-03-25/TODO_BRAINSTORM_2026-03-08.md#L48))
 - [ ] #12 TPM sealing for golden-config hashes** (needs persistent storage for the sealed blob, but we can compute/log digests now). (sources: [backups/todo_archive_2026-03-25/TODO_BRAINSTORM_2026-03-08.md](backups/todo_archive_2026-03-25/TODO_BRAINSTORM_2026-03-08.md#L29))
+- [ ] Add `QC_LOG_PROBE("Module")` macro that emits file/line/func + tid + ms timestamp via existing `QC::Logger` (optionally `#ifdef NDEBUG` strip). (sources: discussion 2026-03-27)
 - [ ] #15** Implement a generic JSON layering/merge engine (schema-aware) + validation hooks. (sources: [backups/todo_archive_2026-03-25/TODO_BRAINSTORM_2026-03-08.md](backups/todo_archive_2026-03-25/TODO_BRAINSTORM_2026-03-08.md#L51))
 - [ ] #16 Unified sandbox profiles + app/service launch flow integration**. (sources: [backups/todo_archive_2026-03-25/TODO_BRAINSTORM_2026-03-08.md](backups/todo_archive_2026-03-25/TODO_BRAINSTORM_2026-03-08.md#L31))
 - [ ] #16** Define sandbox profile JSON + selection rules, and plumb it into service/app launch. (sources: [backups/todo_archive_2026-03-25/TODO_BRAINSTORM_2026-03-08.md](backups/todo_archive_2026-03-25/TODO_BRAINSTORM_2026-03-08.md#L52))

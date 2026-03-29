@@ -19,6 +19,7 @@
 
 #include "QKConsole.h"
 #include "QKStorageProbe.h"
+#include "QKSecurityCenter.h"
 
 #include "QNetDHCP.h"
 #include "QNetStack.h"
@@ -426,6 +427,9 @@ namespace QK::Boot::Desktop
         QKDrv::Manager::instance().setScreenSize(width, height);
         QKDrv::Manager::instance().initialize();
         g_Log("Drivers initialized\r\n");
+
+        // Ensure SST exists after /system is mounted from the system volume.
+        (void)QK::SecurityCenter::instance().ensureSst();
 
         // Allow subsystems/commands to pump RX/IO without pulling driver headers into QKernel.
         QK::System::setPumpFn([]()

@@ -52,6 +52,10 @@ backups/*.sha256
 # Local signing keys (never commit)
 keys/
 
+# Local dev SecureStore blobs (never commit)
+ramdisk/system/sc/
+ramdisk/system/sc/*
+
 # Python bytecode caches
 __pycache__/
 *.pyc

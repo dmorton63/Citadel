@@ -9,6 +9,7 @@
 #include "QCString.h"
 #include "QCBuiltins.h"
 #include "QCCommandRegistry.h"
+#include "QKSecurityCenter.h"
 #include "QKEventManager.h"
 #include "QKEventTypes.h"
 #include "QKShutdownController.h"
@@ -716,6 +717,51 @@ namespace QD
         if (!self)
             return;
 
+        const bool bypass = QK::SecurityCenter::instance().bypassEnabled();
+        if (!bypass)
+        {
+            const char *user = self->m_chmodeUser ? self->m_chmodeUser->text() : nullptr;
+            const char *pass = self->m_chmodePass ? self->m_chmodePass->text() : nullptr;
+            const QC::Status st = QK::SecurityCenter::instance().ownerUnlock(user, pass);
+            if (st != QC::Status::Success)
+            {
+                char msg[160];
+                QC::String::memset(msg, 0, sizeof(msg));
+                QC::String::strncpy(msg, "chmode: denied", sizeof(msg) - 1);
+
+                const QC::u32 backoff = QK::SecurityCenter::instance().ownerUnlockBackoffMs();
+                if (backoff)
+                {
+                    const QC::usize used0 = QC::String::strlen(msg);
+                    QC::String::strncpy(msg + used0, " (backoff ", sizeof(msg) - 1 - used0);
+
+                    // Append backoff integer (ms)
+                    char num[16];
+                    QC::String::memset(num, 0, sizeof(num));
+                    QC::u32 v = backoff;
+                    char tmp[16];
+                    QC::String::memset(tmp, 0, sizeof(tmp));
+                    QC::usize n = 0;
+                    do
+                    {
+                        tmp[n++] = static_cast<char>('0' + (v % 10));
+                        v /= 10;
+                    } while (v && n < sizeof(tmp));
+                    for (QC::usize i = 0; i < n && i < sizeof(num) - 1; ++i)
+                        num[i] = tmp[n - 1 - i];
+
+                    const QC::usize used1 = QC::String::strlen(msg);
+                    QC::String::strncpy(msg + used1, num, sizeof(msg) - 1 - used1);
+                    const QC::usize used2 = QC::String::strlen(msg);
+                    QC::String::strncpy(msg + used2, "ms)", sizeof(msg) - 1 - used2);
+                }
+
+                self->appendLine(msg);
+                self->focus();
+                return;
+            }
+        }
+
         self->setCallerAccess(self->m_chmodePendingAccess);
         self->closeChmodeDialog();
 
@@ -945,6 +991,39 @@ namespace QD
         p = skipSpaces(p);
 
         // Local-only commands (UI state): clear/saveterm.
+
+        // Role aliases for convenience.
+        if (streqIgnoreCase(cmd, "whoami"))
+        {
+            char msg[96];
+            QC::String::memset(msg, 0, sizeof(msg));
+            QC::String::strncpy(msg, "role=", sizeof(msg) - 1);
+            const QC::usize used = QC::String::strlen(msg);
+            QC::String::strncpy(msg + used, callerAccessName(), sizeof(msg) - 1 - used);
+            appendLine(msg);
+            return;
+        }
+
+        if (streqIgnoreCase(cmd, "user"))
+        {
+            setCallerAccess(static_cast<QC::u8>(QC::Cmd::AccessLevel::User));
+            appendLine("chmode: now user");
+            return;
+        }
+
+        if (streqIgnoreCase(cmd, "admin"))
+        {
+            // Use the same UX behavior as chmode admin (dialog).
+            openChmodeDialog(static_cast<QC::u8>(QC::Cmd::AccessLevel::Admin));
+            return;
+        }
+
+        if (streqIgnoreCase(cmd, "su"))
+        {
+            // Map su -> system for now.
+            openChmodeDialog(static_cast<QC::u8>(QC::Cmd::AccessLevel::System));
+            return;
+        }
 
         if (streqIgnoreCase(cmd, "chmode"))
         {

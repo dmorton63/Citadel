@@ -1135,6 +1135,34 @@ namespace QKDrv
             }
         }
 
+        static const char *completionCodeName(CompletionCode code)
+        {
+            switch (code)
+            {
+            case CompletionCode::Invalid:
+                return "Invalid";
+            case CompletionCode::Success:
+                return "Success";
+            case CompletionCode::DataBuffer:
+                return "DataBuffer";
+            case CompletionCode::BabbleDetected:
+                return "BabbleDetected";
+            case CompletionCode::USBTransaction:
+                return "USBTransaction";
+            case CompletionCode::TRBError:
+                return "TRBError";
+            case CompletionCode::Stall:
+                return "Stall";
+            case CompletionCode::ResourceError:
+                return "ResourceError";
+            case CompletionCode::NoSlotsAvailable:
+                return "NoSlotsAvailable";
+            case CompletionCode::ShortPacket:
+                return "ShortPacket";
+            default:
+                return "Unknown";
+            }
+        }
         void XHCIControllerImpl::handleCommandComplete(const TRB &event)
         {
             m_lastCompletionCode = getCompletionCode(event);
@@ -1143,8 +1171,8 @@ namespace QKDrv
 
             if (m_lastCompletionCode != CompletionCode::Success)
             {
-                QC_LOG_WARN("xHCI", "Command completed with code %u",
-                            static_cast<QC::u8>(m_lastCompletionCode));
+                QC_LOG_WARN("xHCI", "Command completed with code %u (%s)",
+                            static_cast<QC::u8>(m_lastCompletionCode), completionCodeName(m_lastCompletionCode));
             }
         }
 
@@ -1480,8 +1508,14 @@ namespace QKDrv
                             m_transferCompletionCode == CompletionCode::ShortPacket);
             if (!success)
             {
-                QC_LOG_WARN("xHCI", "Control transfer failed: %u",
-                            static_cast<QC::u8>(m_transferCompletionCode));
+                    QC_LOG_WARN("xHCI", "Control transfer failed: code=%u (%s) reqType=0x%02x req=0x%02x value=0x%04x index=0x%04x len=%u",
+                                static_cast<QC::u8>(m_transferCompletionCode),
+                                completionCodeName(m_transferCompletionCode),
+                                reqType,
+                                request,
+                                static_cast<unsigned>(value),
+                                static_cast<unsigned>(index),
+                                static_cast<unsigned>(length));
             }
             return success;
         }
@@ -1924,10 +1958,8 @@ namespace QKDrv
                 {
                     setHIDProtocol(slotId, hidIface->bInterfaceNumber, 0);
                 }
-                else
-                {
-                    setHIDProtocol(slotId, hidIface->bInterfaceNumber, 1);
-                }
+
+                // Non-boot HID devices commonly STALL SET_PROTOCOL; leave them as-is.
 
                 // Configure the interrupt endpoint
                 configureEndpoint(slotId, *hidEp);

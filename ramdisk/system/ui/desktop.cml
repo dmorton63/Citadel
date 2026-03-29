@@ -15,7 +15,7 @@
     <body>
         <Desktop>
             <Background type="image"
-                        path=""
+                        path="/system/wall/SPRING.PNG"
                         mode="stretch" />
 
             <Layout type="absolute">

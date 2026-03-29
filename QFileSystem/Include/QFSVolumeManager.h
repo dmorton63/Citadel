@@ -53,6 +53,8 @@ namespace QFS
             FileSystem *fs;
             bool mounted;
             bool autoMount;
+            bool mountFailed;
+            QC::u32 mountFailCount;
         };
 
         VolumeManager() = default;

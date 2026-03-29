@@ -165,7 +165,8 @@ namespace QD
 
         // NOTE: For early UI testing we accept blank PIN.
         const char *pin = self->m_pinBox ? self->m_pinBox->text() : nullptr;
-        (void)pin;
+        if (!pin)
+            pin = "";
 
         if (bypass)
         {
@@ -174,7 +175,44 @@ namespace QD
             return;
         }
 
-        self->setStatus("Unlock blocked (SC enforce not wired yet). ");
+        // v1: username is fixed to Owner until multi-user exists.
+        const QC::Status st = QK::SecurityCenter::instance().ownerUnlock("Owner", pin);
+        if (st == QC::Status::Success)
+        {
+            self->setStatus("Unlocked.");
+            self->close();
+            return;
+        }
+
+        char msg[128];
+        QC::String::memset(msg, 0, sizeof(msg));
+        QC::String::strncpy(msg, "Denied.", sizeof(msg) - 1);
+        const QC::u32 backoff = QK::SecurityCenter::instance().ownerUnlockBackoffMs();
+        if (backoff)
+        {
+            const QC::usize used0 = QC::String::strlen(msg);
+            QC::String::strncpy(msg + used0, " Backoff ", sizeof(msg) - 1 - used0);
+
+            char num[16];
+            QC::String::memset(num, 0, sizeof(num));
+            QC::u32 v = backoff;
+            char tmp[16];
+            QC::String::memset(tmp, 0, sizeof(tmp));
+            QC::usize n = 0;
+            do
+            {
+                tmp[n++] = static_cast<char>('0' + (v % 10));
+                v /= 10;
+            } while (v && n < sizeof(tmp));
+            for (QC::usize i = 0; i < n && i < sizeof(num) - 1; ++i)
+                num[i] = tmp[n - 1 - i];
+
+            const QC::usize used1 = QC::String::strlen(msg);
+            QC::String::strncpy(msg + used1, num, sizeof(msg) - 1 - used1);
+            const QC::usize used2 = QC::String::strlen(msg);
+            QC::String::strncpy(msg + used2, "ms.", sizeof(msg) - 1 - used2);
+        }
+        self->setStatus(msg);
     }
 
     void LoginDialog::onCancelClick(QW::Controls::Button *button, void *userData)

@@ -252,10 +252,19 @@ namespace QD
         if (isEmpty(username))
             username = "Owner";
 
+        const char *pin = self->m_pinBox ? self->m_pinBox->text() : nullptr;
+        if (!pin)
+            pin = "";
+
         const bool bypass = QK::SecurityCenter::instance().bypassEnabled();
-        if (!bypass)
+
+        // Always persist enrollment state, even in bypass mode.
+        // Bypass is an enforcement mode, not a persistence disable.
+        const QC::Status st = QK::SecurityCenter::instance().ownerEnroll(username, pin);
+        if (st != QC::Status::Success)
         {
-            self->setStatus("Enrollment blocked (SC enforce not wired yet). ");
+            // Most common cause during bring-up: /system isn't writable yet (e.g., system volume unformatted).
+            self->setStatus("Enrollment failed. If using --system-vol, format it first so /system/sc is writable.");
             return;
         }
 
@@ -266,7 +275,7 @@ namespace QD
             return;
         }
 
-        self->setStatus("Owner created (SC bypass). ");
+        self->setStatus(bypass ? "Owner created (SC bypass). " : "Owner created. ");
         self->close();
     }
 

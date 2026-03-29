@@ -25,6 +25,7 @@
 
 #include "QKTime.h"
 #include "QQExecutor.h"
+#include "QKSecureStore.h"
 #include "QKSecurityCenter.h"
 #include "QKSystemPump.h"
 
@@ -40,6 +41,135 @@ namespace QK::CmdCenter
 {
     namespace
     {
+
+        static const char *accessName(QC::Cmd::AccessLevel a)
+        {
+            switch (a)
+            {
+            case QC::Cmd::AccessLevel::Everyone:
+                return "everyone";
+            case QC::Cmd::AccessLevel::User:
+                return "user";
+            case QC::Cmd::AccessLevel::Admin:
+                return "admin";
+            case QC::Cmd::AccessLevel::SysAdmin:
+                return "su";
+            case QC::Cmd::AccessLevel::System:
+                return "system";
+            }
+            return "?";
+        }
+
+        static bool cmdWhoami(const char *, const QC::Cmd::Context &ctx, void *)
+        {
+            char line[96];
+            QC::String::memset(line, 0, sizeof(line));
+            QC::String::strncpy(line, "role=", sizeof(line) - 1);
+            line[sizeof(line) - 1] = '\0';
+
+            const char *role = accessName(ctx.callerAccess);
+            const QC::usize used = QC::String::strlen(line);
+            if (used + 1 < sizeof(line) && role && *role)
+            {
+                QC::String::strncpy(line + used, role, sizeof(line) - used - 1);
+                line[sizeof(line) - 1] = '\0';
+            }
+            ctx.writeLine(line);
+            return true;
+        }
+
+        static bool cmdRoleDenied(const char *roleName, const QC::Cmd::Context &ctx)
+        {
+            (void)roleName;
+            ctx.writeLine("permission denied");
+            return true;
+        }
+
+        static bool cmdScDumpOwnerCred(const char *args, const QC::Cmd::Context &ctx, void *)
+        {
+            // usage: scdumpownercred [raw|plain]
+            // Default: dump the underlying on-disk blob (unverified) using readBlob.
+            // plain: read and verify sealed blob then dump the unsealed payload.
+
+            bool raw = true;
+            const char *a = args;
+            while (a && (*a == ' ' || *a == '\t'))
+                ++a;
+            if (a && *a)
+            {
+                if (QC::String::strcmp(a, "plain") == 0)
+                    raw = false;
+                else if (QC::String::strcmp(a, "raw") == 0)
+                    raw = true;
+            }
+
+            if (!QK::SecurityCenter::instance().ownerIsEnrolled())
+            {
+                ctx.writeLine("scdumpownercred: not enrolled");
+                return true;
+            }
+
+            QC::Vector<QC::u8> blob;
+            const char *key = "OWNERCRD";
+            QC::Status st = raw ? QK::SecureStore::readBlob(key, blob) : QK::SecureStore::readSealedBlob(key, blob);
+            if (st != QC::Status::Success)
+            {
+                ctx.writeLine("scdumpownercred: read failed");
+                return true;
+            }
+
+            ctx.writeLine("-----BEGIN CITADEL OWNERCRD HEX-----");
+            ctx.writeLine(raw ? "mode=raw" : "mode=plain");
+
+            static const char kHex[] = "0123456789abcdef";
+            char out[65];
+            QC::usize oi = 0;
+            for (QC::usize i = 0; i < blob.size(); ++i)
+            {
+                const QC::u8 b = blob[i];
+                out[oi++] = kHex[(b >> 4) & 0xF];
+                out[oi++] = kHex[b & 0xF];
+                if (oi >= 64)
+                {
+                    out[64] = '\0';
+                    ctx.writeLine(out);
+                    oi = 0;
+                }
+            }
+            if (oi)
+            {
+                out[oi] = '\0';
+                ctx.writeLine(out);
+            }
+            ctx.writeLine("-----END CITADEL OWNERCRD HEX-----");
+            return true;
+        }
+
+        static bool cmdUser(const char *, const QC::Cmd::Context &ctx, void *)
+        {
+            // Desktop terminal must implement changing env->param2; this is a placeholder.
+            // Keep the command so help/UX can be built around it.
+            if (ctx.callerAccess == QC::Cmd::AccessLevel::System)
+                return cmdRoleDenied("user", ctx);
+            ctx.writeLine("role: use terminal session controls to switch role (not wired)");
+            return true;
+        }
+
+        static bool cmdAdmin(const char *, const QC::Cmd::Context &ctx, void *)
+        {
+            if (ctx.callerAccess == QC::Cmd::AccessLevel::System)
+                return cmdRoleDenied("admin", ctx);
+            ctx.writeLine("role: use terminal session controls to switch role (not wired)");
+            return true;
+        }
+
+        static bool cmdSu(const char *, const QC::Cmd::Context &ctx, void *)
+        {
+            if (ctx.callerAccess == QC::Cmd::AccessLevel::System)
+                return cmdRoleDenied("su", ctx);
+            ctx.writeLine("role: use terminal session controls to switch role (not wired)");
+            return true;
+        }
         static Session g_session;
         static bool g_sessionInitialized = false;
 
@@ -105,6 +235,57 @@ namespace QK::CmdCenter
                 if (start[i] != literal[i])
                     return false;
             }
+            return true;
+        }
+
+        static bool isSystemPath(const char *absPath)
+        {
+            if (!absPath)
+                return false;
+            const char *prefix = "/system";
+            const QC::usize n = QC::String::strlen(prefix);
+            if (QC::String::memcmp(absPath, prefix, n) != 0)
+                return false;
+            return absPath[n] == '\0' || absPath[n] == '/';
+        }
+
+        static bool isProdPath(const char *absPath)
+        {
+            if (!absPath)
+                return false;
+            const char *prefix = "/PROD";
+            const QC::usize n = QC::String::strlen(prefix);
+            if (QC::String::memcmp(absPath, prefix, n) != 0)
+                return false;
+            return absPath[n] == '\0' || absPath[n] == '/';
+        }
+
+        static bool allowWriteToPath(const char *absPath, const QC::Cmd::Context &ctx, const char *cmdName)
+        {
+            (void)cmdName;
+
+            const QC::u8 caller = static_cast<QC::u8>(ctx.callerAccess);
+
+            if (isSystemPath(absPath))
+            {
+                const QC::u8 admin = static_cast<QC::u8>(QC::Cmd::AccessLevel::Admin);
+                if (caller < admin)
+                {
+                    ctx.writeLine("permission denied: /system requires admin");
+                    return false;
+                }
+            }
+
+            if (isProdPath(absPath))
+            {
+                const QC::u8 su = static_cast<QC::u8>(QC::Cmd::AccessLevel::SysAdmin);
+                if (caller < su)
+                {
+                    ctx.writeLine("permission denied: /PROD requires su");
+                    return false;
+                }
+            }
+
             return true;
         }
 
@@ -476,14 +657,29 @@ namespace QK::CmdCenter
                 }
                 name[ni] = '\0';
 
-                const char *desc = QC::Cmd::Registry::instance().findDescription(name);
-                if (!desc)
+                auto &reg = QC::Cmd::Registry::instance();
+                bool found = false;
+                for (QC::usize i = 0; i < reg.commandCount(); ++i)
                 {
-                    ctx.writeLine("help: command not found");
+                    const char *n = reg.commandNameAt(i);
+                    if (!n)
+                        continue;
+                    if (!streqIgnoreCase(n, name))
+                        continue;
+
+                    found = true;
+                    if (static_cast<QC::u8>(ctx.callerAccess) < static_cast<QC::u8>(reg.commandAccessAt(i)))
+                    {
+                        ctx.writeLine("help: permission denied");
+                        return true;
+                    }
+
+                    const char *desc = reg.commandDescriptionAt(i);
+                    writeKeyValue(ctx, name, desc ? desc : "");
                     return true;
                 }
-
-                writeKeyValue(ctx, name, desc);
+                if (!found)
+                    ctx.writeLine("help: command not found");
                 return true;
             }
 
@@ -493,6 +689,8 @@ namespace QK::CmdCenter
             {
                 const char *name = reg.commandNameAt(i);
                 if (!name)
+                    continue;
+                if (static_cast<QC::u8>(ctx.callerAccess) < static_cast<QC::u8>(reg.commandAccessAt(i)))
                     continue;
                 const char *desc = reg.commandDescriptionAt(i);
 
@@ -512,8 +710,124 @@ namespace QK::CmdCenter
 
         static bool cmdEcho(const char *args, const QC::Cmd::Context &ctx, void *)
         {
+            Session *s = sessionFrom();
             const char *p = args ? skipSpaces(args) : nullptr;
-            ctx.writeLine((p && *p) ? p : "");
+            if (!p || *p == '\0')
+            {
+                ctx.writeLine("");
+                return true;
+            }
+
+            // Support basic stdout redirection:
+            //   echo "text" > /path/file
+            //   echo "text" >> /path/file
+            // If no redirection operator is present, preserve previous behavior.
+            bool inQuotes = false;
+            const char *redir = nullptr;
+            for (const char *q = p; *q; ++q)
+            {
+                if (*q == '"')
+                {
+                    inQuotes = !inQuotes;
+                    continue;
+                }
+                if (!inQuotes && *q == '>')
+                {
+                    redir = q;
+                    break;
+                }
+            }
+
+            if (!redir)
+            {
+                ctx.writeLine(p);
+                return true;
+            }
+
+            bool appendMode = false;
+            const char *opEnd = redir + 1;
+            if (*opEnd == '>')
+            {
+                appendMode = true;
+                ++opEnd;
+            }
+
+            // Left side (text): [p, redir)
+            const char *textStart = p;
+            const char *textEnd = redir;
+            while (textEnd > textStart && isSpace(*(textEnd - 1)))
+                --textEnd;
+            if ((textEnd - textStart) >= 2 && *textStart == '"' && *(textEnd - 1) == '"')
+            {
+                ++textStart;
+                --textEnd;
+            }
+
+            // Right side (path): after operator
+            const char *pathStart = skipSpaces(opEnd);
+            if (!pathStart || *pathStart == '\0')
+            {
+                ctx.writeLine("echo: missing redirection target");
+                return true;
+            }
+
+            const char *pathEnd = pathStart + QC::String::strlen(pathStart);
+            while (pathEnd > pathStart && isSpace(*(pathEnd - 1)))
+                --pathEnd;
+            if ((pathEnd - pathStart) >= 2 && *pathStart == '"' && *(pathEnd - 1) == '"')
+            {
+                ++pathStart;
+                --pathEnd;
+            }
+            if (pathEnd <= pathStart)
+            {
+                ctx.writeLine("echo: missing redirection target");
+                return true;
+            }
+
+            char fileArg[256];
+            QC::String::memset(fileArg, 0, sizeof(fileArg));
+            QC::usize fi = 0;
+            for (const char *q = pathStart; q < pathEnd && fi + 1 < sizeof(fileArg); ++q)
+                fileArg[fi++] = *q;
+            fileArg[fi] = '\0';
+
+            if (pathStart + fi != pathEnd)
+            {
+                ctx.writeLine("echo: path too long");
+                return true;
+            }
+
+            char path[256];
+            QC::String::memset(path, 0, sizeof(path));
+            if (!resolvePath(s, fileArg, path, sizeof(path)))
+            {
+                ctx.writeLine("echo: invalid path");
+                return true;
+            }
+
+            if (!allowWriteToPath(path, ctx, "echo"))
+                return true;
+
+            QFS::OpenMode mode = QFS::OpenMode::Write | QFS::OpenMode::Create;
+            if (!appendMode)
+                mode = mode | QFS::OpenMode::Truncate;
+
+            QFS::File *file = QFS::VFS::instance().open(path, mode);
+            if (!file)
+            {
+                ctx.writeLine("echo: cannot open output file");
+                return true;
+            }
+
+            if (appendMode)
+                (void)file->seek(0, QFS::SeekOrigin::End);
+
+            if (textEnd > textStart)
+                (void)file->write(textStart, static_cast<QC::usize>(textEnd - textStart));
+            (void)file->write("\r\n", 2);
+
+            QFS::VFS::instance().close(file);
             return true;
         }
 
@@ -704,6 +1018,593 @@ namespace QK::CmdCenter
             {
                 lineBuf[lineLen] = '\0';
                 ctx.writeLine(lineBuf);
+            }
+
+            QFS::VFS::instance().close(file);
+            return true;
+        }
+
+        static bool cmdTouch(const char *args, const QC::Cmd::Context &ctx, void *)
+        {
+            Session *s = sessionFrom();
+            const char *p = args ? skipSpaces(args) : nullptr;
+            if (!p || *p == '\0')
+            {
+                ctx.writeLine("touch: missing file operand");
+                return true;
+            }
+
+            // Extract first token as path.
+            char fileArg[256];
+            QC::String::memset(fileArg, 0, sizeof(fileArg));
+            QC::usize fi = 0;
+            while (*p && !isSpace(*p) && fi + 1 < sizeof(fileArg))
+            {
+                fileArg[fi++] = *p++;
+            }
+            fileArg[fi] = '\0';
+
+            char path[256];
+            QC::String::memset(path, 0, sizeof(path));
+            if (!resolvePath(s, fileArg, path, sizeof(path)))
+            {
+                ctx.writeLine("touch: invalid path");
+                return true;
+            }
+
+            if (!allowWriteToPath(path, ctx, "touch"))
+                return true;
+
+            const QC::usize len = QC::String::strlen(path);
+            if (len == 0 || path[len - 1] == '/')
+            {
+                ctx.writeLine("touch: invalid path");
+                return true;
+            }
+
+            // Create if missing; if it already exists, do not truncate.
+            QFS::File *file = QFS::VFS::instance().open(path, QFS::OpenMode::Write | QFS::OpenMode::Create);
+            if (!file)
+            {
+                ctx.writeLine("touch: cannot create file");
+                return true;
+            }
+
+            QFS::VFS::instance().close(file);
+            return true;
+        }
+
+        static bool cmdMkdir(const char *args, const QC::Cmd::Context &ctx, void *)
+        {
+            Session *s = sessionFrom();
+            const char *p = args ? skipSpaces(args) : nullptr;
+            if (!p || *p == '\0')
+            {
+                ctx.writeLine("mkdir: missing directory operand");
+                return true;
+            }
+
+            // Extract first token as path.
+            char dirArg[256];
+            QC::String::memset(dirArg, 0, sizeof(dirArg));
+            QC::usize di = 0;
+            while (*p && !isSpace(*p) && di + 1 < sizeof(dirArg))
+                dirArg[di++] = *p++;
+            dirArg[di] = '\0';
+
+            char path[256];
+            QC::String::memset(path, 0, sizeof(path));
+            if (!resolvePath(s, dirArg, path, sizeof(path)))
+            {
+                ctx.writeLine("mkdir: invalid path");
+                return true;
+            }
+
+            if (!allowWriteToPath(path, ctx, "mkdir"))
+                return true;
+
+            if (QC::String::strcmp(path, "/") == 0)
+            {
+                ctx.writeLine("mkdir: invalid path");
+                return true;
+            }
+
+            QFS::FileInfo info;
+            QC::String::memset(&info, 0, sizeof(info));
+            const QC::Status st = QFS::VFS::instance().stat(path, &info);
+            if (st == QC::Status::Success)
+            {
+                if (info.type == QFS::FileType::Directory)
+                    ctx.writeLine("mkdir: already exists");
+                else
+                    ctx.writeLine("mkdir: path exists and is not a directory");
+                return true;
+            }
+
+            const QC::Status mk = QFS::VFS::instance().createDir(path);
+            if (mk != QC::Status::Success)
+            {
+                ctx.writeLine("mkdir: failed");
+                return true;
+            }
+
+            return true;
+        }
+
+        static bool cmdRm(const char *args, const QC::Cmd::Context &ctx, void *)
+        {
+            Session *s = sessionFrom();
+            const char *p = args ? skipSpaces(args) : nullptr;
+            if (!p || *p == '\0')
+            {
+                ctx.writeLine("rm: missing operand");
+                return true;
+            }
+
+            bool recursive = false;
+            char tok[256];
+            QC::String::memset(tok, 0, sizeof(tok));
+            if (!readToken(p, tok, sizeof(tok)))
+            {
+                ctx.writeLine("rm: missing operand");
+                return true;
+            }
+
+            if (streqIgnoreCase(tok, "-r") || streqIgnoreCase(tok, "-R"))
+            {
+                recursive = true;
+                if (!readToken(p, tok, sizeof(tok)))
+                {
+                    ctx.writeLine("rm: missing operand");
+                    return true;
+                }
+            }
+            else if (tok[0] == '-')
+            {
+                ctx.writeLine("rm: unknown option");
+                ctx.writeLine("usage: rm [-r] <path>");
+                return true;
+            }
+
+            char path[256];
+            QC::String::memset(path, 0, sizeof(path));
+            if (!resolvePath(s, tok, path, sizeof(path)))
+            {
+                ctx.writeLine("rm: invalid path");
+                return true;
+            }
+
+            if (!allowWriteToPath(path, ctx, "rm"))
+                return true;
+
+            if (QC::String::strcmp(path, "/") == 0)
+            {
+                ctx.writeLine("rm: refusing to remove '/'");
+                return true;
+            }
+
+            QFS::FileInfo info;
+            QC::String::memset(&info, 0, sizeof(info));
+            const QC::Status st = QFS::VFS::instance().stat(path, &info);
+            if (st != QC::Status::Success)
+            {
+                ctx.writeLine("rm: no such file or directory");
+                return true;
+            }
+
+
+            auto dirIsEmpty = [&](const char *dirPath) -> bool {
+                QFS::Directory *dir = QFS::VFS::instance().openDir(dirPath);
+                if (!dir)
+                    return false;
+                QFS::DirEntry entry;
+                const bool any = dir->read(&entry);
+                QFS::VFS::instance().closeDir(dir);
+                return !any;
+            };
+
+            auto joinPath = [&](const char *base, const char *name, char *out, QC::usize outSize) -> bool {
+                if (!base || !name || !out || outSize == 0)
+                    return false;
+                QC::String::memset(out, 0, outSize);
+                if (QC::String::strcmp(base, "/") == 0)
+                {
+                    if (!appendString(out, outSize, "/"))
+                        return false;
+                    return appendString(out, outSize, name);
+                }
+
+                if (!appendString(out, outSize, base))
+                    return false;
+                if (!appendString(out, outSize, "/"))
+                    return false;
+                return appendString(out, outSize, name);
+            };
+
+            struct RemoveTree
+            {
+                static bool run(const char *rootPath,
+                                const QC::Cmd::Context &ctx,
+                                const decltype(joinPath) &joinPathFn)
+                {
+                    QFS::Directory *dir = QFS::VFS::instance().openDir(rootPath);
+                    if (!dir)
+                    {
+                        ctx.writeLine("rm: cannot open directory");
+                        return false;
+                    }
+
+                    QFS::DirEntry entry;
+                    while (dir->read(&entry))
+                    {
+                        char child[256];
+                        if (!joinPathFn(rootPath, entry.name, child, sizeof(child)))
+                        {
+                            QFS::VFS::instance().closeDir(dir);
+                            ctx.writeLine("rm: path too long");
+                            return false;
+                        }
+
+                        if (entry.type == QFS::FileType::Directory)
+                        {
+                            if (!run(child, ctx, joinPathFn))
+                            {
+                                QFS::VFS::instance().closeDir(dir);
+                                return false;
+                            }
+
+                            const QC::Status st = QFS::VFS::instance().removeDir(child);
+                            if (st != QC::Status::Success)
+                            {
+                                QFS::VFS::instance().closeDir(dir);
+                                ctx.writeLine("rm: failed to remove directory");
+                                return false;
+                            }
+                        }
+                        else
+                        {
+                            const QC::Status st = QFS::VFS::instance().remove(child);
+                            if (st != QC::Status::Success)
+                            {
+                                QFS::VFS::instance().closeDir(dir);
+                                ctx.writeLine("rm: failed to remove file");
+                                return false;
+                            }
+                        }
+                    }
+
+                    QFS::VFS::instance().closeDir(dir);
+                    return true;
+                }
+            };
+
+            if (info.type == QFS::FileType::Directory)
+            {
+                const bool empty = dirIsEmpty(path);
+                if (!empty && !recursive)
+                {
+                    ctx.writeLine("rm: directory not empty (use -r)");
+                    return true;
+                }
+
+                if (recursive)
+                {
+                    if (!RemoveTree::run(path, ctx, joinPath))
+                        return true;
+                }
+
+                const QC::Status rmst = QFS::VFS::instance().removeDir(path);
+                if (rmst != QC::Status::Success)
+                    ctx.writeLine("rm: failed to remove directory");
+                return true;
+            }
+
+            const QC::Status rmst = QFS::VFS::instance().remove(path);
+            if (rmst != QC::Status::Success)
+                ctx.writeLine("rm: failed");
+            return true;
+        }
+
+        static bool globMatchStarOnly(const char *pattern, const char *text)
+        {
+            if (!pattern || !text)
+                return false;
+
+            // DOS-ish convenience: treat "*.*" as "*".
+            if (QC::String::strcmp(pattern, "*.*") == 0)
+                pattern = "*";
+
+            // Another DOS-ish convenience: "name.*" matches "name" too.
+            const QC::usize plen = QC::String::strlen(pattern);
+            if (plen >= 2 && pattern[plen - 2] == '.' && pattern[plen - 1] == '*')
+            {
+                char base[256];
+                QC::String::memset(base, 0, sizeof(base));
+                const QC::usize blen = plen - 2;
+                if (blen + 1 < sizeof(base))
+                {
+                    QC::String::memcpy(base, pattern, blen);
+                    base[blen] = '\0';
+                    if (QC::String::strcmp(text, base) == 0)
+                        return true;
+                }
+            }
+
+            // Simple '*' glob.
+            const char *p = pattern;
+            const char *t = text;
+            const char *star = nullptr;
+            const char *starText = nullptr;
+
+            while (*t)
+            {
+                if (*p == '*')
+                {
+                    star = p++;
+                    starText = t;
+                    continue;
+                }
+                if (*p == *t)
+                {
+                    ++p;
+                    ++t;
+                    continue;
+                }
+                if (star)
+                {
+                    p = star + 1;
+                    t = ++starText;
+                    continue;
+                }
+                return false;
+            }
+
+            while (*p == '*')
+                ++p;
+            return *p == '\0';
+        }
+
+        static bool cmdDel(const char *args, const QC::Cmd::Context &ctx, void *)
+        {
+            Session *s = sessionFrom();
+            const char *p = args ? skipSpaces(args) : nullptr;
+            if (!p || *p == '\0')
+            {
+                ctx.writeLine("del: missing operand");
+                ctx.writeLine("usage: del <pattern> [pattern2 ...]");
+                return true;
+            }
+
+            QC::u32 removed = 0;
+            QC::u32 matched = 0;
+
+            char patTok[256];
+            while (readToken(p, patTok, sizeof(patTok)))
+            {
+                // Split into directory + pattern on the last '/'.
+                const char *lastSlash = nullptr;
+                for (const char *q = patTok; *q; ++q)
+                {
+                    if (*q == '/')
+                        lastSlash = q;
+                }
+
+                char dirArg[256];
+                char namePat[256];
+                QC::String::memset(dirArg, 0, sizeof(dirArg));
+                QC::String::memset(namePat, 0, sizeof(namePat));
+
+                if (lastSlash)
+                {
+                    const QC::usize dirLen = static_cast<QC::usize>(lastSlash - patTok);
+                    if (dirLen == 0)
+                    {
+                        QC::String::strncpy(dirArg, "/", sizeof(dirArg) - 1);
+                    }
+                    else
+                    {
+                        if (dirLen + 1 >= sizeof(dirArg))
+                        {
+                            ctx.writeLine("del: path too long");
+                            continue;
+                        }
+                        QC::String::memcpy(dirArg, patTok, dirLen);
+                        dirArg[dirLen] = '\0';
+                    }
+
+                    QC::String::strncpy(namePat, lastSlash + 1, sizeof(namePat) - 1);
+                }
+                else
+                {
+                    QC::String::strncpy(dirArg, ".", sizeof(dirArg) - 1);
+                    QC::String::strncpy(namePat, patTok, sizeof(namePat) - 1);
+                }
+
+                if (namePat[0] == '\0')
+                {
+                    ctx.writeLine("del: invalid pattern");
+                    continue;
+                }
+
+                char dirPath[256];
+                QC::String::memset(dirPath, 0, sizeof(dirPath));
+                if (!resolvePath(s, dirArg, dirPath, sizeof(dirPath)))
+                {
+                    ctx.writeLine("del: invalid path");
+                    continue;
+                }
+
+                if (!allowWriteToPath(dirPath, ctx, "del"))
+                    continue;
+
+                QFS::Directory *dir = QFS::VFS::instance().openDir(dirPath);
+                if (!dir)
+                {
+                    ctx.writeLine("del: cannot open directory");
+                    continue;
+                }
+
+                QFS::DirEntry entry;
+                while (dir->read(&entry))
+                {
+                    if (!globMatchStarOnly(namePat, entry.name))
+                        continue;
+                    ++matched;
+
+                    if (entry.type == QFS::FileType::Directory)
+                        continue; // del only removes files
+
+                    char full[256];
+                    QC::String::memset(full, 0, sizeof(full));
+                    if (QC::String::strcmp(dirPath, "/") == 0)
+                    {
+                        if (!appendString(full, sizeof(full), "/") || !appendString(full, sizeof(full), entry.name))
+                            continue;
+                    }
+                    else
+                    {
+                        if (!appendString(full, sizeof(full), dirPath) || !appendString(full, sizeof(full), "/") ||
+                            !appendString(full, sizeof(full), entry.name))
+                            continue;
+                    }
+
+                    const QC::Status st = QFS::VFS::instance().remove(full);
+                    if (st == QC::Status::Success)
+                        ++removed;
+                }
+
+                QFS::VFS::instance().closeDir(dir);
+            }
+
+            if (matched == 0)
+            {
+                ctx.writeLine("del: no matches");
+                return true;
+            }
+
+            char line[96];
+            QC::String::memset(line, 0, sizeof(line));
+            (void)appendString(line, sizeof(line), "del: removed ");
+            (void)appendU64Dec(line, sizeof(line), removed);
+            (void)appendString(line, sizeof(line), " file(s)");
+            ctx.writeLine(line);
+            return true;
+        }
+
+        static bool cmdHexdump(const char *args, const QC::Cmd::Context &ctx, void *)
+        {
+            // usage: hexdump <path> [max_bytes]
+            Session *s = sessionFrom();
+            const char *p = args ? skipSpaces(args) : nullptr;
+            if (!p || *p == '\0')
+            {
+                ctx.writeLine("hexdump: missing file operand");
+                return true;
+            }
+
+            // Extract first token as path.
+            char fileArg[256];
+            QC::String::memset(fileArg, 0, sizeof(fileArg));
+            QC::usize fi = 0;
+            while (*p && !isSpace(*p) && fi + 1 < sizeof(fileArg))
+                fileArg[fi++] = *p++;
+            fileArg[fi] = '\0';
+            p = skipSpaces(p);
+
+            QC::u64 maxBytes = 4096;
+            if (p && *p)
+            {
+                QC::u64 v = 0;
+                bool any = false;
+                while (*p >= '0' && *p <= '9')
+                {
+                    any = true;
+                    v = (v * 10) + (QC::u64)(*p - '0');
+                    ++p;
+                }
+                if (any)
+                {
+                    if (v < 64)
+                        v = 64;
+                    if (v > 65536)
+                        v = 65536;
+                    maxBytes = v;
+                }
+            }
+
+            char path[256];
+            QC::String::memset(path, 0, sizeof(path));
+            if (!resolvePath(s, fileArg, path, sizeof(path)))
+            {
+                ctx.writeLine("hexdump: invalid path");
+                return true;
+            }
+
+            QFS::File *file = QFS::VFS::instance().open(path, QFS::OpenMode::Read);
+            if (!file)
+            {
+                ctx.writeLine("hexdump: cannot open file");
+                return true;
+            }
+
+            static const char kHex[] = "0123456789abcdef";
+            QC::u64 offset = 0;
+            while (offset < maxBytes)
+            {
+                QC::u8 buf[16];
+                QC::isize n = file->read(buf, sizeof(buf));
+                if (n <= 0)
+                    break;
+
+                char line[128];
+                QC::String::memset(line, 0, sizeof(line));
+                QC::usize pos = 0;
+
+                // offset (8 hex)
+                for (int sh = 28; sh >= 0 && pos + 1 < sizeof(line); sh -= 4)
+                    line[pos++] = kHex[(QC::u8)((offset >> sh) & 0xF)];
+                if (pos + 2 < sizeof(line))
+                {
+                    line[pos++] = ' '; line[pos++] = ' ';
+                }
+
+                // hex bytes
+                for (QC::isize i = 0; i < 16; ++i)
+                {
+                    if (i < n)
+                    {
+                        const QC::u8 b = buf[i];
+                        line[pos++] = kHex[(b >> 4) & 0xF];
+                        line[pos++] = kHex[b & 0xF];
+                    }
+                    else
+                    {
+                        line[pos++] = ' '; line[pos++] = ' ';
+                    }
+                    if (pos + 1 < sizeof(line))
+                        line[pos++] = (i == 7) ? ' ' : ' ';
+                }
+
+                if (pos + 2 < sizeof(line))
+                {
+                    line[pos++] = ' '; line[pos++] = '|';
+                }
+
+                // ascii
+                for (QC::isize i = 0; i < n && pos + 1 < sizeof(line); ++i)
+                {
+                    const QC::u8 b = buf[i];
+                    const char c = (b >= 32 && b <= 126) ? (char)b : '.';
+                    line[pos++] = c;
+                }
+                if (pos + 2 < sizeof(line))
+                {
+                    line[pos++] = '|';
+                    line[pos] = '\0';
+                }
+
+                ctx.writeLine(line);
+                offset += (QC::u64)n;
             }
 
             QFS::VFS::instance().close(file);
@@ -3062,42 +3963,49 @@ namespace QK::CmdCenter
         (void)sessionFrom();
 
         auto &reg = QC::Cmd::Registry::instance();
-        (void)reg.registerCommandEx("help", &cmdHelp, nullptr, "Show available commands (help [cmd])");
-        (void)reg.registerCommandEx("echo", &cmdEcho, nullptr, "Echo text");
-        (void)reg.registerCommandEx("pwd", &cmdPwd, nullptr, "Print working directory");
-        (void)reg.registerCommandEx("cd", &cmdCd, nullptr, "Change working directory (cd <path>)");
-        (void)reg.registerCommandEx("ls", &cmdLs, nullptr, "List directory contents (ls [path])");
-        (void)reg.registerCommandEx("cat", &cmdCat, nullptr, "Print file contents (cat <path>)");
+        (void)reg.registerCommandExAccess("help", QC::Cmd::AccessLevel::Everyone, &cmdHelp, nullptr, "Show available commands (help [cmd])");
+        (void)reg.registerCommandExAccess("whoami", QC::Cmd::AccessLevel::Everyone, &cmdWhoami, nullptr, "Show current access role");
+        (void)reg.registerCommandExAccess("echo", QC::Cmd::AccessLevel::User, &cmdEcho, nullptr, "Echo text (supports > and >> redirection)");
+        (void)reg.registerCommandExAccess("pwd", QC::Cmd::AccessLevel::User, &cmdPwd, nullptr, "Print working directory");
+        (void)reg.registerCommandExAccess("cd", QC::Cmd::AccessLevel::User, &cmdCd, nullptr, "Change working directory (cd <path>)");
+        (void)reg.registerCommandExAccess("ls", QC::Cmd::AccessLevel::User, &cmdLs, nullptr, "List directory contents (ls [path])");
+        (void)reg.registerCommandExAccess("cat", QC::Cmd::AccessLevel::User, &cmdCat, nullptr, "Print file contents (cat <path>)");
+        (void)reg.registerCommandExAccess("touch", QC::Cmd::AccessLevel::User, &cmdTouch, nullptr, "Create empty file (touch <path>)");
+        (void)reg.registerCommandExAccess("mkdir", QC::Cmd::AccessLevel::User, &cmdMkdir, nullptr, "Create directory (mkdir <path>)");
+        (void)reg.registerCommandExAccess("rm", QC::Cmd::AccessLevel::User, &cmdRm, nullptr, "Remove file or directory (rm [-r] <path>)");
+        (void)reg.registerCommandExAccess("del", QC::Cmd::AccessLevel::User, &cmdDel, nullptr, "Delete files by pattern (del *.ext | name.* | *.*)");
+        (void)reg.registerCommandExAccess("hexdump", QC::Cmd::AccessLevel::User, &cmdHexdump, nullptr, "Hex dump a file (hexdump <path> [max_bytes])");
         (void)reg.registerCommandExAccess("shutdown", QC::Cmd::AccessLevel::Admin, &cmdShutdown, nullptr, "Request shutdown");
 
         // Boot/config helpers.
-        (void)reg.registerCommandEx("tier", &cmdTier, nullptr, "Show active config tier + staged early modules");
-        (void)reg.registerCommandEx("bootlog", &cmdBootLog, nullptr, "Dump captured boot log output");
-        (void)reg.registerCommandEx("bootmodules", &cmdBootModules, nullptr, "Dump early module trust metadata (role/status/hash/signature)");
-        (void)reg.registerCommandEx("flowtest", &cmdFlowTest, nullptr, "Smoke test Security Center flow policy (allow/delay/suspend/cancel)");
-        (void)reg.registerCommandEx("flowcontrol", &cmdFlowControl, nullptr, "Control Security Center flow enforcement (status|bypass|enforce)");
-        (void)reg.registerCommandEx("canonargtest", &cmdCanonicalArgTest, nullptr, "Submit tasks with canonical args and print hashes");
-        (void)reg.registerCommandEx("taskls", &cmdTaskLs, nullptr, "List recent tasks (taskls [N])");
-        (void)reg.registerCommandEx("memocache", &cmdMemoCache, nullptr, "Control memoization cache (status|on|off|clear)");
-        (void)reg.registerCommandEx("memoallow", &cmdMemoAllow, nullptr, "Control memoization allowlist (status|on|off|clear|add|del)");
-        (void)reg.registerCommandEx("memotest", &cmdMemoTest, nullptr, "Submit cached tasks twice to demonstrate a memoization hit");
+        (void)reg.registerCommandExAccess("tier", QC::Cmd::AccessLevel::User, &cmdTier, nullptr, "Show active config tier + staged early modules");
+        (void)reg.registerCommandExAccess("bootlog", QC::Cmd::AccessLevel::Admin, &cmdBootLog, nullptr, "Dump captured boot log output");
+        (void)reg.registerCommandExAccess("bootmodules", QC::Cmd::AccessLevel::Admin, &cmdBootModules, nullptr, "Dump early module trust metadata (role/status/hash/signature)");
+        (void)reg.registerCommandExAccess("flowtest", QC::Cmd::AccessLevel::Admin, &cmdFlowTest, nullptr, "Smoke test Security Center flow policy (allow/delay/suspend/cancel)");
+        (void)reg.registerCommandExAccess("flowcontrol", QC::Cmd::AccessLevel::SysAdmin, &cmdFlowControl, nullptr, "Control Security Center flow enforcement (status|bypass|enforce)");
+        (void)reg.registerCommandExAccess("canonargtest", QC::Cmd::AccessLevel::Admin, &cmdCanonicalArgTest, nullptr, "Submit tasks with canonical args and print hashes");
+        (void)reg.registerCommandExAccess("taskls", QC::Cmd::AccessLevel::User, &cmdTaskLs, nullptr, "List recent tasks (taskls [N])");
+        (void)reg.registerCommandExAccess("memocache", QC::Cmd::AccessLevel::Admin, &cmdMemoCache, nullptr, "Control memoization cache (status|on|off|clear)");
+        (void)reg.registerCommandExAccess("memoallow", QC::Cmd::AccessLevel::SysAdmin, &cmdMemoAllow, nullptr, "Control memoization allowlist (status|on|off|clear|add|del)");
+        (void)reg.registerCommandExAccess("memotest", QC::Cmd::AccessLevel::Admin, &cmdMemoTest, nullptr, "Submit cached tasks twice to demonstrate a memoization hit");
         (void)reg.registerCommandExAccess("bevdump", QC::Cmd::AccessLevel::Admin, &cmdBevDump, nullptr, "Dump boot event log (structured events)");
+        (void)reg.registerCommandExAccess("scdumpownercred", QC::Cmd::AccessLevel::SysAdmin, &cmdScDumpOwnerCred, nullptr, "Dump Owner credential blob as hex for ramdisk seeding (scdumpownercred [raw|plain])");
         (void)reg.registerCommandEx("regdump", &cmdRegdump, nullptr, "Dump runtime registries snapshot (counts + windows + boot seed)");
 
         // Networking helpers (for subsystem testing).
-        (void)reg.registerCommandEx("ip", &cmdIp, nullptr, "Show/set IPv4 config (ip | ip set <ip> [mask] [gw] | ip dhcp [timeout_ms])");
-        (void)reg.registerCommandEx("arp", &cmdArp, nullptr, "List/resolve ARP (arp | arp <ip>)");
-        (void)reg.registerCommandEx("ping", &cmdPing, nullptr, "Send ICMP echo request (ping <ip|host> [timeout_ms])");
-        (void)reg.registerCommandEx("udp", &cmdUdp, nullptr, "Send UDP datagram (udp <ip|host> <port> <text>)");
-        (void)reg.registerCommandEx("nslookup", &cmdNslookup, nullptr, "Resolve DNS A record (nslookup <name> [timeout_ms])");
-        (void)reg.registerCommandEx("tcpconnect", &cmdTcpConnect, nullptr, "Test TCP connect (tcpconnect <ip|host> <port> [timeout_ms])");
-        (void)reg.registerCommandEx("httpget", &cmdHttpGet, nullptr, "Minimal HTTP GET over TCP (httpget <host> <path> [timeout_ms])");
-        (void)reg.registerCommandEx("tcpdrop", &cmdTcpDrop, nullptr, "Drop TCP connection by local port (tcpdrop <local_port>)");
-        (void)reg.registerCommandEx("tcplog", &cmdTcpLog, nullptr, "Dump recent TCP TX/RX events (tcplog)");
-        (void)reg.registerCommandEx("netlog", &cmdNetLog, nullptr, "Dump net state (ip + arp + tcplog)");
-        (void)reg.registerCommandEx("tcpstate", &cmdTcpState, nullptr, "Dump active TCP connections (tcpstate)");
-        (void)reg.registerCommandEx("netstat", &cmdNetStat, nullptr, "Dump net summary (ip + arp + tcpstate)");
-        (void)reg.registerCommandEx("netstart", &cmdNetStat, nullptr, "Dump net summary (alias of netstat)");
+        (void)reg.registerCommandExAccess("ip", QC::Cmd::AccessLevel::User, &cmdIp, nullptr, "Show/set IPv4 config (ip | ip set <ip> [mask] [gw] | ip dhcp [timeout_ms])");
+        (void)reg.registerCommandExAccess("arp", QC::Cmd::AccessLevel::User, &cmdArp, nullptr, "List/resolve ARP (arp | arp <ip>)");
+        (void)reg.registerCommandExAccess("ping", QC::Cmd::AccessLevel::User, &cmdPing, nullptr, "Send ICMP echo request (ping <ip|host> [timeout_ms])");
+        (void)reg.registerCommandExAccess("udp", QC::Cmd::AccessLevel::User, &cmdUdp, nullptr, "Send UDP datagram (udp <ip|host> <port> <text>)");
+        (void)reg.registerCommandExAccess("nslookup", QC::Cmd::AccessLevel::User, &cmdNslookup, nullptr, "Resolve DNS A record (nslookup <name> [timeout_ms])");
+        (void)reg.registerCommandExAccess("tcpconnect", QC::Cmd::AccessLevel::User, &cmdTcpConnect, nullptr, "Test TCP connect (tcpconnect <ip|host> <port> [timeout_ms])");
+        (void)reg.registerCommandExAccess("httpget", QC::Cmd::AccessLevel::User, &cmdHttpGet, nullptr, "Minimal HTTP GET over TCP (httpget <host> <path> [timeout_ms])");
+        (void)reg.registerCommandExAccess("tcpdrop", QC::Cmd::AccessLevel::Admin, &cmdTcpDrop, nullptr, "Drop TCP connection by local port (tcpdrop <local_port>)");
+        (void)reg.registerCommandExAccess("tcplog", QC::Cmd::AccessLevel::User, &cmdTcpLog, nullptr, "Dump recent TCP TX/RX events (tcplog)");
+        (void)reg.registerCommandExAccess("netlog", QC::Cmd::AccessLevel::User, &cmdNetLog, nullptr, "Dump net state (ip + arp + tcplog)");
+        (void)reg.registerCommandExAccess("tcpstate", QC::Cmd::AccessLevel::User, &cmdTcpState, nullptr, "Dump active TCP connections (tcpstate)");
+        (void)reg.registerCommandExAccess("netstat", QC::Cmd::AccessLevel::User, &cmdNetStat, nullptr, "Dump net summary (ip + arp + tcpstate)");
+        (void)reg.registerCommandExAccess("netstart", QC::Cmd::AccessLevel::User, &cmdNetStat, nullptr, "Dump net summary (alias of netstat)");
 
         registered = true;
     }

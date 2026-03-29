@@ -149,6 +149,8 @@ namespace QFS
         record.fs = nullptr;
         record.mounted = false;
         record.autoMount = definition.autoMount;
+        record.mountFailed = false;
+        record.mountFailCount = 0;
 
         m_volumes.push_back(record);
         VolumeRecord &stored = m_volumes.back();
@@ -201,6 +203,10 @@ namespace QFS
         VolumeRecord *record = findRecord(name);
         if (!record)
             return QC::Status::NotFound;
+
+        // Explicit mounts should retry even if auto-mount previously failed.
+        record->mountFailed = false;
+        record->mountFailCount = 0;
         return mountRecord(*record);
     }
 
@@ -225,7 +231,7 @@ namespace QFS
         for (QC::usize i = 0; i < m_volumes.size(); ++i)
         {
             VolumeRecord &record = m_volumes[i];
-            if (!record.autoMount || record.mounted)
+            if (!record.autoMount || record.mounted || record.mountFailed)
                 continue;
 
             QC::Status status = mountRecord(record);
@@ -263,6 +269,17 @@ namespace QFS
         {
             QC_LOG_ERROR("QFSVOL", "Mount failed for %s (fs mount error)", record.name);
             delete fs;
+
+            if (record.autoMount)
+            {
+                record.mountFailCount++;
+                if (record.mountFailCount >= 3)
+                {
+                    record.mountFailed = true;
+                    QC_LOG_WARN("QFSVOL", "Auto-mount disabled for %s after %u failures", record.name,
+                                static_cast<unsigned>(record.mountFailCount));
+                }
+            }
             return status;
         }
 
@@ -289,6 +306,8 @@ namespace QFS
 
         record.fs = fs;
         record.mounted = true;
+        record.mountFailed = false;
+        record.mountFailCount = 0;
         QC_LOG_INFO("QFSVOL", "Mounted %s at %s", record.name, record.mountPath);
         return QC::Status::Success;
     }

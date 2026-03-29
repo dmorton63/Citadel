@@ -322,7 +322,7 @@ namespace
         return diff == 0;
     }
 
-    static QC::Status getOrCreateWrapKey(QC::u8 outKey[32], const QK::SecureStore::Config &cfg)
+    static QC::Status loadWrapKey(QC::u8 outKey[32], const QK::SecureStore::Config &cfg, bool allowCreate)
     {
         constexpr const char *kWrapKeyPlainName = "WRAPKEY.BIN";
         constexpr const char *kWrapKeyTpmName = "WRAPKEY.TPM";
@@ -345,6 +345,9 @@ namespace
 
             if (st != QC::Status::NotFound)
                 return st;
+
+            if (!allowCreate)
+                return QC::Status::NotFound;
 
             // No TPM blob yet: generate wrap key, seal it, and persist blob.
             st = QK::Entropy::fillRandom(outKey, 32);
@@ -385,6 +388,9 @@ namespace
 
         if (st != QC::Status::NotFound)
             return st;
+
+        if (!allowCreate)
+            return QC::Status::NotFound;
 
         st = QK::Entropy::fillRandom(outKey, 32);
         if (st != QC::Status::Success && st != QC::Status::Busy)
@@ -644,6 +650,11 @@ namespace QK
             return g_defaultCfg;
         }
 
+        bool tpm_present(const Config &cfg)
+        {
+            return (cfg.tpmSealWrapKey != nullptr) && (cfg.tpmUnsealWrapKey != nullptr);
+        }
+
         void setDefaultConfig(const Config &cfg)
         {
             g_defaultCfg = cfg;
@@ -701,6 +712,20 @@ namespace QK
             st = readAll(file, out);
             vfs.close(file);
             return st;
+        }
+
+        QC::Status readWrapKey(QC::u8 outWrapKey[32], const Config &cfg)
+        {
+            if (!outWrapKey)
+                return QC::Status::InvalidParam;
+            return loadWrapKey(outWrapKey, cfg, false);
+        }
+
+        QC::Status getOrCreateWrapKey(QC::u8 outWrapKey[32], const Config &cfg)
+        {
+            if (!outWrapKey)
+                return QC::Status::InvalidParam;
+            return loadWrapKey(outWrapKey, cfg, true);
         }
 
         QC::Status writeSealedBlob(const char *key, const void *data, QC::usize size, const Config &cfg)

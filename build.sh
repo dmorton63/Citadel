@@ -43,6 +43,7 @@ JOBS=$(nproc 2>/dev/null || echo 4)
 RUN_FOR_SECONDS=0
 HEADLESS=false
 AUTO_GRAB=true
+SYSTEM_VOL=false
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -93,6 +94,10 @@ while [[ $# -gt 0 ]]; do
             PRODUCTION=true
             shift
             ;;
+        --system-vol)
+            SYSTEM_VOL=true
+            shift
+            ;;
         -j*)
             JOBS="${1#-j}"
             shift
@@ -111,6 +116,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --tpm           Enable TPM2 emulation (requires swtpm)"
             echo "  --tablet        Use absolute USB tablet in QEMU (default)"
             echo "  --relmouse      Use relative USB mouse in QEMU"
+            echo "  --system-vol    Attach persistent system volume disk (build/system.qcow2)"
             echo "  --prod          Build production mode (fail-closed boot signature enforcement; use --tpm when running)"
             echo "  -j<N>           Use N parallel jobs (default: $(nproc))"
             echo "  -h, --help      Show this help"
@@ -148,8 +154,18 @@ sign_sha256_rsa2048_no_prompt() {
 }
 
 # Step 1: Clean if requested
+PRESERVED_SYSTEM_DISK=""
 if [ "$CLEAN" = true ]; then
     echo -e "${YELLOW}[1/5] Cleaning build directory...${NC}"
+    # Preserve the persistent system volume across clean rebuilds.
+    # This keeps /system SecureStore state (e.g., OWNERCRD, WRAPKEY) stable during dev.
+    if [ -f "${BUILD_DIR}/system.qcow2" ]; then
+        PRESERVED_SYSTEM_DISK="$(mktemp -p /tmp citadel_system_XXXXXX.qcow2 2>/dev/null || true)"
+        if [ -n "${PRESERVED_SYSTEM_DISK}" ]; then
+            mv "${BUILD_DIR}/system.qcow2" "${PRESERVED_SYSTEM_DISK}" 2>/dev/null || PRESERVED_SYSTEM_DISK=""
+        fi
+    fi
+
     rm -rf "${BUILD_DIR}"
     echo -e "${GREEN}      Done.${NC}"
 else
@@ -159,6 +175,12 @@ fi
 # Step 2: Create build directory and configure
 echo -e "${YELLOW}[2/5] Configuring with CMake...${NC}"
 mkdir -p "${BUILD_DIR}"
+
+if [ -n "${PRESERVED_SYSTEM_DISK}" ] && [ -f "${PRESERVED_SYSTEM_DISK}" ]; then
+    mv "${PRESERVED_SYSTEM_DISK}" "${BUILD_DIR}/system.qcow2" 2>/dev/null || true
+    PRESERVED_SYSTEM_DISK=""
+fi
+
 cd "${BUILD_DIR}"
 
 DESIRED_PROD="OFF"
@@ -810,6 +832,7 @@ if [ "$RUN_QEMU" = true ]; then
         fi
 
         TPM_ARGS=(
+            -machine pc
             -chardev "socket,id=chrtpm,path=${SWTPM_SOCK}"
             -tpmdev "emulator,id=tpm0,chardev=chrtpm"
             -device "tpm-crb,tpmdev=tpm0"
@@ -819,9 +842,41 @@ if [ "$RUN_QEMU" = true ]; then
     SHARED_ARGS=()
     if [ -d "${SHARED_DIR}" ]; then
         echo -e "${GREEN}Mounting shared folder at ${SHARED_DIR}${NC}"
-        SHARED_ARGS=(-drive "file=fat:rw:${SHARED_DIR},format=raw,if=ide,index=1")
+        if [ "$TPM" = true ]; then
+            # In q35+TPM mode, explicitly attach the host share as a secondary IDE disk
+            # on the primary channel (unit=1).
+            SHARED_ARGS=(
+                -drive "id=shareddisk,if=none,file=fat:rw:${SHARED_DIR},format=raw"
+                -device "ide-hd,drive=shareddisk,bus=ide.0,unit=1"
+            )
+        else
+            SHARED_ARGS=(-drive "file=fat:rw:${SHARED_DIR},format=raw,if=ide,index=1")
+        fi
     else
         echo -e "${YELLOW}Shared folder not found at ${SHARED_DIR}; skipping host share (mkdir shared to enable).${NC}"
+    fi
+
+    SYSTEM_ARGS=()
+    if [ "$SYSTEM_VOL" = true ]; then
+        SYSTEM_DISK="${BUILD_DIR}/system.qcow2"
+        if ! command -v qemu-img &> /dev/null; then
+            echo -e "${RED}qemu-img not found (needed to create ${SYSTEM_DISK}). Install qemu-utils.${NC}"
+            exit 1
+        fi
+        if [ ! -f "${SYSTEM_DISK}" ]; then
+            qemu-img create -f qcow2 "${SYSTEM_DISK}" 256M >/dev/null
+            echo -e "${GREEN}Created system volume: ${SYSTEM_DISK}${NC}"
+            echo -e "${YELLOW}Note: format it as FAT in-guest before it can mount as /system.${NC}"
+        fi
+        if [ "$TPM" = true ]; then
+            # In q35+TPM mode, explicitly attach the system disk as primary IDE master (unit=0).
+            SYSTEM_ARGS=(
+                -drive "id=systemdisk,if=none,file=${SYSTEM_DISK},media=disk,format=qcow2"
+                -device "ide-hd,drive=systemdisk,bus=ide.0,unit=0"
+            )
+        else
+            SYSTEM_ARGS=( -drive "file=${SYSTEM_DISK},if=ide,index=0,media=disk,format=qcow2" )
+        fi
     fi
 
     # Use xHCI controller with a USB tablet (absolute) by default.
@@ -881,18 +936,19 @@ if [ "$RUN_QEMU" = true ]; then
         fi
     fi
 
-    #QEMU_CMD = "qemu-system-x86_64 "${QEMU_ARGS[@]}" "${TPM_ARGS[@]}" ${SHARED_ARGS[@]}  
-    echo "${QEMU_BIN} ${QEMU_ARGS[@]} ${TPM_ARGS[@]} ${SHARED_ARGS[@]}"
+    DISK_ARGS=( "${SYSTEM_ARGS[@]}" "${SHARED_ARGS[@]}" )
+    #QEMU_CMD = "qemu-system-x86_64 "${QEMU_ARGS[@]}" "${TPM_ARGS[@]}" "${DISK_ARGS[@]}"  
+    echo "${QEMU_BIN} ${QEMU_ARGS[@]} ${TPM_ARGS[@]} ${DISK_ARGS[@]}"
     if [ "${RUN_FOR_SECONDS}" -gt 0 ]; then
         if command -v timeout >/dev/null 2>&1; then
             echo -e "${YELLOW}Auto-stopping QEMU after ${RUN_FOR_SECONDS}s (use Ctrl+Q in guest for clean exit).${NC}"
-            timeout --preserve-status "${RUN_FOR_SECONDS}" "${QEMU_BIN}" "${QEMU_ARGS[@]}" "${TPM_ARGS[@]}" "${SHARED_ARGS[@]}" || true
+            timeout --preserve-status "${RUN_FOR_SECONDS}" "${QEMU_BIN}" "${QEMU_ARGS[@]}" "${TPM_ARGS[@]}" "${DISK_ARGS[@]}" || true
         else
             echo -e "${YELLOW}timeout(1) not found; running QEMU normally.${NC}"
-            "${QEMU_BIN}" "${QEMU_ARGS[@]}" "${TPM_ARGS[@]}" "${SHARED_ARGS[@]}"
+            "${QEMU_BIN}" "${QEMU_ARGS[@]}" "${TPM_ARGS[@]}" "${DISK_ARGS[@]}"
         fi
     else
-        "${QEMU_BIN}" "${QEMU_ARGS[@]}" "${TPM_ARGS[@]}" "${SHARED_ARGS[@]}"
+        "${QEMU_BIN}" "${QEMU_ARGS[@]}" "${TPM_ARGS[@]}" "${DISK_ARGS[@]}"
     fi
     echo ""
     echo -e "${CYAN}=== Serial output (last 30 lines) ===${NC}"

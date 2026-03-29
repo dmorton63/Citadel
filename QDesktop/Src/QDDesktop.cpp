@@ -20,6 +20,7 @@
 #include "QDCuiMLViewer.h"
 #include "QKEventManager.h"
 #include "QKShutdownController.h"
+#include "QKSecurityCenter.h"
 #include "QGPainter.h"
 #include "QG/FontManager.h"
 #include "QG/Image.h"
@@ -861,6 +862,14 @@ namespace QD
         {
             showSetupWizard();
         }
+        else
+        {
+            // If SC is enforcing and an owner exists, prompt to unlock early.
+            if (!QK::SecurityCenter::instance().bypassEnabled())
+            {
+                showLoginDialog();
+            }
+        }
 
         if (m_desktopWindow)
         {
@@ -1011,6 +1020,9 @@ namespace QD
 
     bool Desktop::isOwnerEnrolled() const
     {
+        // Prefer the real credential record; fall back to marker for legacy installs.
+        if (QK::SecurityCenter::instance().ownerIsEnrolled())
+            return true;
         return QFS::VFS::instance().exists(OWNER_MARKER_PATH);
     }
 

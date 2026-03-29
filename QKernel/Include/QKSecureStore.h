@@ -45,6 +45,11 @@ namespace QK
         // Returns the default secure store configuration.
         Config defaultConfig();
 
+        // Returns true if TPM-backed wrap-key sealing is enabled in the config.
+        // This is the minimal "TPM present" probe for subsystems that only care
+        // whether sealing/unsealing is available (not the transport details).
+        bool tpm_present(const Config &cfg = defaultConfig());
+
         // Overrides the process-wide default secure store configuration.
         // This is intended for early-boot initialization (e.g., enabling TPM
         // wrap-key sealing). Callers that pass an explicit Config are
@@ -79,6 +84,19 @@ namespace QK
         QC::Status readSealedBlob(const char *key,
                                   QC::Vector<QC::u8> &out,
                                   const Config &cfg = defaultConfig());
+
+        // Reads the current SecureStore wrap key without creating a new one.
+        //
+        // Returns:
+        // - Success: outWrapKey filled.
+        // - NotFound: wrap key not present yet.
+        // - Error: wrap key present but invalid/unsealable.
+        QC::Status readWrapKey(QC::u8 outWrapKey[32], const Config &cfg = defaultConfig());
+
+        // Returns the SecureStore wrap key, creating it if necessary.
+        //
+        // This is intended for provisioning/first-run flows.
+        QC::Status getOrCreateWrapKey(QC::u8 outWrapKey[32], const Config &cfg = defaultConfig());
 
         // Deletes baseDir/<key>.
         QC::Status removeBlob(const char *key, const Config &cfg = defaultConfig());

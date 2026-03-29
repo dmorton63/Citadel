@@ -3,6 +3,7 @@ add_subdirectory(Drivers)
 add_executable(citadel_kernel
     QKMain.cpp
     QKConsole.cpp
+    QKSystemVolumeCommands.cpp
     Boot/QKBoot.cpp
     Boot/Arch/QKBootArchInit.cpp
     Boot/ACPI/QKBootACPITables.cpp
