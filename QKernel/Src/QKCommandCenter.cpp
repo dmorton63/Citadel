@@ -145,6 +145,101 @@ namespace QK::CmdCenter
             return true;
         }
 
+        // Forward declaration (definition is later in this TU).
+        static bool readToken(const char *&p, char *out, QC::usize outSize);
+
+        static bool cmdSysUserEnroll(const char *args, const QC::Cmd::Context &ctx, void *)
+        {
+            // usage: sys_user_enroll <user> <pass>
+            char user[33];
+            char pass[65];
+            QC::String::memset(user, 0, sizeof(user));
+            QC::String::memset(pass, 0, sizeof(pass));
+
+            const char *p = args;
+            const bool haveUser = readToken(p, user, sizeof(user));
+            const bool havePass = readToken(p, pass, sizeof(pass));
+
+            if (!haveUser || !havePass || !user[0] || !pass[0])
+            {
+                ctx.writeLine("usage: sys_user_enroll <user> <pass>");
+                return true;
+            }
+
+            const QC::Status st = QK::SecurityCenter::instance().ownerEnroll(user, pass);
+            if (st == QC::Status::Success)
+                ctx.writeLine("sys_user_enroll: ok");
+            else if (st == QC::Status::Busy)
+                ctx.writeLine("sys_user_enroll: already enrolled");
+            else
+                ctx.writeLine("sys_user_enroll: failed");
+            return true;
+        }
+
+        static bool cmdSysUserUnlock(const char *args, const QC::Cmd::Context &ctx, void *)
+        {
+            // usage: sys_user_unlock <user> <pass>
+            char user[33];
+            char pass[65];
+            QC::String::memset(user, 0, sizeof(user));
+            QC::String::memset(pass, 0, sizeof(pass));
+
+            const char *p = args;
+            const bool haveUser = readToken(p, user, sizeof(user));
+            const bool havePass = readToken(p, pass, sizeof(pass));
+
+            if (!haveUser || !havePass || !user[0] || !pass[0])
+            {
+                ctx.writeLine("usage: sys_user_unlock <user> <pass>");
+                return true;
+            }
+
+            const QC::Status st = QK::SecurityCenter::instance().ownerUnlock(user, pass);
+            if (st == QC::Status::Success)
+            {
+                ctx.writeLine("sys_user_unlock: ok");
+                return true;
+            }
+
+            char msg[128];
+            QC::String::memset(msg, 0, sizeof(msg));
+            QC::String::strncpy(msg, "sys_user_unlock: denied", sizeof(msg) - 1);
+            const QC::u32 backoff = QK::SecurityCenter::instance().ownerUnlockBackoffMs();
+            if (backoff)
+            {
+                const QC::usize used0 = QC::String::strlen(msg);
+                QC::String::strncpy(msg + used0, " (backoff ", sizeof(msg) - 1 - used0);
+
+                char num[16];
+                QC::String::memset(num, 0, sizeof(num));
+                QC::u32 v = backoff;
+                char tmp[16];
+                QC::String::memset(tmp, 0, sizeof(tmp));
+                QC::usize n = 0;
+                do
+                {
+                    tmp[n++] = static_cast<char>('0' + (v % 10));
+                    v /= 10;
+                } while (v && n < sizeof(tmp));
+                for (QC::usize i = 0; i < n && i < sizeof(num) - 1; ++i)
+                    num[i] = tmp[n - 1 - i];
+
+                const QC::usize used1 = QC::String::strlen(msg);
+                QC::String::strncpy(msg + used1, num, sizeof(msg) - 1 - used1);
+                const QC::usize used2 = QC::String::strlen(msg);
+                QC::String::strncpy(msg + used2, "ms)", sizeof(msg) - 1 - used2);
+            }
+            ctx.writeLine(msg);
+            return true;
+        }
+
+        static bool cmdSysUserLock(const char *, const QC::Cmd::Context &ctx, void *)
+        {
+            QK::SecurityCenter::instance().ownerLock();
+            ctx.writeLine("sys_user_lock: ok");
+            return true;
+        }
+
         static bool cmdUser(const char *, const QC::Cmd::Context &ctx, void *)
         {
             // Desktop terminal must implement changing env->param2; this is a placeholder.
@@ -3990,6 +4085,9 @@ namespace QK::CmdCenter
         (void)reg.registerCommandExAccess("memotest", QC::Cmd::AccessLevel::Admin, &cmdMemoTest, nullptr, "Submit cached tasks twice to demonstrate a memoization hit");
         (void)reg.registerCommandExAccess("bevdump", QC::Cmd::AccessLevel::Admin, &cmdBevDump, nullptr, "Dump boot event log (structured events)");
         (void)reg.registerCommandExAccess("scdumpownercred", QC::Cmd::AccessLevel::SysAdmin, &cmdScDumpOwnerCred, nullptr, "Dump Owner credential blob as hex for ramdisk seeding (scdumpownercred [raw|plain])");
+        (void)reg.registerCommandExAccess("sys_user_enroll", QC::Cmd::AccessLevel::User, &cmdSysUserEnroll, nullptr, "Enroll Owner credentials (sys_user_enroll <user> <pass>)");
+        (void)reg.registerCommandExAccess("sys_user_unlock", QC::Cmd::AccessLevel::User, &cmdSysUserUnlock, nullptr, "Unlock Owner session (sys_user_unlock <user> <pass>)");
+        (void)reg.registerCommandExAccess("sys_user_lock", QC::Cmd::AccessLevel::User, &cmdSysUserLock, nullptr, "Lock Owner session (sys_user_lock)");
         (void)reg.registerCommandEx("regdump", &cmdRegdump, nullptr, "Dump runtime registries snapshot (counts + windows + boot seed)");
 
         // Networking helpers (for subsystem testing).

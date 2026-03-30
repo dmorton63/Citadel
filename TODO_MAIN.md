@@ -10,7 +10,7 @@ Sources scanned: 28 Markdown files (excluding build/, backups/, .git/; including
 - [x] Allow Security Center to throttle or isolate flows (sources: [backups/todo_archive_2026-03-25/CITADEL_TASKFLOW_TODO.md](backups/todo_archive_2026-03-25/CITADEL_TASKFLOW_TODO.md#L37))
 - [x] Create project structure for Security Center (SC) subsystem (sources: [backups/todo_archive_2026-03-25/TODO_S_LIST.md](backups/todo_archive_2026-03-25/TODO_S_LIST.md#L19))
 - [x] Define **SST (System Security Token)** as a rotatable secret used to derive runtime keys (implemented in `QSecurityCenter/*` + wired via `QKernel/Src/QKSecurityCenter.cpp`; wrapped SST stored in SecureStore under `/system/sc`). (sources: [backups/todo_archive_2026-03-25/TODO_S_LIST.md](backups/todo_archive_2026-03-25/TODO_S_LIST.md#L73))
-- [ ] Implement minimal Owner credential backend for elevation (no DB): persist salted verifier + KDF params in SC storage; add `SYS_USER_ENROLL` / `SYS_USER_UNLOCK` / `SYS_USER_LOCK` + attempt backoff; expose “unlocked session” state for `chmode admin/system` checks.
+- [x] Implement minimal Owner credential backend for elevation (no DB): persist salted verifier + KDF params in SC storage; add `SYS_USER_ENROLL` / `SYS_USER_UNLOCK` / `SYS_USER_LOCK` + attempt backoff; expose “unlocked session” state for `chmode admin/system` checks. (implemented in `QK::SecurityCenter` + wired into desktop terminal; commands: `sys_user_enroll/sys_user_unlock/sys_user_lock`)
 
   - Dev note (dev persistence): prefer running with `./build.sh -r --system-vol` so `/system` is backed by `build/system.qcow2` and SecureStore blobs (e.g., `/system/sc/OWNERCRD`) persist across reboots and rebuilds. Use `sysformat` once to initialize the volume, and `sysmount` to re-mount without formatting.
   - Fallback dev note: `./build.sh -r` regenerates the ramdisk each run; if you are not using `--system-vol`, you can seed the SecureStore blob in `ramdisk/system/sc/OWNERCRD`.
@@ -72,9 +72,9 @@ Sources scanned: 28 Markdown files (excluding build/, backups/, .git/; including
 - [ ] `SYS_ROTATE_SST` (sources: [backups/todo_archive_2026-03-25/TODO_S_LIST.md](backups/todo_archive_2026-03-25/TODO_S_LIST.md#L168))
 - [ ] `SYS_TRUST_CHECK` (sources: [backups/todo_archive_2026-03-25/TODO_S_LIST.md](backups/todo_archive_2026-03-25/TODO_S_LIST.md#L167))
 - [ ] `SYS_UPDATE_VERIFY` (sources: [backups/todo_archive_2026-03-25/TODO_S_LIST.md](backups/todo_archive_2026-03-25/TODO_S_LIST.md#L169))
-- [ ] `SYS_USER_ENROLL` (sources: [backups/todo_archive_2026-03-25/TODO_S_LIST.md](backups/todo_archive_2026-03-25/TODO_S_LIST.md#L171))
-- [ ] `SYS_USER_LOCK` (sources: [backups/todo_archive_2026-03-25/TODO_S_LIST.md](backups/todo_archive_2026-03-25/TODO_S_LIST.md#L173))
-- [ ] `SYS_USER_UNLOCK` (sources: [backups/todo_archive_2026-03-25/TODO_S_LIST.md](backups/todo_archive_2026-03-25/TODO_S_LIST.md#L172))
+- [x] `SYS_USER_ENROLL` (implemented as command `sys_user_enroll`) (sources: [backups/todo_archive_2026-03-25/TODO_S_LIST.md](backups/todo_archive_2026-03-25/TODO_S_LIST.md#L171))
+- [x] `SYS_USER_LOCK` (implemented as command `sys_user_lock`) (sources: [backups/todo_archive_2026-03-25/TODO_S_LIST.md](backups/todo_archive_2026-03-25/TODO_S_LIST.md#L173))
+- [x] `SYS_USER_UNLOCK` (implemented as command `sys_user_unlock`) (sources: [backups/todo_archive_2026-03-25/TODO_S_LIST.md](backups/todo_archive_2026-03-25/TODO_S_LIST.md#L172))
 - [ ] `SYS_VAULT_REQUEST` (sources: [backups/todo_archive_2026-03-25/TODO_S_LIST.md](backups/todo_archive_2026-03-25/TODO_S_LIST.md#L174))
 - [ ] Add `ip dhcp` to renew DHCPv4 on-demand (run DORA with a bounded wait, pump NIC RX during the command, then apply IP/mask/gw/dns). (sources: [backups/todo_archive_2026-03-25/TODO_MAIN.md](backups/todo_archive_2026-03-25/TODO_MAIN.md#L70))
 - [ ] Add `module list/load/unload` console commands that call the new APIs. (sources: [backups/todo_archive_2026-03-25/TODO_MAIN.md](backups/todo_archive_2026-03-25/TODO_MAIN.md#L44))

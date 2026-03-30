@@ -575,6 +575,14 @@ namespace QD
         if (access > maxAccess)
             access = maxAccess;
         m_callerAccess = access;
+
+        const QC::u8 userLvl = static_cast<QC::u8>(QC::Cmd::AccessLevel::User);
+        if (m_callerAccess <= userLvl)
+        {
+            // Dropping back to User/guest should lock the Owner session so future elevations
+            // require credentials again.
+            QK::SecurityCenter::instance().ownerLock();
+        }
     }
 
     const char *Terminal::callerAccessName() const

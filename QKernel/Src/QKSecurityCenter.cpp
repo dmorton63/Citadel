@@ -6,6 +6,8 @@
 
 #include "QKEntropy.h"
 
+#include "QKTime.h"
+
 #include "QKRuntimeRegistries.h"
 
 #include "QSCSecurityCenter.h"
@@ -163,15 +165,29 @@ namespace QK
     {
         static constexpr const char *kOwnerCredKey = "OWNERCRD"; // 8.3 safe
         static constexpr QC::u32 kOwnerCredMagic = 0x4F435244;    // 'OCRD'
-        static constexpr QC::u32 kOwnerCredVersion = 1;
+        static constexpr QC::u32 kOwnerCredVersionV1 = 1;
+        static constexpr QC::u32 kOwnerCredVersionV2 = 2;
 
-        struct OwnerCredRecord
+        struct OwnerCredRecordV1
         {
             QC::u32 magic;
             QC::u32 version;
             QC::u8 userLen;
             QC::u8 reserved[7];
             QC::u64 verifier;
+            char username[32];
+        };
+
+        struct OwnerCredRecordV2
+        {
+            QC::u32 magic;
+            QC::u32 version;
+            QC::u8 userLen;
+            QC::u8 saltLen;
+            QC::u16 reserved0;
+            QC::u32 iterations;
+            QC::u8 salt[16];
+            QC::u8 verifier[32];
             char username[32];
         };
 
@@ -186,10 +202,10 @@ namespace QK
             return h;
         }
 
-        static QC::u64 computeVerifier(const char *username, const char *secret)
+        static QC::u64 computeVerifierV1(const char *username, const char *secret)
         {
             // Minimal deterministic verifier: FNV-1a64 over "user\nsecret".
-            // NOTE: This is intentionally a placeholder until the KDF is implemented.
+            // NOTE: Legacy v1 record support only.
             if (!username)
                 username = "";
             if (!secret)
@@ -205,6 +221,63 @@ namespace QK
             h = fnv1a64(&delim, 1) ^ h;
             h = fnv1a64(reinterpret_cast<const QC::u8 *>(secret), sLen) ^ h;
             return h;
+        }
+
+        static void computeVerifierV2(const char *username,
+                                      const char *secret,
+                                      const QC::u8 salt[16],
+                                      QC::u32 iterations,
+                                      QC::u8 outVerifier[32])
+        {
+            if (!username)
+                username = "";
+            if (!secret)
+                secret = "";
+
+            if (iterations == 0)
+                iterations = 1;
+
+            // KDF-ish verifier: sha256(salt || username || '\n' || secret), iterated.
+            // This is not intended as a final design; it's a minimal salted + parameterized step.
+            static constexpr QC::usize kMaxUser = 32;
+            static constexpr QC::usize kMaxSecret = 64;
+
+            const QC::usize uLenRaw = QC::String::strlen(username);
+            const QC::usize sLenRaw = QC::String::strlen(secret);
+            const QC::usize uLen = (uLenRaw > kMaxUser) ? kMaxUser : uLenRaw;
+            const QC::usize sLen = (sLenRaw > kMaxSecret) ? kMaxSecret : sLenRaw;
+
+            QC::u8 msg[16 + kMaxUser + 1 + kMaxSecret];
+            QC::usize mi = 0;
+            QC::String::memcpy(msg + mi, salt, 16);
+            mi += 16;
+            if (uLen)
+            {
+                QC::String::memcpy(msg + mi, username, uLen);
+                mi += uLen;
+            }
+            msg[mi++] = static_cast<QC::u8>('\n');
+            if (sLen)
+            {
+                QC::String::memcpy(msg + mi, secret, sLen);
+                mi += sLen;
+            }
+
+            QC::u8 digest[32];
+            QC::Sha256(msg, mi, digest);
+
+            QC::u8 iterBuf[32 + 16];
+            for (QC::u32 i = 1; i < iterations; ++i)
+            {
+                QC::String::memcpy(iterBuf, digest, 32);
+                QC::String::memcpy(iterBuf + 32, salt, 16);
+                QC::Sha256(iterBuf, sizeof(iterBuf), digest);
+            }
+
+            QC::String::memcpy(outVerifier, digest, 32);
+            secureZero(digest, sizeof(digest));
+            secureZero(msg, sizeof(msg));
+            secureZero(iterBuf, sizeof(iterBuf));
         }
 
         static QC::u32 computeBackoffMs(QC::u32 failCount)
@@ -238,22 +311,59 @@ namespace QK
             return *a == 0 && *b == 0;
         }
 
-        static QC::Status readOwnerCred(OwnerCredRecord &out)
+        enum class OwnerCredKind : QC::u8
+        {
+            Unknown = 0,
+            V1,
+            V2
+        };
+
+        struct OwnerCredAny
+        {
+            OwnerCredKind kind = OwnerCredKind::Unknown;
+            OwnerCredRecordV1 v1{};
+            OwnerCredRecordV2 v2{};
+        };
+
+        static QC::Status readOwnerCred(OwnerCredAny &out)
         {
             QC::Vector<QC::u8> blob;
             QC::Status st = QK::SecureStore::readSealedBlob(kOwnerCredKey, blob);
             if (st != QC::Status::Success)
                 return st;
-            if (blob.size() < sizeof(OwnerCredRecord))
-                return QC::Status::Error;
-            QC::String::memcpy(&out, blob.data(), sizeof(OwnerCredRecord));
-            if (out.magic != kOwnerCredMagic || out.version != kOwnerCredVersion)
-                return QC::Status::Error;
-            out.username[sizeof(out.username) - 1] = 0;
-            return QC::Status::Success;
+
+            if (blob.size() >= sizeof(OwnerCredRecordV2))
+            {
+                OwnerCredRecordV2 rec{};
+                QC::String::memcpy(&rec, blob.data(), sizeof(rec));
+                if (rec.magic == kOwnerCredMagic && rec.version == kOwnerCredVersionV2)
+                {
+                    rec.username[sizeof(rec.username) - 1] = 0;
+                    if (rec.saltLen != 16)
+                        return QC::Status::Error;
+                    out.kind = OwnerCredKind::V2;
+                    out.v2 = rec;
+                    return QC::Status::Success;
+                }
+            }
+
+            if (blob.size() >= sizeof(OwnerCredRecordV1))
+            {
+                OwnerCredRecordV1 rec{};
+                QC::String::memcpy(&rec, blob.data(), sizeof(rec));
+                if (rec.magic == kOwnerCredMagic && rec.version == kOwnerCredVersionV1)
+                {
+                    rec.username[sizeof(rec.username) - 1] = 0;
+                    out.kind = OwnerCredKind::V1;
+                    out.v1 = rec;
+                    return QC::Status::Success;
+                }
+            }
+
+            return QC::Status::Error;
         }
 
-        static QC::Status writeOwnerCred(const OwnerCredRecord &rec)
+        static QC::Status writeOwnerCred(const OwnerCredRecordV2 &rec)
         {
             return QK::SecureStore::writeSealedBlob(kOwnerCredKey, &rec, sizeof(rec));
         }
@@ -335,18 +445,30 @@ namespace QK
         if (!username || !username[0] || !secret)
             return QC::Status::Error;
 
-        OwnerCredRecord rec;
+        if (ownerIsEnrolled())
+            return QC::Status::Busy;
+
+        static constexpr QC::u32 kDefaultIterations = 2000;
+
+        OwnerCredRecordV2 rec;
         QC::String::memset(&rec, 0, sizeof(rec));
         rec.magic = kOwnerCredMagic;
-        rec.version = kOwnerCredVersion;
+        rec.version = kOwnerCredVersionV2;
         rec.userLen = static_cast<QC::u8>(QC::String::strlen(username));
         if (rec.userLen >= sizeof(rec.username))
             rec.userLen = static_cast<QC::u8>(sizeof(rec.username) - 1);
 
-        QC::String::strncpy(rec.username, username, sizeof(rec.username) - 1);
-        rec.verifier = computeVerifier(rec.username, secret);
+        rec.saltLen = 16;
+        rec.iterations = kDefaultIterations;
 
-        QC::Status st = QK::SecureStore::ensureBaseDir();
+        QC::Status st = qkFillRandom(nullptr, rec.salt, sizeof(rec.salt));
+        if (st != QC::Status::Success)
+            return st;
+
+        QC::String::strncpy(rec.username, username, sizeof(rec.username) - 1);
+        computeVerifierV2(rec.username, secret, rec.salt, rec.iterations, rec.verifier);
+
+        st = QK::SecureStore::ensureBaseDir();
         if (st != QC::Status::Success)
             return st;
 
@@ -366,23 +488,40 @@ namespace QK
         if (!username || !username[0] || !secret)
             return QC::Status::Error;
 
-        OwnerCredRecord rec;
+        OwnerCredAny rec;
         QC::Status st = readOwnerCred(rec);
         if (st != QC::Status::Success)
             return st;
 
-        if (!streq(username, rec.username))
+        bool ok = false;
+        if (rec.kind == OwnerCredKind::V2)
         {
-            ++m_ownerFailCount;
-            m_ownerBackoffMs = computeBackoffMs(m_ownerFailCount);
-            return QC::Status::Error;
+            if (streq(username, rec.v2.username))
+            {
+                QC::u8 v[32];
+                computeVerifierV2(rec.v2.username, secret, rec.v2.salt, rec.v2.iterations, v);
+                ok = (QC::String::memcmp(v, rec.v2.verifier, 32) == 0);
+                secureZero(v, sizeof(v));
+            }
+        }
+        else if (rec.kind == OwnerCredKind::V1)
+        {
+            if (streq(username, rec.v1.username))
+            {
+                const QC::u64 v = computeVerifierV1(rec.v1.username, secret);
+                ok = (v == rec.v1.verifier);
+            }
         }
 
-        const QC::u64 v = computeVerifier(rec.username, secret);
-        if (v != rec.verifier)
+        if (!ok)
         {
             ++m_ownerFailCount;
             m_ownerBackoffMs = computeBackoffMs(m_ownerFailCount);
+            if (m_ownerBackoffMs)
+            {
+                // Best-effort delay to slow down brute force.
+                QK::Time::sleep(m_ownerBackoffMs);
+            }
             return QC::Status::Error;
         }
 
