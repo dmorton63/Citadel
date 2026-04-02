@@ -40,6 +40,22 @@ namespace QK
                                            const QC::Vector<QC::u8> &blob,
                                            QC::u8 *outWrapKey,
                                            QC::usize outWrapKeyLen) = nullptr;
+
+            // Optional TPM-backed generic secret sealing.
+            //
+            // These APIs intentionally operate on opaque blobs, so callers can
+            // store them wherever appropriate. The TPM policy binding (e.g., PCRs)
+            // is owned by the implementation behind these callbacks.
+            QC::Status (*tpmSealSecret)(void *user,
+                                        const QC::u8 *secret,
+                                        QC::usize secretLen,
+                                        QC::Vector<QC::u8> &outBlob) = nullptr;
+
+            QC::Status (*tpmUnsealSecret)(void *user,
+                                          const QC::Vector<QC::u8> &blob,
+                                          QC::u8 *outSecret,
+                                          QC::usize outSecretCap,
+                                          QC::usize *outSecretLen) = nullptr;
         };
 
         // Returns the default secure store configuration.
@@ -112,6 +128,22 @@ namespace QK
         // This function must be called (early in boot) before any subsystem attempts to
         // read or create the wrap key.
         QC::Status nonTpmUnlockOrInitializeWrapKey(const char *recoveryCode, const Config &cfg = defaultConfig());
+
+        // --- TPM secret sealing abstraction (TPM-backed; stubbed fallback) ---
+        //
+        // When TPM sealing is available (callbacks provided), secrets are sealed
+        // and can be unsealed only when the policy holds. Without TPM support,
+        // these return NotSupported.
+        QC::Status seal_secret(const void *secret,
+                               QC::usize secretLen,
+                               QC::Vector<QC::u8> &outSealedBlob,
+                               const Config &cfg = defaultConfig());
+
+        QC::Status unseal_secret(const QC::Vector<QC::u8> &sealedBlob,
+                                 QC::u8 *outSecret,
+                                 QC::usize outSecretCap,
+                                 QC::usize *outSecretLen,
+                                 const Config &cfg = defaultConfig());
 
     } // namespace SecureStore
 

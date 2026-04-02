@@ -1323,6 +1323,37 @@ namespace QK
             return QFS::VFS::instance().exists(path);
         }
 
+        QC::Status seal_secret(const void *secret,
+                               QC::usize secretLen,
+                               QC::Vector<QC::u8> &outSealedBlob,
+                               const Config &cfg)
+        {
+            if (!secret || secretLen == 0)
+                return QC::Status::InvalidParam;
+
+            if (!cfg.tpmSealSecret)
+                return QC::Status::NotSupported;
+
+            outSealedBlob.clear();
+            return cfg.tpmSealSecret(cfg.tpmUser, reinterpret_cast<const QC::u8 *>(secret), secretLen, outSealedBlob);
+        }
+
+        QC::Status unseal_secret(const QC::Vector<QC::u8> &sealedBlob,
+                                 QC::u8 *outSecret,
+                                 QC::usize outSecretCap,
+                                 QC::usize *outSecretLen,
+                                 const Config &cfg)
+        {
+            if (!outSecret || !outSecretLen)
+                return QC::Status::InvalidParam;
+
+            if (!cfg.tpmUnsealSecret)
+                return QC::Status::NotSupported;
+
+            *outSecretLen = 0;
+            return cfg.tpmUnsealSecret(cfg.tpmUser, sealedBlob, outSecret, outSecretCap, outSecretLen);
+        }
+
     } // namespace SecureStore
 
 } // namespace QK

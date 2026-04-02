@@ -1325,6 +1325,202 @@ namespace QK::Boot::Tpm
             return St;
         }
 
+        static QC::Status SecureStoreTpmSealSecret(void *User, const QC::u8 *Secret, QC::usize SecretLen, QC::Vector<QC::u8> &OutBlob)
+        {
+            if (!User || !Secret || SecretLen == 0)
+                return QC::Status::InvalidParam;
+
+            // Current sealed-object template only supports small secrets.
+            if (SecretLen > 64)
+                return QC::Status::NotSupported;
+
+            auto *Dev = static_cast<FTpmSecureStoreCtx *>(User);
+            if (!Dev->bReady)
+                return QC::Status::Busy;
+
+            QC::u32 PolicyDigestSession = 0;
+            QC::Status St = TpmStartPolicySession(nullptr, Dev->Ctx, false, PolicyDigestSession);
+            if (St != QC::Status::Success)
+                return St;
+
+            St = TpmPolicyPCR(nullptr, Dev->Ctx, PolicyDigestSession);
+            if (St != QC::Status::Success)
+            {
+                (void)TpmFlushContext(nullptr, Dev->Ctx, PolicyDigestSession);
+                return St;
+            }
+
+            QC::u8 PolicyDigest[32];
+            St = TpmPolicyGetDigest(nullptr, Dev->Ctx, PolicyDigestSession, PolicyDigest);
+            (void)TpmFlushContext(nullptr, Dev->Ctx, PolicyDigestSession);
+            if (St != QC::Status::Success)
+                return St;
+
+            QC::u32 Primary = 0;
+            St = TpmCreatePrimaryStorageKey(nullptr, Dev->Ctx, Primary);
+            if (St != QC::Status::Success)
+                return St;
+
+            QC::Vector<QC::u8> Priv2b;
+            QC::Vector<QC::u8> Pub2b;
+            St = TpmCreateSealedObject(nullptr, Dev->Ctx, Primary, Secret, SecretLen, PolicyDigest, Priv2b, Pub2b);
+            (void)TpmFlushContext(nullptr, Dev->Ctx, Primary);
+
+            if (St != QC::Status::Success)
+            {
+                if (Priv2b.size() > 0)
+                    QC::String::memset(Priv2b.data(), 0, Priv2b.size());
+                if (Pub2b.size() > 0)
+                    QC::String::memset(Pub2b.data(), 0, Pub2b.size());
+                Priv2b.clear();
+                Pub2b.clear();
+                return St;
+            }
+
+            const QC::u32 Ver = 1;
+            const QC::u32 SecretLen32 = static_cast<QC::u32>(SecretLen);
+            const QC::u32 PrivLen = static_cast<QC::u32>(Priv2b.size());
+            const QC::u32 PubLen = static_cast<QC::u32>(Pub2b.size());
+            OutBlob.clear();
+            OutBlob.resize(4 + 4 + 4 + 4 + 4 + Priv2b.size() + Pub2b.size());
+
+            auto PutLe32 = [](QC::u8 *P, QC::u32 V)
+            {
+                P[0] = static_cast<QC::u8>(V & 0xFF);
+                P[1] = static_cast<QC::u8>((V >> 8) & 0xFF);
+                P[2] = static_cast<QC::u8>((V >> 16) & 0xFF);
+                P[3] = static_cast<QC::u8>((V >> 24) & 0xFF);
+            };
+
+            OutBlob[0] = 'S';
+            OutBlob[1] = 'S';
+            OutBlob[2] = 'T';
+            OutBlob[3] = '1';
+            PutLe32(OutBlob.data() + 4, Ver);
+            PutLe32(OutBlob.data() + 8, SecretLen32);
+            PutLe32(OutBlob.data() + 12, PrivLen);
+            PutLe32(OutBlob.data() + 16, PubLen);
+
+            QC::usize O = 20;
+            for (QC::usize i = 0; i < Priv2b.size(); ++i)
+                OutBlob[O++] = Priv2b[i];
+            for (QC::usize i = 0; i < Pub2b.size(); ++i)
+                OutBlob[O++] = Pub2b[i];
+
+            QC::String::memset(Priv2b.data(), 0, Priv2b.size());
+            QC::String::memset(Pub2b.data(), 0, Pub2b.size());
+            Priv2b.clear();
+            Pub2b.clear();
+            return QC::Status::Success;
+        }
+
+        static QC::Status SecureStoreTpmUnsealSecret(void *User,
+                                                     const QC::Vector<QC::u8> &Blob,
+                                                     QC::u8 *OutSecret,
+                                                     QC::usize OutSecretCap,
+                                                     QC::usize *OutSecretLen)
+        {
+            if (!User || !OutSecret || !OutSecretLen)
+                return QC::Status::InvalidParam;
+
+            auto *Dev = static_cast<FTpmSecureStoreCtx *>(User);
+            if (!Dev->bReady)
+                return QC::Status::Busy;
+
+            if (Blob.size() < 20)
+                return QC::Status::Error;
+            if (!(Blob[0] == 'S' && Blob[1] == 'S' && Blob[2] == 'T' && Blob[3] == '1'))
+                return QC::Status::Error;
+
+            auto GetLe32 = [](const QC::u8 *P) -> QC::u32
+            {
+                return static_cast<QC::u32>(P[0]) |
+                       (static_cast<QC::u32>(P[1]) << 8) |
+                       (static_cast<QC::u32>(P[2]) << 16) |
+                       (static_cast<QC::u32>(P[3]) << 24);
+            };
+
+            const QC::u32 Ver = GetLe32(Blob.data() + 4);
+            if (Ver != 1)
+                return QC::Status::Error;
+
+            const QC::u32 SecretLen32 = GetLe32(Blob.data() + 8);
+            const QC::u32 PrivLen = GetLe32(Blob.data() + 12);
+            const QC::u32 PubLen = GetLe32(Blob.data() + 16);
+
+            if (SecretLen32 == 0 || SecretLen32 > 64)
+                return QC::Status::Error;
+
+            const QC::usize Total = 20u + static_cast<QC::usize>(PrivLen) + static_cast<QC::usize>(PubLen);
+            if (Total != Blob.size())
+                return QC::Status::Error;
+
+            const QC::usize SecretLen = static_cast<QC::usize>(SecretLen32);
+            if (OutSecretCap < SecretLen)
+                return QC::Status::OutOfMemory;
+
+            QC::u32 PolicySession = 0;
+            QC::Status St = TpmStartPolicySession(nullptr, Dev->Ctx, false, PolicySession);
+            if (St != QC::Status::Success)
+                return St;
+
+            St = TpmPolicyPCR(nullptr, Dev->Ctx, PolicySession);
+            if (St != QC::Status::Success)
+            {
+                (void)TpmFlushContext(nullptr, Dev->Ctx, PolicySession);
+                return St;
+            }
+
+            QC::Vector<QC::u8> Priv2b;
+            QC::Vector<QC::u8> Pub2b;
+            Priv2b.resize(PrivLen);
+            Pub2b.resize(PubLen);
+
+            QC::usize O = 20;
+            for (QC::usize i = 0; i < Priv2b.size(); ++i)
+                Priv2b[i] = Blob[O++];
+            for (QC::usize i = 0; i < Pub2b.size(); ++i)
+                Pub2b[i] = Blob[O++];
+
+            QC::u32 Primary = 0;
+            St = TpmCreatePrimaryStorageKey(nullptr, Dev->Ctx, Primary);
+            if (St != QC::Status::Success)
+            {
+                QC::String::memset(Priv2b.data(), 0, Priv2b.size());
+                QC::String::memset(Pub2b.data(), 0, Pub2b.size());
+                Priv2b.clear();
+                Pub2b.clear();
+                (void)TpmFlushContext(nullptr, Dev->Ctx, PolicySession);
+                return St;
+            }
+
+            QC::u32 Obj = 0;
+            St = TpmLoadSealedObject(nullptr, Dev->Ctx, Primary, Priv2b, Pub2b, Obj);
+
+            QC::String::memset(Priv2b.data(), 0, Priv2b.size());
+            QC::String::memset(Pub2b.data(), 0, Pub2b.size());
+            Priv2b.clear();
+            Pub2b.clear();
+
+            if (St != QC::Status::Success)
+            {
+                (void)TpmFlushContext(nullptr, Dev->Ctx, Primary);
+                (void)TpmFlushContext(nullptr, Dev->Ctx, PolicySession);
+                return St;
+            }
+
+            St = TpmUnsealWithAuthSession(nullptr, Dev->Ctx, Obj, PolicySession, OutSecret, SecretLen);
+            if (St == QC::Status::Success)
+                *OutSecretLen = SecretLen;
+            else
+                *OutSecretLen = 0;
+
+            (void)TpmFlushContext(nullptr, Dev->Ctx, Obj);
+            (void)TpmFlushContext(nullptr, Dev->Ctx, Primary);
+            (void)TpmFlushContext(nullptr, Dev->Ctx, PolicySession);
+            return St;
+        }
+
         static void SecureStoreSelfTest(FLogFn Log)
         {
             LogStr(Log, "SecureStore: self-test...\r\n");
@@ -1538,6 +1734,8 @@ namespace QK::Boot::Tpm
             ScCfg.tpmUser = &g_TpmSecureStore;
             ScCfg.tpmSealWrapKey = &SecureStoreTpmSealWrapKey;
             ScCfg.tpmUnsealWrapKey = &SecureStoreTpmUnsealWrapKey;
+            ScCfg.tpmSealSecret = &SecureStoreTpmSealSecret;
+            ScCfg.tpmUnsealSecret = &SecureStoreTpmUnsealSecret;
             QK::SecureStore::setDefaultConfig(ScCfg);
             LogStr(Log, "SecureStore: TPM wrap-key enabled\r\n");
         }
