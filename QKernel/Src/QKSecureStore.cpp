@@ -989,6 +989,16 @@ namespace QK
             return loadWrapKey(outWrapKey, cfg, true);
         }
 
+        QC::Status readTas(QC::u8 outTas[32], const Config &cfg)
+        {
+            return readWrapKey(outTas, cfg);
+        }
+
+        QC::Status getOrCreateTas(QC::u8 outTas[32], const Config &cfg)
+        {
+            return getOrCreateWrapKey(outTas, cfg);
+        }
+
         QC::Status nonTpmUnlockOrInitializeWrapKey(const char *recoveryCode, const Config &cfg)
         {
             if (tpm_present(cfg))

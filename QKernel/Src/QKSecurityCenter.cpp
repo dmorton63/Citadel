@@ -133,21 +133,20 @@ namespace QK
 
         static QC::Status qkGetSrkFromSecureStore(void *, QSC::SrkKey &outKey)
         {
-            QC::u8 wrapKey[32];
-            QC::Status st = QK::SecureStore::readWrapKey(wrapKey);
+            QC::u8 tas[32];
+            QC::Status st = QK::SecureStore::readTas(tas);
             if (st == QC::Status::NotFound)
             {
-                // Provisioning path: create the anchor if missing.
-                st = QK::SecureStore::getOrCreateWrapKey(wrapKey);
+                // Provisioning path: create TAS if missing.
+                st = QK::SecureStore::getOrCreateTas(tas);
             }
             if (st != QC::Status::Success)
                 return st;
 
             // SRK := HMAC-SHA256(TAS, label)
-            // Current TAS implementation is the SecureStore wrap key (TPM-protected when available).
             static constexpr char kSrkLabel[] = "CITADEL-QSC-SRK-v1";
             QC::u8 srk[32];
-            hmacSha256(wrapKey, sizeof(wrapKey),
+            hmacSha256(tas, sizeof(tas),
                        reinterpret_cast<const QC::u8 *>(kSrkLabel), sizeof(kSrkLabel) - 1,
                        srk);
 
@@ -156,7 +155,7 @@ namespace QK
             outKey.size = 32;
 
             secureZero(srk, sizeof(srk));
-            secureZero(wrapKey, sizeof(wrapKey));
+            secureZero(tas, sizeof(tas));
             return QC::Status::Success;
         }
     }

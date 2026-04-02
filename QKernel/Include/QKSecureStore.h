@@ -137,6 +137,22 @@ namespace QK
         // This is intended for provisioning/first-run flows.
         QC::Status getOrCreateWrapKey(QC::u8 outWrapKey[32], const Config &cfg = defaultConfig());
 
+        // --- TPM Anchor Secret (TAS) ---
+        //
+        // TAS is the machine-bound anchor secret used to derive higher-level
+        // keys (e.g., Security Center Root Key).
+        //
+        // Current implementation:
+        // - TPM present: TAS is the SecureStore wrap key sealed via TPM policy
+        //   and stored as a sealed blob (WRAPKEY.TPM).
+        // - No TPM: TAS is the SecureStore wrap key wrapped under the recovery
+        //   derived key (WRAPKEY.KDF).
+        //
+        // This keeps the system anchored to a single persistent secret today;
+        // the anchor can be split into dedicated TAS vs storage-wrap keys later.
+        QC::Status readTas(QC::u8 outTas[32], const Config &cfg = defaultConfig());
+        QC::Status getOrCreateTas(QC::u8 outTas[32], const Config &cfg = defaultConfig());
+
         // Deletes baseDir/<key>.
         QC::Status removeBlob(const char *key, const Config &cfg = defaultConfig());
 
