@@ -1,6 +1,7 @@
 #include "Boot/Desktop/QKBootDesktopSession.h"
 
 #include "QCLogger.h"
+#include "QCString.h"
 
 #include "QKMemHeap.h"
 #include "QArchPCI.h"
@@ -18,6 +19,7 @@
 #include "QKShutdownController.h"
 
 #include "QKConsole.h"
+#include "QKSecureStore.h"
 #include "QKStorageProbe.h"
 #include "QKSecurityCenter.h"
 
@@ -34,6 +36,91 @@
 namespace
 {
     static QK::Boot::Desktop::FLogFn g_Log = nullptr;
+
+    static void secureZero(void *ptr, QC::usize len)
+    {
+        volatile QC::u8 *p = reinterpret_cast<volatile QC::u8 *>(ptr);
+        while (len--)
+            *p++ = 0;
+    }
+
+    static bool PromptSecretLine(const char *prompt, char *out, QC::usize outCap)
+    {
+        if (!out || outCap == 0)
+            return false;
+        out[0] = '\0';
+        QK::Console::write(prompt);
+        return QK::Console::readLineBlocking(out, outCap, false);
+    }
+
+    static void EnsureNonTpmSecureStoreUnlocked()
+    {
+        if (QK::SecureStore::tpm_present())
+            return;
+
+        constexpr const char *kKdfKey = "WRAPKEY.KDF";
+        constexpr const char *kPlainKey = "WRAPKEY.BIN";
+
+        const bool hasKdf = QK::SecureStore::exists(kKdfKey);
+        const bool hasPlain = QK::SecureStore::exists(kPlainKey);
+
+        char a[96];
+        char b[96];
+        QC::String::memset(a, 0, sizeof(a));
+        QC::String::memset(b, 0, sizeof(b));
+
+        if (!hasKdf)
+        {
+            QK::Console::write("\r\nNon-TPM SecureStore bootstrapping (recovery code required).\r\n");
+            if (hasPlain)
+                QK::Console::write("Upgrading legacy plaintext anchor to recovery-code wrapping.\r\n");
+
+            for (;;)
+            {
+                if (!PromptSecretLine("Set recovery code: ", a, sizeof(a)))
+                    continue;
+                if (!PromptSecretLine("Confirm recovery code: ", b, sizeof(b)))
+                    continue;
+
+                if (QC::String::strcmp(a, b) != 0)
+                {
+                    QK::Console::write("Codes did not match. Try again.\r\n");
+                    secureZero(a, sizeof(a));
+                    secureZero(b, sizeof(b));
+                    continue;
+                }
+
+                const QC::Status st = QK::SecureStore::nonTpmUnlockOrInitializeWrapKey(a);
+                secureZero(a, sizeof(a));
+                secureZero(b, sizeof(b));
+                if (st == QC::Status::Success)
+                {
+                    QK::Console::write("SecureStore unlocked.\r\n");
+                    return;
+                }
+
+                QK::Console::write("Failed to initialize SecureStore. Try again.\r\n");
+            }
+        }
+
+        QK::Console::write("\r\nEnter recovery code to unlock SecureStore: ");
+        for (;;)
+        {
+            if (!QK::Console::readLineBlocking(a, sizeof(a), false))
+                continue;
+
+            const QC::Status st = QK::SecureStore::nonTpmUnlockOrInitializeWrapKey(a);
+            secureZero(a, sizeof(a));
+
+            if (st == QC::Status::Success)
+            {
+                QK::Console::write("SecureStore unlocked.\r\n");
+                return;
+            }
+
+            QK::Console::write("Invalid recovery code. Try again: ");
+        }
+    }
 
     static char keyToChar(QKDrv::PS2::Key key, bool shift, bool caps)
     {
@@ -427,6 +514,12 @@ namespace QK::Boot::Desktop
         QKDrv::Manager::instance().setScreenSize(width, height);
         QKDrv::Manager::instance().initialize();
         g_Log("Drivers initialized\r\n");
+
+        if (!QK::SecurityCenter::instance().initialized())
+        {
+            EnsureNonTpmSecureStoreUnlocked();
+            QK::SecurityCenter::instance().initialize(QK::Boot::Config::GetSecurityCenterMode());
+        }
 
         // Ensure SST exists after /system is mounted from the system volume.
         (void)QK::SecurityCenter::instance().ensureSst();

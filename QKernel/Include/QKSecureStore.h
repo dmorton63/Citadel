@@ -104,6 +104,15 @@ namespace QK
         // Returns true if baseDir/<key> exists.
         bool exists(const char *key, const Config &cfg = defaultConfig());
 
+        // --- Non-TPM secure bootstrapping (recovery code -> KDF -> wraps anchor secret) ---
+        //
+        // When TPM sealing is unavailable, SecureStore can protect its wrap key at-rest by
+        // wrapping it under a key derived from a user-provided recovery code.
+        //
+        // This function must be called (early in boot) before any subsystem attempts to
+        // read or create the wrap key.
+        QC::Status nonTpmUnlockOrInitializeWrapKey(const char *recoveryCode, const Config &cfg = defaultConfig());
+
     } // namespace SecureStore
 
 } // namespace QK

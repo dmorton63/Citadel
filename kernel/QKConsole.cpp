@@ -15,6 +15,8 @@
 #include "QKBootConfigTier.h"
 #include "Boot/Config/QKBootStagedConfig.h"
 
+#include "QArchCPU.h"
+
 namespace QK
 {
     namespace Console
@@ -46,6 +48,12 @@ namespace QK
             char g_buffer[kBufferSize];
             QC::usize g_length = 0;
             PrintFn g_printer = nullptr;
+
+            // Optional blocking line-capture mode (used for boot-time prompts).
+            bool g_captureActive = false;
+            bool g_captureEcho = true;
+            volatile bool g_captureReady = false;
+            char g_captureLine[kBufferSize];
             constexpr QC::usize kMaxCommands = 32;
             Command g_commandTable[kMaxCommands];
             QC::usize g_commandCount = 0;
@@ -126,8 +134,12 @@ namespace QK
                     return;
                 g_buffer[g_length++] = c;
                 g_buffer[g_length] = '\0';
-                char out[2] = {c, '\0'};
-                print(out);
+
+                if (!g_captureActive || g_captureEcho)
+                {
+                    char out[2] = {c, '\0'};
+                    print(out);
+                }
             }
 
             void backspace()
@@ -136,7 +148,9 @@ namespace QK
                     return;
                 --g_length;
                 g_buffer[g_length] = '\0';
-                print("\b \b");
+
+                if (!g_captureActive || g_captureEcho)
+                    print("\b \b");
             }
 
             void listDirectory(const char *path)
@@ -1023,6 +1037,16 @@ namespace QK
             if (event.key == QKDrv::PS2::Key::Enter)
             {
                 print("\r\n");
+
+                if (g_captureActive)
+                {
+                    QC::String::strncpy(g_captureLine, g_buffer, sizeof(g_captureLine) - 1);
+                    g_captureLine[sizeof(g_captureLine) - 1] = '\0';
+                    clearBuffer();
+                    g_captureReady = true;
+                    return;
+                }
+
                 executeCommand();
                 clearBuffer();
                 return;
@@ -1062,6 +1086,44 @@ namespace QK
             g_buffer[sizeof(g_buffer) - 1] = '\0';
             executeCommand();
             clearBuffer();
+        }
+
+        bool readLineBlocking(char *out, QC::usize outSize, bool echo)
+        {
+            if (!out || outSize == 0)
+                return false;
+            if (!g_inputEnabled)
+                return false;
+
+            out[0] = '\0';
+
+            const bool prevCaptureActive = g_captureActive;
+            const bool prevCaptureEcho = g_captureEcho;
+
+            g_captureActive = true;
+            g_captureEcho = echo;
+            g_captureReady = false;
+            QC::String::memset(g_captureLine, 0, sizeof(g_captureLine));
+            clearBuffer();
+
+            while (!g_captureReady)
+            {
+                if (QArch::CPU::instance().interruptsEnabled())
+                    QArch::CPU::instance().halt();
+                else
+                    cpu_relax();
+            }
+
+            QC::String::strncpy(out, g_captureLine, outSize - 1);
+            out[outSize - 1] = '\0';
+
+            // best-effort wipe captured line
+            QC::String::memset(g_captureLine, 0, sizeof(g_captureLine));
+
+            g_captureActive = prevCaptureActive;
+            g_captureEcho = prevCaptureEcho;
+            g_captureReady = false;
+            return true;
         }
 
     } // namespace Console

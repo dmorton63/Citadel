@@ -4,6 +4,7 @@
 #include "QFSFile.h"
 #include "QKEntropy.h"
 #include "QCString.h"
+#include "QCSha256.h"
 
 namespace
 {
@@ -322,9 +323,261 @@ namespace
         return diff == 0;
     }
 
+    static void secureZero(void *ptr, QC::usize len)
+    {
+        volatile QC::u8 *p = reinterpret_cast<volatile QC::u8 *>(ptr);
+        while (len--)
+            *p++ = 0;
+    }
+
+    constexpr const char *kWrapKeyPlainName = "WRAPKEY.BIN";
+    constexpr const char *kWrapKeyKdfName = "WRAPKEY.KDF";
+
+    constexpr QC::u8 kWrapKeyKdfMagic[4] = {'W', 'K', 'D', '1'};
+    constexpr QC::u32 kWrapKeyKdfVersion = 1;
+    constexpr QC::u32 kWrapKeyKdfDefaultIterations = 50000;
+
+    static bool g_nonTpmDerivedKeySet = false;
+    static QC::u8 g_nonTpmDerivedKey[32];
+
+    static void hmacSha256(const QC::u8 *key, QC::usize keyLen,
+                           const QC::u8 *data, QC::usize dataLen,
+                           QC::u8 outDigest[32])
+    {
+        constexpr QC::usize kBlockSize = 64;
+        constexpr QC::usize kMaxDataLen = 128;
+
+        if (!outDigest)
+            return;
+
+        if (dataLen > kMaxDataLen)
+        {
+            QC::String::memset(outDigest, 0, 32);
+            return;
+        }
+
+        QC::u8 keyBlock[kBlockSize];
+        QC::String::memset(keyBlock, 0, sizeof(keyBlock));
+
+        if (keyLen > kBlockSize)
+        {
+            QC::u8 keyHash[32];
+            QC::Sha256(key, keyLen, keyHash);
+            QC::String::memcpy(keyBlock, keyHash, sizeof(keyHash));
+            secureZero(keyHash, sizeof(keyHash));
+        }
+        else
+        {
+            QC::String::memcpy(keyBlock, key, keyLen);
+        }
+
+        QC::u8 ipad[kBlockSize];
+        QC::u8 opad[kBlockSize];
+        for (QC::usize i = 0; i < kBlockSize; ++i)
+        {
+            ipad[i] = static_cast<QC::u8>(keyBlock[i] ^ 0x36);
+            opad[i] = static_cast<QC::u8>(keyBlock[i] ^ 0x5c);
+        }
+
+        QC::u8 innerDigest[32];
+        QC::u8 inner[kBlockSize + kMaxDataLen];
+        QC::String::memcpy(inner, ipad, kBlockSize);
+        if (dataLen)
+            QC::String::memcpy(inner + kBlockSize, data, dataLen);
+        QC::Sha256(inner, kBlockSize + dataLen, innerDigest);
+
+        QC::u8 outer[kBlockSize + sizeof(innerDigest)];
+        QC::String::memcpy(outer, opad, kBlockSize);
+        QC::String::memcpy(outer + kBlockSize, innerDigest, sizeof(innerDigest));
+        QC::Sha256(outer, sizeof(outer), outDigest);
+
+        secureZero(keyBlock, sizeof(keyBlock));
+        secureZero(ipad, sizeof(ipad));
+        secureZero(opad, sizeof(opad));
+        secureZero(inner, sizeof(inner));
+        secureZero(innerDigest, sizeof(innerDigest));
+        secureZero(outer, sizeof(outer));
+    }
+
+    static void pbkdf2HmacSha256_32(const QC::u8 *password, QC::usize passwordLen,
+                                   const QC::u8 *salt, QC::usize saltLen,
+                                   QC::u32 iterations,
+                                   QC::u8 outKey[32])
+    {
+        if (!outKey)
+            return;
+
+        if (iterations == 0)
+            iterations = 1;
+
+        // One-block PBKDF2 for 32-byte output.
+        // U1 = HMAC(P, S || INT_32_BE(1))
+        QC::u8 msg[64];
+        QC::usize mlen = 0;
+        if (salt && saltLen)
+        {
+            const QC::usize copyLen = (saltLen > (sizeof(msg) - 4)) ? (sizeof(msg) - 4) : saltLen;
+            QC::String::memcpy(msg, salt, copyLen);
+            mlen = copyLen;
+        }
+        msg[mlen + 0] = 0;
+        msg[mlen + 1] = 0;
+        msg[mlen + 2] = 0;
+        msg[mlen + 3] = 1;
+        mlen += 4;
+
+        QC::u8 u[32];
+        hmacSha256(password, passwordLen, msg, mlen, u);
+        QC::u8 t[32];
+        QC::String::memcpy(t, u, sizeof(t));
+
+        for (QC::u32 i = 2; i <= iterations; ++i)
+        {
+            QC::u8 uNext[32];
+            hmacSha256(password, passwordLen, u, sizeof(u), uNext);
+            for (int j = 0; j < 32; ++j)
+                t[j] = static_cast<QC::u8>(t[j] ^ uNext[j]);
+            QC::String::memcpy(u, uNext, sizeof(u));
+            secureZero(uNext, sizeof(uNext));
+        }
+
+        QC::String::memcpy(outKey, t, 32);
+        secureZero(msg, sizeof(msg));
+        secureZero(u, sizeof(u));
+        secureZero(t, sizeof(t));
+    }
+
+    static QC::usize normalizeRecoveryCode(const char *in, char *out, QC::usize outCap)
+    {
+        if (!out || outCap == 0)
+            return 0;
+        out[0] = '\0';
+        if (!in)
+            return 0;
+
+        QC::usize o = 0;
+        for (const char *p = in; *p; ++p)
+        {
+            const char c = *p;
+            if (c == ' ' || c == '\t' || c == '\r' || c == '\n' || c == '-')
+                continue;
+            if (o + 1 >= outCap)
+                break;
+            out[o++] = c;
+        }
+        out[o] = '\0';
+        return o;
+    }
+
+    static QC::Status wrapWrapKeyKdfBlob(const QC::u8 derivedKey[32],
+                                        QC::u32 iterations,
+                                        const QC::u8 salt[16],
+                                        const QC::u8 nonce[12],
+                                        const QC::u8 wrapKey[32],
+                                        QC::u8 outBlob[88])
+    {
+        if (!derivedKey || !salt || !nonce || !wrapKey || !outBlob)
+            return QC::Status::InvalidParam;
+
+        // Header (AAD): magic(4) + version(4) + iterations(4) + salt(16) + nonce(12) = 40 bytes
+        QC::u8 aad[40];
+        aad[0] = kWrapKeyKdfMagic[0];
+        aad[1] = kWrapKeyKdfMagic[1];
+        aad[2] = kWrapKeyKdfMagic[2];
+        aad[3] = kWrapKeyKdfMagic[3];
+        store_le32(aad + 4, kWrapKeyKdfVersion);
+        store_le32(aad + 8, iterations);
+        for (int i = 0; i < 16; ++i)
+            aad[12 + i] = salt[i];
+        for (int i = 0; i < 12; ++i)
+            aad[28 + i] = nonce[i];
+
+        // Ciphertext of wrapKey.
+        QC::u8 cipher[32];
+        for (int i = 0; i < 32; ++i)
+            cipher[i] = wrapKey[i];
+        chacha20Xor(derivedKey, 1, nonce, cipher, sizeof(cipher));
+
+        // Poly1305 key derived from chacha20 block counter=0.
+        QC::u8 polyKeyBlock[64];
+        chacha20Block(derivedKey, 0, nonce, polyKeyBlock);
+        QC::u8 polyKey[32];
+        for (int i = 0; i < 32; ++i)
+            polyKey[i] = polyKeyBlock[i];
+
+        QC::u8 tag[16];
+        poly1305TagForAead(polyKey, aad, sizeof(aad), cipher, sizeof(cipher), tag);
+
+        // Serialize: aad(40) + tag(16) + cipher(32) = 88.
+        for (int i = 0; i < 40; ++i)
+            outBlob[i] = aad[i];
+        for (int i = 0; i < 16; ++i)
+            outBlob[40 + i] = tag[i];
+        for (int i = 0; i < 32; ++i)
+            outBlob[56 + i] = cipher[i];
+
+        secureZero(aad, sizeof(aad));
+        secureZero(cipher, sizeof(cipher));
+        secureZero(polyKeyBlock, sizeof(polyKeyBlock));
+        secureZero(polyKey, sizeof(polyKey));
+        secureZero(tag, sizeof(tag));
+        return QC::Status::Success;
+    }
+
+    static QC::Status unwrapWrapKeyKdfBlob(const QC::u8 derivedKey[32],
+                                          const QC::u8 *blob,
+                                          QC::usize blobSize,
+                                          QC::u8 outWrapKey[32])
+    {
+        if (!derivedKey || !blob || blobSize != 88 || !outWrapKey)
+            return QC::Status::InvalidParam;
+
+        // Validate header fields.
+        if (blob[0] != kWrapKeyKdfMagic[0] || blob[1] != kWrapKeyKdfMagic[1] ||
+            blob[2] != kWrapKeyKdfMagic[2] || blob[3] != kWrapKeyKdfMagic[3])
+            return QC::Status::Error;
+
+        const QC::u32 ver = load_le32(blob + 4);
+        if (ver != kWrapKeyKdfVersion)
+            return QC::Status::Error;
+
+        const QC::u8 *aad = blob;
+        const QC::u8 *tag = blob + 40;
+        const QC::u8 *cipher = blob + 56;
+
+        QC::u8 polyKeyBlock[64];
+        const QC::u8 *nonce = blob + 28;
+        chacha20Block(derivedKey, 0, nonce, polyKeyBlock);
+        QC::u8 polyKey[32];
+        for (int i = 0; i < 32; ++i)
+            polyKey[i] = polyKeyBlock[i];
+
+        QC::u8 calcTag[16];
+        poly1305TagForAead(polyKey, aad, 40, cipher, 32, calcTag);
+        if (!constantTimeEq16(calcTag, tag))
+        {
+            secureZero(polyKeyBlock, sizeof(polyKeyBlock));
+            secureZero(polyKey, sizeof(polyKey));
+            secureZero(calcTag, sizeof(calcTag));
+            return QC::Status::Error;
+        }
+
+        QC::u8 plain[32];
+        for (int i = 0; i < 32; ++i)
+            plain[i] = cipher[i];
+        chacha20Xor(derivedKey, 1, nonce, plain, sizeof(plain));
+        for (int i = 0; i < 32; ++i)
+            outWrapKey[i] = plain[i];
+
+        secureZero(polyKeyBlock, sizeof(polyKeyBlock));
+        secureZero(polyKey, sizeof(polyKey));
+        secureZero(calcTag, sizeof(calcTag));
+        secureZero(plain, sizeof(plain));
+        return QC::Status::Success;
+    }
+
     static QC::Status loadWrapKey(QC::u8 outKey[32], const QK::SecureStore::Config &cfg, bool allowCreate)
     {
-        constexpr const char *kWrapKeyPlainName = "WRAPKEY.BIN";
         constexpr const char *kWrapKeyTpmName = "WRAPKEY.TPM";
 
         const bool tpmEnabled = (cfg.tpmSealWrapKey != nullptr) && (cfg.tpmUnsealWrapKey != nullptr);
@@ -375,31 +628,39 @@ namespace
             return st;
         }
 
-        QC::Vector<QC::u8> keyBuf;
-        QC::Status st = QK::SecureStore::readBlob(kWrapKeyPlainName, keyBuf, cfg);
+        // Non-TPM path: wrap key must be protected under a recovery-code derived key.
+        QC::Vector<QC::u8> kdfBlob;
+        QC::Status st = QK::SecureStore::readBlob(kWrapKeyKdfName, kdfBlob, cfg);
         if (st == QC::Status::Success)
         {
-            if (keyBuf.size() != 32)
+            if (!g_nonTpmDerivedKeySet)
+            {
+                if (kdfBlob.size() > 0)
+                    QC::String::memset(kdfBlob.data(), 0, kdfBlob.size());
+                kdfBlob.clear();
+                return QC::Status::Busy;
+            }
+
+            if (kdfBlob.size() != 88)
+            {
+                if (kdfBlob.size() > 0)
+                    QC::String::memset(kdfBlob.data(), 0, kdfBlob.size());
+                kdfBlob.clear();
                 return QC::Status::Error;
-            for (int i = 0; i < 32; ++i)
-                outKey[i] = keyBuf[i];
-            return QC::Status::Success;
+            }
+
+            st = unwrapWrapKeyKdfBlob(g_nonTpmDerivedKey, kdfBlob.data(), kdfBlob.size(), outKey);
+            if (kdfBlob.size() > 0)
+                QC::String::memset(kdfBlob.data(), 0, kdfBlob.size());
+            kdfBlob.clear();
+            return st;
         }
 
         if (st != QC::Status::NotFound)
             return st;
 
-        if (!allowCreate)
-            return QC::Status::NotFound;
-
-        st = QK::Entropy::fillRandom(outKey, 32);
-        if (st != QC::Status::Success && st != QC::Status::Busy)
-            return st;
-
-        // Persist the wrap key (software fallback). Future TPM-backed sealing can
-        // replace this without changing callers.
-        st = QK::SecureStore::writeBlob(kWrapKeyPlainName, outKey, 32, cfg);
-        return st;
+        (void)allowCreate;
+        return QC::Status::NotFound;
     }
 
     static const char *findChar(const char *s, char c)
@@ -726,6 +987,173 @@ namespace QK
             if (!outWrapKey)
                 return QC::Status::InvalidParam;
             return loadWrapKey(outWrapKey, cfg, true);
+        }
+
+        QC::Status nonTpmUnlockOrInitializeWrapKey(const char *recoveryCode, const Config &cfg)
+        {
+            if (tpm_present(cfg))
+                return QC::Status::NotSupported;
+
+            char norm[96];
+            QC::String::memset(norm, 0, sizeof(norm));
+            const QC::usize normLen = normalizeRecoveryCode(recoveryCode, norm, sizeof(norm));
+            if (normLen == 0)
+                return QC::Status::InvalidParam;
+
+            // If KDF-wrapped key exists, validate recovery code by decrypting it.
+            if (exists(kWrapKeyKdfName, cfg))
+            {
+                QC::Vector<QC::u8> blob;
+                QC::Status st = readBlob(kWrapKeyKdfName, blob, cfg);
+                if (st != QC::Status::Success)
+                    return st;
+                if (blob.size() != 88)
+                {
+                    if (blob.size() > 0)
+                        QC::String::memset(blob.data(), 0, blob.size());
+                    blob.clear();
+                    return QC::Status::Error;
+                }
+
+                // Parse salt + iterations from header.
+                if (blob[0] != kWrapKeyKdfMagic[0] || blob[1] != kWrapKeyKdfMagic[1] ||
+                    blob[2] != kWrapKeyKdfMagic[2] || blob[3] != kWrapKeyKdfMagic[3])
+                {
+                    QC::String::memset(blob.data(), 0, blob.size());
+                    blob.clear();
+                    return QC::Status::Error;
+                }
+
+                const QC::u32 ver = load_le32(blob.data() + 4);
+                if (ver != kWrapKeyKdfVersion)
+                {
+                    QC::String::memset(blob.data(), 0, blob.size());
+                    blob.clear();
+                    return QC::Status::Error;
+                }
+
+                const QC::u32 iterations = load_le32(blob.data() + 8);
+                const QC::u8 *salt = blob.data() + 12;
+
+                QC::u8 derived[32];
+                QC::String::memset(derived, 0, sizeof(derived));
+                pbkdf2HmacSha256_32(reinterpret_cast<const QC::u8 *>(norm), normLen,
+                                   salt, 16,
+                                   iterations,
+                                   derived);
+
+                QC::u8 wrapKeyTest[32];
+                QC::String::memset(wrapKeyTest, 0, sizeof(wrapKeyTest));
+                st = unwrapWrapKeyKdfBlob(derived, blob.data(), blob.size(), wrapKeyTest);
+                secureZero(wrapKeyTest, sizeof(wrapKeyTest));
+
+                if (blob.size() > 0)
+                    QC::String::memset(blob.data(), 0, blob.size());
+                blob.clear();
+                secureZero(norm, sizeof(norm));
+
+                if (st != QC::Status::Success)
+                {
+                    secureZero(derived, sizeof(derived));
+                    return st;
+                }
+
+                for (int i = 0; i < 32; ++i)
+                    g_nonTpmDerivedKey[i] = derived[i];
+                g_nonTpmDerivedKeySet = true;
+                secureZero(derived, sizeof(derived));
+                return QC::Status::Success;
+            }
+
+            // No KDF file yet: create/migrate it.
+            QC::Status st = ensureBaseDir(cfg);
+            if (st != QC::Status::Success)
+                return st;
+
+            QC::u8 wrapKey[32];
+            QC::String::memset(wrapKey, 0, sizeof(wrapKey));
+
+            if (exists(kWrapKeyPlainName, cfg))
+            {
+                QC::Vector<QC::u8> keyBuf;
+                st = readBlob(kWrapKeyPlainName, keyBuf, cfg);
+                if (st != QC::Status::Success)
+                    return st;
+                if (keyBuf.size() != 32)
+                {
+                    if (keyBuf.size() > 0)
+                        QC::String::memset(keyBuf.data(), 0, keyBuf.size());
+                    keyBuf.clear();
+                    return QC::Status::Error;
+                }
+                for (int i = 0; i < 32; ++i)
+                    wrapKey[i] = keyBuf[i];
+                if (keyBuf.size() > 0)
+                    QC::String::memset(keyBuf.data(), 0, keyBuf.size());
+                keyBuf.clear();
+            }
+            else
+            {
+                st = QK::Entropy::fillRandom(wrapKey, sizeof(wrapKey));
+                if (st != QC::Status::Success && st != QC::Status::Busy)
+                    return st;
+            }
+
+            QC::u8 salt[16];
+            QC::u8 nonce[12];
+            QC::Status stSalt = QK::Entropy::fillRandom(salt, sizeof(salt));
+            QC::Status stNonce = QK::Entropy::fillRandom(nonce, sizeof(nonce));
+            if ((stSalt != QC::Status::Success && stSalt != QC::Status::Busy) ||
+                (stNonce != QC::Status::Success && stNonce != QC::Status::Busy))
+            {
+                secureZero(wrapKey, sizeof(wrapKey));
+                secureZero(salt, sizeof(salt));
+                secureZero(nonce, sizeof(nonce));
+                return QC::Status::Error;
+            }
+
+            QC::u8 derived[32];
+            QC::String::memset(derived, 0, sizeof(derived));
+            pbkdf2HmacSha256_32(reinterpret_cast<const QC::u8 *>(norm), normLen,
+                               salt, sizeof(salt),
+                               kWrapKeyKdfDefaultIterations,
+                               derived);
+
+            QC::u8 blobOut[88];
+            QC::String::memset(blobOut, 0, sizeof(blobOut));
+            st = wrapWrapKeyKdfBlob(derived, kWrapKeyKdfDefaultIterations, salt, nonce, wrapKey, blobOut);
+            if (st != QC::Status::Success)
+            {
+                secureZero(wrapKey, sizeof(wrapKey));
+                secureZero(salt, sizeof(salt));
+                secureZero(nonce, sizeof(nonce));
+                secureZero(derived, sizeof(derived));
+                secureZero(norm, sizeof(norm));
+                secureZero(blobOut, sizeof(blobOut));
+                return st;
+            }
+
+            st = writeBlob(kWrapKeyKdfName, blobOut, sizeof(blobOut), cfg);
+            secureZero(blobOut, sizeof(blobOut));
+            secureZero(salt, sizeof(salt));
+            secureZero(nonce, sizeof(nonce));
+            secureZero(wrapKey, sizeof(wrapKey));
+            secureZero(norm, sizeof(norm));
+
+            if (st != QC::Status::Success)
+            {
+                secureZero(derived, sizeof(derived));
+                return st;
+            }
+
+            // Best-effort: remove legacy plaintext key.
+            (void)removeBlob(kWrapKeyPlainName, cfg);
+
+            for (int i = 0; i < 32; ++i)
+                g_nonTpmDerivedKey[i] = derived[i];
+            g_nonTpmDerivedKeySet = true;
+            secureZero(derived, sizeof(derived));
+            return QC::Status::Success;
         }
 
         QC::Status writeSealedBlob(const char *key, const void *data, QC::usize size, const Config &cfg)

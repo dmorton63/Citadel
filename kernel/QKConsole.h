@@ -2,6 +2,7 @@
 
 // QKConsole - Minimal kernel console for interactive commands
 
+#include "QCTypes.h"
 #include "PS2/QKDrvPS2Keyboard.h"
 
 namespace QK
@@ -28,6 +29,11 @@ namespace QK
         // Executes a single command line (same parser/handlers as interactive input).
         // Note: does not synthesize per-character echo; it behaves like Enter was pressed.
         void executeLine(const char *line);
+
+        // Reads a line of input (blocking) into out (NUL-terminated).
+        // When echo is false, typed characters are not printed.
+        // Returns false on invalid params.
+        bool readLineBlocking(char *out, QC::usize outSize, bool echo = true);
 
         void write(const char *msg);
         const char *cwd();

@@ -10,7 +10,6 @@
 #include "QFSVFS.h"
 #include "QFSVolumeManager.h"
 #include "QKMemoryBlockDevice.h"
-#include "QKSecurityCenter.h"
 #include "QKStorageRegistry.h"
 
 #include "IDE/QKDrvIDE.h"
@@ -124,7 +123,6 @@ namespace QK::Boot::Ramdisk
         static void ApplyStartupConfigSideEffects(FLogFn Log)
         {
             QKDrv::IDE::setSharedProbeEnabled(QK::Boot::Config::GetIdeSharedProbeEnabled());
-            QK::SecurityCenter::instance().initialize(QK::Boot::Config::GetSecurityCenterMode());
 
             // Leave SAVETERM policy available, but do not auto-run it here.
             (void)Log;
