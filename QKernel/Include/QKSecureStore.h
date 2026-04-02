@@ -96,10 +96,33 @@ namespace QK
                                    QC::usize size,
                                    const Config &cfg = defaultConfig());
 
+        // Writes a TPM-accelerated sealed blob to baseDir/<key>.
+        //
+        // If a TPM secret sealing provider is available (Config::tpmSealSecret /
+        // Config::tpmUnsealSecret), this seals a fresh per-blob content key via
+        // TPM policy and then encrypts/authenticates the payload with that key.
+        //
+        // If no TPM secret sealing provider is present, falls back to
+        // writeSealedBlob().
+        QC::Status writeTpmSealedBlob(const char *key,
+                                      const void *data,
+                                      QC::usize size,
+                                      const Config &cfg = defaultConfig());
+
         // Reads and verifies a sealed blob from baseDir/<key>.
         QC::Status readSealedBlob(const char *key,
                                   QC::Vector<QC::u8> &out,
                                   const Config &cfg = defaultConfig());
+
+        // Reads a blob written by writeTpmSealedBlob().
+        //
+        // If the stored blob is TPM-accelerated format, TPM secret unseal must
+        // be available or this returns NotSupported.
+        // If the stored blob is the legacy sealed format, it is read via
+        // readSealedBlob().
+        QC::Status readTpmSealedBlob(const char *key,
+                                     QC::Vector<QC::u8> &out,
+                                     const Config &cfg = defaultConfig());
 
         // Reads the current SecureStore wrap key without creating a new one.
         //

@@ -1298,6 +1298,243 @@ namespace QK
             return QC::Status::Success;
         }
 
+        QC::Status writeTpmSealedBlob(const char *key, const void *data, QC::usize size, const Config &cfg)
+        {
+            if (!isValid83Key(key) || (!data && size != 0))
+                return QC::Status::InvalidParam;
+
+            // If TPM secret sealing isn't wired, fall back to the existing sealed blob path.
+            if (!cfg.tpmSealSecret || !cfg.tpmUnsealSecret)
+                return writeSealedBlob(key, data, size, cfg);
+
+            // Header: magic(4) + ver(4) + plainSize(4) + sealedKeySize(4) + nonce(12) + tag(16)
+            constexpr QC::u8 kMagic[4] = {'T', 'S', 'B', '1'};
+            constexpr QC::u32 kVersion = 1;
+            const QC::usize headerSize = 4 + 4 + 4 + 4 + 12 + 16;
+
+            // Generate per-blob content key and seal it via TPM policy.
+            QC::u8 contentKey[32];
+            QC::String::memset(contentKey, 0, sizeof(contentKey));
+            QC::Status st = QK::Entropy::fillRandom(contentKey, sizeof(contentKey));
+            if (st != QC::Status::Success && st != QC::Status::Busy)
+                return st;
+
+            QC::Vector<QC::u8> sealedKey;
+            st = seal_secret(contentKey, sizeof(contentKey), sealedKey, cfg);
+            if (st != QC::Status::Success)
+            {
+                QC::String::memset(contentKey, 0, sizeof(contentKey));
+                return st;
+            }
+
+            if (sealedKey.size() == 0 || sealedKey.size() > 4096)
+            {
+                QC::String::memset(contentKey, 0, sizeof(contentKey));
+                if (sealedKey.size() > 0)
+                    QC::String::memset(sealedKey.data(), 0, sealedKey.size());
+                sealedKey.clear();
+                return QC::Status::Error;
+            }
+
+            QC::Vector<QC::u8> blob;
+            blob.resize(headerSize + sealedKey.size() + size);
+
+            QC::u8 *hdr = blob.data();
+            hdr[0] = kMagic[0];
+            hdr[1] = kMagic[1];
+            hdr[2] = kMagic[2];
+            hdr[3] = kMagic[3];
+            store_le32(hdr + 4, kVersion);
+            store_le32(hdr + 8, static_cast<QC::u32>(size));
+            store_le32(hdr + 12, static_cast<QC::u32>(sealedKey.size()));
+
+            QC::u8 *nonce = hdr + 16;
+            st = QK::Entropy::fillRandom(nonce, 12);
+            if (st != QC::Status::Success && st != QC::Status::Busy)
+            {
+                QC::String::memset(contentKey, 0, sizeof(contentKey));
+                QC::String::memset(blob.data(), 0, blob.size());
+                blob.clear();
+                QC::String::memset(sealedKey.data(), 0, sealedKey.size());
+                sealedKey.clear();
+                return st;
+            }
+
+            // Copy sealedKey and plaintext into the blob.
+            QC::usize off = headerSize;
+            for (QC::usize i = 0; i < sealedKey.size(); ++i)
+                hdr[off + i] = sealedKey[i];
+            off += sealedKey.size();
+
+            QC::u8 *cipher = hdr + off;
+            const QC::u8 *plain = static_cast<const QC::u8 *>(data);
+            for (QC::usize i = 0; i < size; ++i)
+                cipher[i] = plain[i];
+
+            // AEAD key for Poly1305: chacha20 block counter=0
+            QC::u8 polyKeyBlock[64];
+            chacha20Block(contentKey, 0, nonce, polyKeyBlock);
+            QC::u8 polyKey[32];
+            for (int i = 0; i < 32; ++i)
+                polyKey[i] = polyKeyBlock[i];
+
+            // Encrypt using counter=1
+            chacha20Xor(contentKey, 1, nonce, cipher, size);
+
+            // Tag over AAD = magic||ver||plainSize||sealedKeySize||nonce
+            const QC::u8 *aad = hdr;
+            const QC::usize aadLen = 4 + 4 + 4 + 4 + 12;
+            QC::u8 tag[16];
+            poly1305TagForAead(polyKey, aad, aadLen, cipher, size, tag);
+
+            // Store tag
+            QC::u8 *tagOut = hdr + 28;
+            for (int i = 0; i < 16; ++i)
+                tagOut[i] = tag[i];
+
+            st = writeBlob(key, blob.data(), blob.size(), cfg);
+
+            QC::String::memset(contentKey, 0, sizeof(contentKey));
+            QC::String::memset(polyKeyBlock, 0, sizeof(polyKeyBlock));
+            QC::String::memset(polyKey, 0, sizeof(polyKey));
+            QC::String::memset(tag, 0, sizeof(tag));
+            if (sealedKey.size() > 0)
+                QC::String::memset(sealedKey.data(), 0, sealedKey.size());
+            sealedKey.clear();
+            if (blob.size() > 0)
+                QC::String::memset(blob.data(), 0, blob.size());
+            blob.clear();
+            return st;
+        }
+
+        QC::Status readTpmSealedBlob(const char *key, QC::Vector<QC::u8> &out, const Config &cfg)
+        {
+            if (!isValid83Key(key))
+                return QC::Status::InvalidParam;
+
+            QC::Vector<QC::u8> blob;
+            QC::Status st = readBlob(key, blob, cfg);
+            if (st != QC::Status::Success)
+                return st;
+
+            if (blob.size() < 4)
+                return QC::Status::Error;
+
+            // If this isn't a TPM-accelerated blob, fall back to legacy sealed blob read.
+            if (!(blob[0] == 'T' && blob[1] == 'S' && blob[2] == 'B' && blob[3] == '1'))
+            {
+                if (blob.size() > 0)
+                    QC::String::memset(blob.data(), 0, blob.size());
+                blob.clear();
+                return readSealedBlob(key, out, cfg);
+            }
+
+            // Need TPM secret unseal to read TPM-accelerated blobs.
+            if (!cfg.tpmUnsealSecret)
+            {
+                if (blob.size() > 0)
+                    QC::String::memset(blob.data(), 0, blob.size());
+                blob.clear();
+                return QC::Status::NotSupported;
+            }
+
+            constexpr QC::usize headerSize = 4 + 4 + 4 + 4 + 12 + 16;
+            if (blob.size() < headerSize)
+                return QC::Status::Error;
+
+            const QC::u8 *hdr = blob.data();
+            const QC::u32 ver = load_le32(hdr + 4);
+            if (ver != 1)
+                return QC::Status::NotSupported;
+
+            const QC::u32 plainSize32 = load_le32(hdr + 8);
+            const QC::u32 sealedKeySize32 = load_le32(hdr + 12);
+            const QC::usize plainSize = static_cast<QC::usize>(plainSize32);
+            const QC::usize sealedKeySize = static_cast<QC::usize>(sealedKeySize32);
+
+            if (sealedKeySize == 0 || sealedKeySize > 4096)
+                return QC::Status::Error;
+
+            const QC::usize expected = headerSize + sealedKeySize + plainSize;
+            if (blob.size() != expected)
+                return QC::Status::Error;
+
+            const QC::u8 *nonce = hdr + 16;
+            const QC::u8 *tagIn = hdr + 28;
+            const QC::u8 *sealedKey = hdr + headerSize;
+            const QC::u8 *cipher = sealedKey + sealedKeySize;
+
+            QC::Vector<QC::u8> sealedKeyVec;
+            sealedKeyVec.resize(sealedKeySize);
+            for (QC::usize i = 0; i < sealedKeySize; ++i)
+                sealedKeyVec[i] = sealedKey[i];
+
+            QC::u8 contentKey[32];
+            QC::String::memset(contentKey, 0, sizeof(contentKey));
+            QC::usize contentKeyLen = 0;
+            st = unseal_secret(sealedKeyVec, contentKey, sizeof(contentKey), &contentKeyLen, cfg);
+
+            if (sealedKeyVec.size() > 0)
+                QC::String::memset(sealedKeyVec.data(), 0, sealedKeyVec.size());
+            sealedKeyVec.clear();
+
+            if (st != QC::Status::Success)
+            {
+                QC::String::memset(contentKey, 0, sizeof(contentKey));
+                if (blob.size() > 0)
+                    QC::String::memset(blob.data(), 0, blob.size());
+                blob.clear();
+                return st;
+            }
+            if (contentKeyLen != 32)
+            {
+                QC::String::memset(contentKey, 0, sizeof(contentKey));
+                if (blob.size() > 0)
+                    QC::String::memset(blob.data(), 0, blob.size());
+                blob.clear();
+                return QC::Status::Error;
+            }
+
+            QC::u8 polyKeyBlock[64];
+            chacha20Block(contentKey, 0, nonce, polyKeyBlock);
+            QC::u8 polyKey[32];
+            for (int i = 0; i < 32; ++i)
+                polyKey[i] = polyKeyBlock[i];
+
+            const QC::u8 *aad = hdr;
+            const QC::usize aadLen = 4 + 4 + 4 + 4 + 12;
+            QC::u8 tagCalc[16];
+            poly1305TagForAead(polyKey, aad, aadLen, cipher, plainSize, tagCalc);
+
+            if (!constantTimeEq16(tagIn, tagCalc))
+            {
+                QC::String::memset(contentKey, 0, sizeof(contentKey));
+                QC::String::memset(polyKeyBlock, 0, sizeof(polyKeyBlock));
+                QC::String::memset(polyKey, 0, sizeof(polyKey));
+                QC::String::memset(tagCalc, 0, sizeof(tagCalc));
+                if (blob.size() > 0)
+                    QC::String::memset(blob.data(), 0, blob.size());
+                blob.clear();
+                return QC::Status::Error;
+            }
+
+            out.clear();
+            out.resize(plainSize);
+            for (QC::usize i = 0; i < plainSize; ++i)
+                out[i] = cipher[i];
+            chacha20Xor(contentKey, 1, nonce, out.data(), plainSize);
+
+            QC::String::memset(contentKey, 0, sizeof(contentKey));
+            QC::String::memset(polyKeyBlock, 0, sizeof(polyKeyBlock));
+            QC::String::memset(polyKey, 0, sizeof(polyKey));
+            QC::String::memset(tagCalc, 0, sizeof(tagCalc));
+
+            if (blob.size() > 0)
+                QC::String::memset(blob.data(), 0, blob.size());
+            blob.clear();
+            return QC::Status::Success;
+        }
+
         QC::Status removeBlob(const char *key, const Config &cfg)
         {
             if (!isValid83Key(key))
