@@ -27,6 +27,20 @@ namespace QSC
         QC::usize size = 32;
     };
 
+    // Task_Flow / QQuantum observability snapshot.
+    // This is a read-only view intended for policy and diagnostics.
+    struct TaskFlowMetrics
+    {
+        QC::u32 pending = 0;
+        QC::u32 running = 0;
+        QC::u32 completed = 0;
+        QC::u64 totalExecuted = 0;
+
+        QC::u64 memoHits = 0;
+        QC::u64 memoMisses = 0;
+        QC::u64 memoRefused = 0;
+    };
+
     // Random provider boundary (kernel provides entropy source).
     struct RandomProvider
     {
@@ -82,6 +96,9 @@ namespace QSC
 
         // Flow policy used by QQ::Executor.
         QQ::FlowPolicyFn flowPolicy() const { return m_flowPolicy; }
+
+        // Task_Flow metrics snapshot.
+        TaskFlowMetrics taskFlowMetrics() const;
 
         // SST: minimal public surface (stubs until provisioning/persistence is wired).
         SstStatus sstStatus() const;

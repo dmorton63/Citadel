@@ -473,6 +473,22 @@ namespace QSC
         m_flowPolicy = (m_mode == Mode::Enforce) ? &securityCenterFlowPolicy : nullptr;
     }
 
+    TaskFlowMetrics SecurityCenter::taskFlowMetrics() const
+    {
+        TaskFlowMetrics m;
+
+        // Best-effort snapshot. Executor may not be initialized yet; counters will be zero.
+        auto &ex = QQ::Executor::instance();
+        m.pending = static_cast<QC::u32>(ex.pendingCount());
+        m.running = static_cast<QC::u32>(ex.runningCount());
+        m.completed = static_cast<QC::u32>(ex.completedCount());
+        m.totalExecuted = ex.totalTasksExecuted();
+        m.memoHits = ex.memoizationHits();
+        m.memoMisses = ex.memoizationMisses();
+        m.memoRefused = ex.memoizationRefused();
+        return m;
+    }
+
     SstStatus SecurityCenter::sstStatus() const
     {
         SstStatus st;

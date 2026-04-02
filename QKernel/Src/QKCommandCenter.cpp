@@ -27,6 +27,8 @@
 #include "QQExecutor.h"
 #include "QKSecureStore.h"
 #include "QKSecurityCenter.h"
+
+#include "QSCSecurityCenter.h"
 #include "QKSystemPump.h"
 
 #include "QNetStack.h"
@@ -3073,6 +3075,25 @@ namespace QK::CmdCenter
             (void)appendString(secLine, sizeof(secLine), " measured=");
             (void)appendU64Dec(secLine, sizeof(secLine), static_cast<QC::u64>(sec.measuredArtifactCount));
             ctx.writeLine(secLine);
+
+            const auto tf = QSC::SecurityCenter::instance().taskFlowMetrics();
+            char tfLine[256];
+            QC::String::memset(tfLine, 0, sizeof(tfLine));
+            (void)appendString(tfLine, sizeof(tfLine), "TaskFlow: pending=");
+            (void)appendU64Dec(tfLine, sizeof(tfLine), static_cast<QC::u64>(tf.pending));
+            (void)appendString(tfLine, sizeof(tfLine), " running=");
+            (void)appendU64Dec(tfLine, sizeof(tfLine), static_cast<QC::u64>(tf.running));
+            (void)appendString(tfLine, sizeof(tfLine), " completed=");
+            (void)appendU64Dec(tfLine, sizeof(tfLine), static_cast<QC::u64>(tf.completed));
+            (void)appendString(tfLine, sizeof(tfLine), " total=");
+            (void)appendU64Dec(tfLine, sizeof(tfLine), tf.totalExecuted);
+            (void)appendString(tfLine, sizeof(tfLine), " memo(h/m/r)=");
+            (void)appendU64Dec(tfLine, sizeof(tfLine), tf.memoHits);
+            (void)appendString(tfLine, sizeof(tfLine), "/");
+            (void)appendU64Dec(tfLine, sizeof(tfLine), tf.memoMisses);
+            (void)appendString(tfLine, sizeof(tfLine), "/");
+            (void)appendU64Dec(tfLine, sizeof(tfLine), tf.memoRefused);
+            ctx.writeLine(tfLine);
 
             if (seed.moduleCount > 0)
             {
