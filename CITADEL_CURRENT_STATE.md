@@ -1,6 +1,6 @@
 # CITADEL — Current Working State (Single Source of Truth)
 
-Generated: 2026-03-28
+Generated: 2026-04-01
 
 This document is intended to be the one place to answer:
 - What is working right now (and at what maturity level)
@@ -25,7 +25,7 @@ Preferred attribution (stable):
 - ~April 10, 2025 — Initial brainstorming begins under the early working name CopilotOS.
 - ~April 2025 — Early prototypes and exploratory operating‑system work begin.
 - 2026‑02‑09 — First verifiable commit in the public Git repository.
-- 2026‑03‑26 — Latest commit observed during documentation generation.
+- 2026‑04‑01 — Latest commit observed during documentation generation.
 
 **Note**
 The April 2025 dates refer to private prototypes, scratch work, and early design experiments that predate the public repository.
@@ -160,6 +160,18 @@ The UI runtime is designed to apply multiple layers:
 
 See: [CITADEL_UI_RUNTIME.md](CITADEL_UI_RUNTIME.md).
 
+### SecureStore + bootstrapping (machine anchor)
+Citadel has a kernel-provided SecureStore used for protected persistence under `/system/sc`.
+
+Current anchor behavior:
+- TPM present: the machine anchor is sealed via TPM policy and stored as `WRAPKEY.TPM`.
+- No TPM: boot prompts for a recovery code; a KDF-derived key unwraps `WRAPKEY.KDF` (legacy plaintext `WRAPKEY.BIN` is migrated away).
+
+Key abstractions that exist in code today:
+- `seal_secret()` / `unseal_secret()` (TPM-backed when available; stubbed fallback)
+- TAS (TPM Anchor Secret): explicitly surfaced as `readTas()` / `getOrCreateTas()` and used as the input to SRK derivation
+- TPM-accelerated sealed blobs: `writeTpmSealedBlob()` / `readTpmSealedBlob()` seal a per-blob content key via TPM and AEAD-wrap the payload (fallback to software sealing when TPM isn’t available)
+
 ---
 
 ## 3. What Works Today (Maturity Snapshot)
@@ -189,6 +201,8 @@ Status labels used below:
 
 ### Security Center (SC)
 - SC concepts + hooks + flow controls: **Partial** (actively being built; evolving)
+- Task_Flow metrics exposure to SC: **Working** (counters surfaced for diagnostics/policy)
+- SRK derivation from the machine anchor (TAS): **Working** (used for SST wrapping boundary)
 
 ### “AI” / Task_Flow / Memoization
 - Task_Flow concept + related commands/helpers: **Partial/Design** (exists in codebase + docs; ongoing)
@@ -273,7 +287,11 @@ Citadel is used primarily under QEMU for bring-up; these are the common devices 
 - Intel E1000 NIC: supported (commonly used in QEMU)
 
 ### Trusted Platform Module (TPM)
-- TPM2 emulation is used in development (via QEMU + swtpm). Policy and sealing abstractions are still evolving.
+- TPM2 emulation is used in development (via QEMU + swtpm).
+- TPM-backed sealing exists for:
+  - SecureStore anchor wrap key (`WRAPKEY.TPM`)
+  - Generic secret sealing (`seal_secret()` / `unseal_secret()`)
+  - TPM-accelerated sealed blobs (`writeTpmSealedBlob()` / `readTpmSealedBlob()`)
 
 ---
 
