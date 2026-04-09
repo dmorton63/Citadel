@@ -120,6 +120,8 @@ namespace QC
         {
             QC::u32 specVersion = 0;
             QC::String id;
+            QC::String stableIdentity;
+            QC::String signatureHashHex;
             QC::String name;
             QC::u32 version = 0;
             Mode mode = Mode::Debug;
@@ -139,11 +141,33 @@ namespace QC
             static constexpr QC::u32 MAX_LOCALS = 512;
             static constexpr QC::u32 MAX_NAME_LEN = 64;
             static constexpr QC::u32 MAX_FILE_BYTES = 128 * 1024;
+            static constexpr QC::u32 CANONICAL_INPUT_FORMAT_VERSION = 1;
+            static constexpr QC::u32 HASH_BYTES = 32;
 
             static bool loadFromText(const char *jsonText, Function &outFn, Error &outErr);
             static bool loadFromVfsPath(const char *path, Function &outFn, Error &outErr);
 
             static bool validate(const QC::JSON::Value &root, Function &outFn, Error &outErr);
+
+            static bool buildStableIdentity(const Function &fn, QC::String &outIdentity, Error &outErr);
+
+            static bool computeSignatureHash(const Function &fn,
+                                             QC::u8 outDigest[HASH_BYTES],
+                                             QC::String &outHex,
+                                             Error &outErr);
+
+            static bool encodeCanonicalInputs(const Function &fn,
+                                              const TypedValue *inputs,
+                                              QC::usize inputCount,
+                                              QC::Vector<QC::u8> &outBytes,
+                                              Error &outErr);
+
+            static bool computeInputHash(const Function &fn,
+                                         const TypedValue *inputs,
+                                         QC::usize inputCount,
+                                         QC::u8 outDigest[HASH_BYTES],
+                                         QC::String &outHex,
+                                         Error &outErr);
 
             static bool execute(const Function &fn,
                                 const TypedValue *inputs,

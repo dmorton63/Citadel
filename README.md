@@ -170,7 +170,15 @@ cmake -B build -S .
 # Build
 cmake --build build
 
-# Output: build/citadel.elf, build/citadel.bin
+# Output: build/kernel/citadel.elf, build/citadel.bin
+```
+
+The full packaging flow via `./build.sh` emits separated artifacts before ISO staging:
+
+```text
+build/artifacts/kernel/citadel.elf
+build/artifacts/kernel/citadel.bin
+build/artifacts/modules/ramdisk.img
 ```
 
 ### Build Tasks (VS Code)

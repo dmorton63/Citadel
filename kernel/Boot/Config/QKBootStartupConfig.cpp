@@ -16,6 +16,12 @@ namespace QK::Boot::Config
         static QK::SecurityCenter::Mode g_ScMode = QK::SecurityCenter::Mode::Bypass;
         static bool g_IdeSharedProbeEnabled = false;
 
+        static bool g_HasCmdlineStartupModeOverride = false;
+        static StartupMode g_CmdlineStartupModeOverride = StartupMode::Desktop;
+
+        static char g_CmdlineRecoveryCode[96] = {0};
+        static bool g_HasCmdlineRecoveryCode = false;
+
         static char g_BootSaveTermValue[256] = {0};
         static bool g_PowerOffAfterSaveTerm = false;
         static bool g_BootSaveTermDone = false;
@@ -27,6 +33,11 @@ namespace QK::Boot::Config
         }
 
         static bool isWhitespace(char ch)
+        {
+            return ch == ' ' || ch == '\t' || ch == '\r' || ch == '\n';
+        }
+
+        static bool isSpaceOnly(char ch)
         {
             return ch == ' ' || ch == '\t' || ch == '\r' || ch == '\n';
         }
@@ -115,7 +126,6 @@ namespace QK::Boot::Config
         {
             if (!value || *value == '\0')
                 return StartupMode::Desktop;
-
             if (equalsIgnoreCase(value, "DESKTOP"))
                 return StartupMode::Desktop;
             if (equalsIgnoreCase(value, "TERMINAL"))
@@ -135,6 +145,34 @@ namespace QK::Boot::Config
             return StartupMode::Desktop;
         }
 
+        static bool tokenEqualsIgnoreCase(const char *begin, const char *end, const char *lit)
+        {
+            if (!begin || !end || end < begin || !lit)
+                return false;
+
+            const char *p = begin;
+            const char *q = lit;
+            while (p < end && *q)
+            {
+                char a = toLowerChar(*p++);
+                char b = toLowerChar(*q++);
+                if (a != b)
+                    return false;
+            }
+
+            return (p == end) && (*q == '\0');
+        }
+
+        static void setCmdlineStartupModeOverride(FLogFn Log, StartupMode Mode)
+        {
+            g_HasCmdlineStartupModeOverride = true;
+            g_CmdlineStartupModeOverride = Mode;
+
+            LogStr(Log, "Startup mode override from cmdline: ");
+            LogStr(Log, StartupModeName(Mode));
+            LogStr(Log, "\r\n");
+        }
+
         static bool parseBoolValue(const char *value, bool defaultValue)
         {
             if (!value || *value == '\0')
@@ -149,6 +187,15 @@ namespace QK::Boot::Config
 
             return defaultValue;
         }
+
+            static bool devRecoveryCodeOverrideAllowed()
+            {
+        #if defined(CITADEL_PRODUCTION) && (CITADEL_PRODUCTION != 0)
+                return false;
+        #else
+                return true;
+        #endif
+            }
 
         static QK::SecurityCenter::Mode parseScModeValue(FLogFn Log, const char *value)
         {
@@ -339,11 +386,195 @@ namespace QK::Boot::Config
         LogStr(Log, "IDE_SHARED loaded: ");
         LogStr(Log, g_IdeSharedProbeEnabled ? "ON" : "OFF");
         LogStr(Log, "\r\n");
+
+        if (g_HasCmdlineStartupModeOverride)
+        {
+            g_StartupMode = g_CmdlineStartupModeOverride;
+            LogStr(Log, "Startup mode forced by cmdline: ");
+            LogStr(Log, StartupModeName(g_StartupMode));
+            LogStr(Log, "\r\n");
+        }
+
+        // Apply default console access policy per startup mode.
+        // Keep a conservative default (user) unless the operator explicitly elevates.
+        QK::Console::setRole(QC::Cmd::AccessLevel::User);
+
+        // User-facing guidance.
+        if (g_StartupMode == StartupMode::Terminal)
+        {
+            LogStr(Log, "\r\n=== TERMINAL MODE ===\r\n");
+            LogStr(Log, "Role: user\r\n");
+            LogStr(Log, "- View commands: help\r\n");
+            LogStr(Log, "- Start desktop: startx\r\n");
+            LogStr(Log, "- File changes require admin\r\n");
+            LogStr(Log, "- Enable admin commands: admin enable (run twice)\r\n");
+            LogStr(Log, "\r\n");
+        }
+        else if (g_StartupMode == StartupMode::Recovery)
+        {
+            LogStr(Log, "\r\n=== RESCUE MODE (RECOVERY) ===\r\n");
+            LogStr(Log, "Role: user (protected)\r\n");
+            LogStr(Log, "- View commands: help\r\n");
+            LogStr(Log, "- Power off: shutdown\r\n");
+            LogStr(Log, "- File changes require system\r\n");
+            LogStr(Log, "- Enable system role: system enable (run twice)\r\n");
+            LogStr(Log, "- Guided restore: recover config|desktop|services\r\n");
+            LogStr(Log, "- Validate configs: validate\r\n");
+            LogStr(Log, "- Reboot: reboot now\r\n");
+            LogStr(Log, "\r\n");
+        }
+    }
+
+    void LoadFromCmdline(FLogFn Log, const char *Cmdline)
+    {
+        if (!Cmdline || *Cmdline == '\0')
+            return;
+
+        const char *p = Cmdline;
+        while (*p)
+        {
+            while (*p && isSpaceOnly(*p))
+                ++p;
+            if (!*p)
+                break;
+
+            const char *tokBegin = p;
+            while (*p && !isSpaceOnly(*p))
+                ++p;
+            const char *tokEnd = p;
+
+            // Bare flags.
+            if (tokenEqualsIgnoreCase(tokBegin, tokEnd, "terminal"))
+            {
+                setCmdlineStartupModeOverride(Log, StartupMode::Terminal);
+                continue;
+            }
+            if (tokenEqualsIgnoreCase(tokBegin, tokEnd, "safe"))
+            {
+                setCmdlineStartupModeOverride(Log, StartupMode::Safe);
+                continue;
+            }
+            if (tokenEqualsIgnoreCase(tokBegin, tokEnd, "recovery") || tokenEqualsIgnoreCase(tokBegin, tokEnd, "rescue"))
+            {
+                setCmdlineStartupModeOverride(Log, StartupMode::Recovery);
+                continue;
+            }
+            if (tokenEqualsIgnoreCase(tokBegin, tokEnd, "installer"))
+            {
+                setCmdlineStartupModeOverride(Log, StartupMode::Installer);
+                continue;
+            }
+            if (tokenEqualsIgnoreCase(tokBegin, tokEnd, "network"))
+            {
+                setCmdlineStartupModeOverride(Log, StartupMode::Network);
+                continue;
+            }
+            if (tokenEqualsIgnoreCase(tokBegin, tokEnd, "desktop"))
+            {
+                setCmdlineStartupModeOverride(Log, StartupMode::Desktop);
+                continue;
+            }
+
+            // key=value.
+            const char *eq = tokBegin;
+            while (eq < tokEnd && *eq != '=')
+                ++eq;
+            if (eq >= tokEnd || *eq != '=')
+                continue;
+
+            const char *keyBegin = tokBegin;
+            const char *keyEnd = eq;
+            const char *valBegin = eq + 1;
+            const char *valEnd = tokEnd;
+            if (valBegin >= valEnd)
+                continue;
+
+            if (tokenEqualsIgnoreCase(keyBegin, keyEnd, "citadel.mode") || tokenEqualsIgnoreCase(keyBegin, keyEnd, "citadel.startup"))
+            {
+                char valBuf[32];
+                QC::usize n = static_cast<QC::usize>(valEnd - valBegin);
+                if (n >= sizeof(valBuf))
+                    n = sizeof(valBuf) - 1;
+                QC::String::memcpy(valBuf, valBegin, n);
+                valBuf[n] = '\0';
+                setCmdlineStartupModeOverride(Log, parseStartupModeValue(Log, valBuf));
+                continue;
+            }
+
+            if (tokenEqualsIgnoreCase(keyBegin, keyEnd, "citadel.recovery_code"))
+            {
+                if (!devRecoveryCodeOverrideAllowed())
+                {
+                    LogStr(Log, "Ignoring cmdline recovery_code override in production build\r\n");
+                    continue;
+                }
+
+                QC::usize n = static_cast<QC::usize>(valEnd - valBegin);
+                if (n >= sizeof(g_CmdlineRecoveryCode))
+                    n = sizeof(g_CmdlineRecoveryCode) - 1;
+
+                if (n == 0)
+                {
+                    g_CmdlineRecoveryCode[0] = '\0';
+                    g_HasCmdlineRecoveryCode = false;
+                    continue;
+                }
+
+                QC::String::memcpy(g_CmdlineRecoveryCode, valBegin, n);
+                g_CmdlineRecoveryCode[n] = '\0';
+                g_HasCmdlineRecoveryCode = true;
+                LogStr(Log, "Dev cmdline recovery_code override loaded\r\n");
+            }
+        }
     }
 
     StartupMode GetStartupMode()
     {
         return g_StartupMode;
+    }
+
+    void SetStartupMode(StartupMode Mode)
+    {
+        g_StartupMode = Mode;
+    }
+
+    QC::Status PersistStartupMode(StartupMode Mode, FLogFn Log)
+    {
+        g_StartupMode = Mode;
+
+        QFS::File *file = QFS::VFS::instance().open("/startup.cfg",
+                                                    QFS::OpenMode::Write | QFS::OpenMode::Create | QFS::OpenMode::Truncate);
+        if (!file)
+            return QC::Status::Error;
+
+        char line[96];
+        QC::String::memset(line, 0, sizeof(line));
+        QC::String::strncpy(line, "MODE ", sizeof(line) - 1);
+        QC::usize used = QC::String::strlen(line);
+        QC::String::strncpy(line + used, StartupModeName(Mode), sizeof(line) - 1 - used);
+        used = QC::String::strlen(line);
+        if (used + 1 < sizeof(line))
+        {
+            line[used++] = '\n';
+            line[used] = '\0';
+        }
+
+        const QC::usize total = QC::String::strlen(line);
+        QC::usize off = 0;
+        while (off < total)
+        {
+            const QC::isize n = file->write(line + off, total - off);
+            if (n <= 0)
+            {
+                QFS::VFS::instance().close(file);
+                return QC::Status::Error;
+            }
+            off += static_cast<QC::usize>(n);
+        }
+
+        QFS::VFS::instance().close(file);
+        LogStr(Log, "startup.cfg updated\r\n");
+        return QC::Status::Success;
     }
 
     QK::SecurityCenter::Mode GetSecurityCenterMode()
@@ -354,6 +585,29 @@ namespace QK::Boot::Config
     bool GetIdeSharedProbeEnabled()
     {
         return g_IdeSharedProbeEnabled;
+    }
+
+    bool TryConsumeDevRecoveryCode(char *out, QC::usize outCap)
+    {
+        if (!out || outCap == 0)
+            return false;
+
+        out[0] = '\0';
+
+        if (!g_HasCmdlineRecoveryCode || g_CmdlineRecoveryCode[0] == '\0')
+            return false;
+
+        const QC::usize n = stringLength(g_CmdlineRecoveryCode);
+        if (n + 1 > outCap)
+            return false;
+
+        QC::String::memcpy(out, g_CmdlineRecoveryCode, n);
+        out[n] = '\0';
+
+        // One-shot consume and wipe.
+        QC::String::memset(g_CmdlineRecoveryCode, 0, sizeof(g_CmdlineRecoveryCode));
+        g_HasCmdlineRecoveryCode = false;
+        return true;
     }
 
     void BootSaveTermOnceIfConfigured(FLogFn Log)

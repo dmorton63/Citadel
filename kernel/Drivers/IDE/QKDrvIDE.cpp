@@ -19,6 +19,18 @@ namespace
     static bool g_sharedProbeEnabled = false;
     static bool g_sharedProbeCompleted = false;
     static bool g_systemProbeCompleted = false;
+        static bool g_dataProbeCompleted = false;
+
+        struct IdeBinding
+        {
+            QC::u16 base = 0;
+            QC::u16 ctrl = 0;
+            bool slave = false;
+            bool valid = false;
+        };
+
+        static IdeBinding g_sharedBinding{};
+        static IdeBinding g_systemBinding{};
 
     constexpr QC::u16 kPrimaryBase = 0x1F0;
     constexpr QC::u16 kPrimaryCtrl = 0x3F6;
@@ -600,8 +612,16 @@ namespace
         return false;
     }
 
-    static bool tryRegisterAsShared(QC::u16 base, QC::u16 ctrl, bool slave)
+    static bool tryRegisterVolume(QC::u16 base,
+                                  QC::u16 ctrl,
+                                  bool slave,
+                                  const char *volumeName,
+                                  const char *mountPath,
+                                  IdeBinding *boundOut)
     {
+        if (!volumeName || !mountPath)
+            return false;
+
         QC::u16 id[256];
         if (!identify(base, ctrl, slave, id))
             return false;
@@ -640,8 +660,8 @@ namespace
         }
 
         QKStorage::BlockDeviceRegistration reg{};
-        reg.name = "QFS_SHARED";
-        reg.mountPath = "/shared";
+        reg.name = volumeName;
+        reg.mountPath = mountPath;
         reg.fsKind = QFS::FileSystemKind::FAT_AUTO;
         reg.device = mountDev;
         reg.autoMount = true;
@@ -649,71 +669,35 @@ namespace
         QC::Status st = QKStorage::registerBlockDevice(reg);
         if (st == QC::Status::Success || st == QC::Status::Busy)
         {
-            QC_LOG_INFO("QKDrvIDE", "Registered shared volume (base=%x ctrl=%x %s, offset=%llu)",
-                        base, ctrl, slave ? "slave" : "master", static_cast<unsigned long long>(offset));
+            QC_LOG_INFO("QKDrvIDE", "Registered volume %s at %s (base=%x ctrl=%x %s, offset=%llu)",
+                        volumeName,
+                        mountPath,
+                        base,
+                        ctrl,
+                        slave ? "slave" : "master",
+                        static_cast<unsigned long long>(offset));
+            if (boundOut)
+            {
+                boundOut->base = base;
+                boundOut->ctrl = ctrl;
+                boundOut->slave = slave;
+                boundOut->valid = true;
+            }
             return true;
         }
 
-        QC_LOG_WARN("QKDrvIDE", "Failed to register shared volume (status=%d)", static_cast<int>(st));
+        QC_LOG_WARN("QKDrvIDE", "Failed to register volume %s (status=%d)", volumeName, static_cast<int>(st));
         return false;
+    }
+
+    static bool tryRegisterAsShared(QC::u16 base, QC::u16 ctrl, bool slave)
+    {
+        return tryRegisterVolume(base, ctrl, slave, "QFS_SHARED", "/shared", &g_sharedBinding);
     }
 
     static bool tryRegisterAsSystem(QC::u16 base, QC::u16 ctrl, bool slave)
     {
-        QC::u16 id[256];
-        if (!identify(base, ctrl, slave, id))
-            return false;
-
-        QC::u32 sectors = sectorCountFromIdentify(id);
-        if (sectors == 0)
-        {
-            const QC::u32 s28 = sectorCount28FromIdentify(id);
-            const QC::u64 s48 = static_cast<QC::u64>(id[100]) |
-                                (static_cast<QC::u64>(id[101]) << 16) |
-                                (static_cast<QC::u64>(id[102]) << 32) |
-                                (static_cast<QC::u64>(id[103]) << 48);
-            QC_LOG_WARN("QKDrvIDE", "IDENTIFY ok but sectorCount=0 (base=%x ctrl=%x %s s28=%u s48=%llu)",
-                        base, ctrl, slave ? "slave" : "master", s28, static_cast<unsigned long long>(s48));
-            return false;
-        }
-
-        QC_LOG_INFO("QKDrvIDE", "IDENTIFY ok (base=%x ctrl=%x %s sectors=%u)",
-                    base, ctrl, slave ? "slave" : "master", sectors);
-
-        auto *rawDev = new AtaPioBlockDevice(base, ctrl, slave, sectors);
-
-        QC::u64 offset = 0;
-        QC::u64 size = 0;
-        if (!findFatPartition(rawDev, offset, size))
-        {
-            QC_LOG_INFO("QKDrvIDE", "Disk present but no FAT volume found (base=%x ctrl=%x %s)",
-                        base, ctrl, slave ? "slave" : "master");
-            return false;
-        }
-
-        QFS::BlockDevice *mountDev = rawDev;
-        if (offset != 0 || size != rawDev->sectorCount())
-        {
-            mountDev = new OffsetBlockDevice(rawDev, offset, size);
-        }
-
-        QKStorage::BlockDeviceRegistration reg{};
-        reg.name = "QFS_SYSTEM";
-        reg.mountPath = "/system";
-        reg.fsKind = QFS::FileSystemKind::FAT_AUTO;
-        reg.device = mountDev;
-        reg.autoMount = true;
-
-        QC::Status st = QKStorage::registerBlockDevice(reg);
-        if (st == QC::Status::Success || st == QC::Status::Busy)
-        {
-            QC_LOG_INFO("QKDrvIDE", "Registered system volume (base=%x ctrl=%x %s, offset=%llu)",
-                        base, ctrl, slave ? "slave" : "master", static_cast<unsigned long long>(offset));
-            return true;
-        }
-
-        QC_LOG_WARN("QKDrvIDE", "Failed to register system volume (status=%d)", static_cast<int>(st));
-        return false;
+        return tryRegisterVolume(base, ctrl, slave, "QFS_SYSTEM", "/system", &g_systemBinding);
     }
 
     static QC::Status writeZeroSectors(QFS::BlockDevice *dev, QC::u64 startSector, QC::u32 count)
@@ -1041,9 +1025,74 @@ namespace QKDrv
             QC_LOG_WARN("QKDrvIDE", "No mountable FAT system volume detected");
         }
 
+        void probeAndRegisterDataVolumes()
+        {
+            if (g_dataProbeCompleted)
+                return;
+            g_dataProbeCompleted = true;
+
+            QC_LOG_INFO("QKDrvIDE", "Probing legacy IDE for additional data volumes");
+
+            struct Candidate
+            {
+                QC::u16 base;
+                QC::u16 ctrl;
+                bool slave;
+            };
+
+            const IdeIoPorts ports = detectIdePortsFromPci();
+
+            // Scan all standard legacy IDE positions.
+            const Candidate candidates[] = {
+                {ports.primaryBase, ports.primaryCtrl, false},
+                {ports.primaryBase, ports.primaryCtrl, true},
+                {ports.secondaryBase, ports.secondaryCtrl, false},
+                {ports.secondaryBase, ports.secondaryCtrl, true},
+            };
+
+            QC::u32 registered = 0;
+            for (const auto &c : candidates)
+            {
+                if (g_systemBinding.valid && g_systemBinding.base == c.base && g_systemBinding.ctrl == c.ctrl && g_systemBinding.slave == c.slave)
+                    continue;
+                if (g_sharedBinding.valid && g_sharedBinding.base == c.base && g_sharedBinding.ctrl == c.ctrl && g_sharedBinding.slave == c.slave)
+                    continue;
+
+                char volName[32];
+                char mountPath[32];
+                QC::String::memset(volName, 0, sizeof(volName));
+                QC::String::memset(mountPath, 0, sizeof(mountPath));
+
+                QC::String::strncpy(volName, "QFS_DISK", sizeof(volName) - 1);
+                QC::String::strncpy(mountPath, "/mnt/disk", sizeof(mountPath) - 1);
+
+                const char suffix = static_cast<char>('0' + (registered % 10));
+                const QC::usize vn = QC::String::strlen(volName);
+                const QC::usize mp = QC::String::strlen(mountPath);
+                if (vn + 1 < sizeof(volName))
+                {
+                    volName[vn] = suffix;
+                    volName[vn + 1] = '\0';
+                }
+                if (mp + 1 < sizeof(mountPath))
+                {
+                    mountPath[mp] = suffix;
+                    mountPath[mp + 1] = '\0';
+                }
+
+                if (tryRegisterVolume(c.base, c.ctrl, c.slave, volName, mountPath, nullptr))
+                    ++registered;
+            }
+
+            if (registered == 0)
+                QC_LOG_INFO("QKDrvIDE", "No additional FAT data volumes detected");
+        }
+
         void resetSystemProbe()
         {
             g_systemProbeCompleted = false;
+            g_dataProbeCompleted = false;
+            g_systemBinding.valid = false;
         }
 
         QC::Status formatSystemVolumeFAT32()

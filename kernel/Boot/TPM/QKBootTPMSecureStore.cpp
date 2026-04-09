@@ -1532,6 +1532,31 @@ namespace QK::Boot::Tpm
                 return;
             }
 
+            if (!QK::SecureStore::tpm_present())
+            {
+                QC::u8 WrapKey[32];
+                St = QK::SecureStore::readWrapKey(WrapKey);
+                QC::String::memset(WrapKey, 0, sizeof(WrapKey));
+
+                if (St == QC::Status::Busy)
+                {
+                    LogStr(Log, "SecureStore: self-test SKIP (non-TPM wrap key locked)\r\n");
+                    return;
+                }
+
+                if (St == QC::Status::NotFound)
+                {
+                    LogStr(Log, "SecureStore: self-test SKIP (non-TPM wrap key not provisioned)\r\n");
+                    return;
+                }
+
+                if (St != QC::Status::Success)
+                {
+                    LogStr(Log, "SecureStore: FAIL (readWrapKey)\r\n");
+                    return;
+                }
+            }
+
             QC::u8 Plain[96];
             (void)QK::Entropy::fillRandom(Plain, sizeof(Plain));
 

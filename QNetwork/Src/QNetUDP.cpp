@@ -6,6 +6,7 @@
 #include "QNetIP.h"
 #include "QCMemUtil.h"
 #include "QKMemHeap.h"
+#include "QKRuntimeRegistries.h"
 
 namespace QNet
 {
@@ -51,6 +52,7 @@ namespace QNet
         {
             if (m_bindings[i])
             {
+                (void)QK::Runtime::Registries::instance().unregisterPort(QK::Runtime::PortProtocol::UDP, m_bindings[i]->port);
                 // Free receive queue
                 auto *dgram = m_bindings[i]->recvQueue;
                 while (dgram)
@@ -73,6 +75,11 @@ namespace QNet
 
     UDPBinding *UDP::bind(QC::u16 port)
     {
+        static constexpr QC::u32 kInternalNetworkOwnerPid = 1;
+        auto &regs = QK::Runtime::Registries::instance();
+        if (!regs.findProcess(kInternalNetworkOwnerPid))
+            return nullptr;
+
         // Port 0 means "allocate ephemeral port".
         if (port == 0)
         {
@@ -117,6 +124,12 @@ namespace QNet
         binding->active = true;
         binding->recvQueue = nullptr;
 
+        if (!regs.registerPort(QK::Runtime::PortProtocol::UDP, port, kInternalNetworkOwnerPid))
+        {
+            QK::Memory::Heap::instance().free(binding);
+            return nullptr;
+        }
+
         m_bindings[slot] = binding;
 
         return binding;
@@ -141,6 +154,7 @@ namespace QNet
                     QK::Memory::Heap::instance().free(dgram);
                     dgram = next;
                 }
+                (void)QK::Runtime::Registries::instance().unregisterPort(QK::Runtime::PortProtocol::UDP, binding->port);
                 QK::Memory::Heap::instance().free(binding);
                 m_bindings[i] = nullptr;
                 break;
@@ -274,6 +288,23 @@ namespace QNet
                 tail = tail->next;
             tail->next = dgram;
         }
+    }
+
+    QC::usize UDP::dropEphemeralBindings()
+    {
+        QC::usize dropped = 0;
+        for (QC::usize i = 0; i < MAX_BINDINGS; ++i)
+        {
+            UDPBinding *b = m_bindings[i];
+            if (!b)
+                continue;
+            // Keep well-known/service bindings and drop high ephemeral ports.
+            if (b->port < 49152)
+                continue;
+            unbind(b);
+            ++dropped;
+        }
+        return dropped;
     }
 
     UDPBinding *UDP::findBinding(QC::u16 port)

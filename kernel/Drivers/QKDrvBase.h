@@ -65,6 +65,8 @@ namespace QKDrv
         virtual void poll() {} // Optional polling
 
         virtual const char *name() const = 0;
+        // Stable naming-standard identifier (must use QDRV_* prefix).
+        virtual const char *driverId() const = 0;
         virtual ControllerType controllerType() const = 0;
     };
 

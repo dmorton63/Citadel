@@ -35,10 +35,33 @@ namespace QSC
         QC::u32 running = 0;
         QC::u32 completed = 0;
         QC::u64 totalExecuted = 0;
+        QC::u64 cachedCompletions = 0;
+        QC::u64 totalBuildMs = 0;
+        QC::u64 totalExecutionMs = 0;
+        QC::u64 totalQueueDelayMs = 0;
+        QC::u64 averageBuildMs = 0;
+        QC::u64 averageExecutionMs = 0;
+        QC::u64 averageQueueDelayMs = 0;
+        QC::u64 schedulerPromotions = 0;
+        QC::u64 schedulerDemotions = 0;
+        QC::u64 crossFlowPromotions = 0;
+        QC::u64 crossFlowDemotions = 0;
+
+        QC::u64 policyAllow = 0;
+        QC::u64 policyThrottle = 0;
+        QC::u64 policySuspend = 0;
+        QC::u64 policyCancel = 0;
+        QC::u64 redundantSubmissions = 0;
 
         QC::u64 memoHits = 0;
         QC::u64 memoMisses = 0;
         QC::u64 memoRefused = 0;
+        QC::u64 mergedSubmissions = 0;
+        QC::u32 signatureMapEntries = 0;
+        QC::u32 flowCount = 0;
+        QC::u32 cacheEntries = 0;
+        QC::u32 cacheCapacity = 0;
+        QC::u32 corePoolSize = 0;
     };
 
     // Random provider boundary (kernel provides entropy source).

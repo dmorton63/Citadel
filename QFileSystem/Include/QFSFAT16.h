@@ -56,6 +56,7 @@ namespace QFS
         QC::Status stat(const char *path, FileInfo *info) override;
         QC::Status createDir(const char *path) override;
         QC::Status remove(const char *path) override;
+        QC::Status sync() override;
 
     private:
         struct FATFileHandle

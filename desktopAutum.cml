@@ -30,7 +30,7 @@
                         {
                             "id": "headerTitle",
                             "type": "label",
-                            "text": "QAIOS++ Autumn Desktop",
+                            "text": "CITADEL Autumn Desktop",
                             "x": 20,
                             "y": 16,
                             "color": "#FFE8CC",
@@ -133,7 +133,7 @@
                         {
                             "id": "welcomeLabel",
                             "type": "label",
-                            "text": "Welcome to Autumn in QAIOS++",
+                            "text": "Welcome to Autumn in CITADEL",
                             "x": 40,
                             "y": 40,
                             "color": "#5A330C",
@@ -170,7 +170,7 @@
                                 {
                                     "id": "cardText",
                                     "type": "label",
-                                    "text": "Kernel: QAIOS++ Experimental\nTheme: Autumn 2026\nRenderer: PainterSurface\nSeasonal Mode: Harvest",
+                                    "text": "Kernel: QAIOSPLUSV1 Experimental\nTheme: Autumn 2026\nRenderer: PainterSurface\nSeasonal Mode: Harvest",
                                     "x": 20,
                                     "y": 60,
                                     "color": "#8A4F12",

@@ -112,7 +112,7 @@ namespace QD
         QC::i32 y = work.y + static_cast<QC::i32>((work.height - WIZARD_HEIGHT) / 2);
         QW::Rect bounds = {x, y, static_cast<QC::u32>(WIZARD_WIDTH), static_cast<QC::u32>(WIZARD_HEIGHT)};
 
-        m_window = QW::WindowManager::instance().createWindow("Setup", bounds);
+        m_window = QW::WindowManager::instance().createWindow("CITADEL Setup", bounds);
         if (!m_window)
             return;
 
@@ -127,7 +127,7 @@ namespace QD
 
         // Title
         QW::Rect titleBounds = {18, 18, static_cast<QC::u32>(WIZARD_WIDTH - 36), 20};
-        m_title = new QW::Controls::Label(m_window, "Welcome", titleBounds);
+        m_title = new QW::Controls::Label(m_window, "Welcome to CITADEL", titleBounds);
         m_root->addChild(m_title);
 
         // Hint

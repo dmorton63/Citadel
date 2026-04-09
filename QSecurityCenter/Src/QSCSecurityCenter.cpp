@@ -483,9 +483,35 @@ namespace QSC
         m.running = static_cast<QC::u32>(ex.runningCount());
         m.completed = static_cast<QC::u32>(ex.completedCount());
         m.totalExecuted = ex.totalTasksExecuted();
+        m.cachedCompletions = ex.totalCachedCompletions();
+        m.totalBuildMs = ex.totalBuildMilliseconds();
+        m.totalExecutionMs = ex.totalExecutionMilliseconds();
+        m.totalQueueDelayMs = ex.totalQueueDelayMilliseconds();
+        m.averageBuildMs = ex.averageBuildMilliseconds();
+        m.averageExecutionMs = ex.averageExecutionMilliseconds();
+        m.averageQueueDelayMs = ex.averageQueueDelayMilliseconds();
+        m.schedulerPromotions = ex.schedulerPromotions();
+        m.schedulerDemotions = ex.schedulerDemotions();
+        m.crossFlowPromotions = ex.crossFlowPromotions();
+        m.crossFlowDemotions = ex.crossFlowDemotions();
+        m.policyAllow = ex.policyAllowCount();
+        m.policyThrottle = ex.policyThrottleCount();
+        m.policySuspend = ex.policySuspendCount();
+        m.policyCancel = ex.policyCancelCount();
+        m.redundantSubmissions = ex.redundantSubmissions();
         m.memoHits = ex.memoizationHits();
         m.memoMisses = ex.memoizationMisses();
         m.memoRefused = ex.memoizationRefused();
+        m.mergedSubmissions = ex.mergedSubmissions();
+        m.cacheEntries = static_cast<QC::u32>(ex.memoizationCacheEntries());
+        m.cacheCapacity = static_cast<QC::u32>(ex.memoizationCacheCapacity());
+        m.corePoolSize = static_cast<QC::u32>(ex.corePoolSize());
+
+        QQ::SignatureMetricsSnapshot sigs[128] = {};
+        m.signatureMapEntries = static_cast<QC::u32>(ex.copySignatureMetrics(sigs, sizeof(sigs) / sizeof(sigs[0])));
+
+        QQ::FlowStatistics flows[32] = {};
+        m.flowCount = static_cast<QC::u32>(ex.copyFlowStatistics(flows, sizeof(flows) / sizeof(flows[0])));
         return m;
     }
 

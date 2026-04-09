@@ -28,6 +28,8 @@
 
 #include "QKSystemPump.h"
 
+#include "Debug/Framebuffer/QKDebugFramebufferText.h"
+
 #include "QDDesktop.h"
 
 #include "Boot/Config/QKBootStartupConfig.h"
@@ -69,11 +71,34 @@ namespace
         QC::String::memset(a, 0, sizeof(a));
         QC::String::memset(b, 0, sizeof(b));
 
+        char cmdlineRecovery[96];
+        QC::String::memset(cmdlineRecovery, 0, sizeof(cmdlineRecovery));
+        const bool hasCmdlineRecovery = QK::Boot::Config::TryConsumeDevRecoveryCode(cmdlineRecovery, sizeof(cmdlineRecovery));
+
+        auto tryUnlockWithCmdlineRecovery = [&]() -> bool
+        {
+            if (!hasCmdlineRecovery)
+                return false;
+
+            const QC::Status st = QK::SecureStore::nonTpmUnlockOrInitializeWrapKey(cmdlineRecovery);
+            secureZero(cmdlineRecovery, sizeof(cmdlineRecovery));
+            if (st == QC::Status::Success)
+            {
+                QK::Console::write("SecureStore unlocked (dev cmdline override).\r\n");
+                return true;
+            }
+            QK::Console::write("Dev cmdline recovery_code override failed; falling back to interactive prompt.\r\n");
+            return false;
+        };
+
         if (!hasKdf)
         {
             QK::Console::write("\r\nNon-TPM SecureStore bootstrapping (recovery code required).\r\n");
             if (hasPlain)
                 QK::Console::write("Upgrading legacy plaintext anchor to recovery-code wrapping.\r\n");
+
+            if (tryUnlockWithCmdlineRecovery())
+                return;
 
             for (;;)
             {
@@ -104,6 +129,9 @@ namespace
         }
 
         QK::Console::write("\r\nEnter recovery code to unlock SecureStore: ");
+        if (tryUnlockWithCmdlineRecovery())
+            return;
+
         for (;;)
         {
             if (!QK::Console::readLineBlocking(a, sizeof(a), false))
@@ -119,6 +147,93 @@ namespace
             }
 
             QK::Console::write("Invalid recovery code. Try again: ");
+        }
+    }
+
+    static void RunPreDesktopOwnerGate()
+    {
+        auto &sc = QK::SecurityCenter::instance();
+
+        if (!sc.ownerIsEnrolled())
+        {
+            QK::Console::write("\r\nOwner enrollment required before desktop startup.\r\n");
+            char user[48];
+            char passA[96];
+            char passB[96];
+            for (;;)
+            {
+                QC::String::memset(user, 0, sizeof(user));
+                QC::String::memset(passA, 0, sizeof(passA));
+                QC::String::memset(passB, 0, sizeof(passB));
+
+                if (!PromptSecretLine("Owner username: ", user, sizeof(user)))
+                    continue;
+                if (!PromptSecretLine("Owner password: ", passA, sizeof(passA)))
+                    continue;
+                if (!PromptSecretLine("Confirm password: ", passB, sizeof(passB)))
+                    continue;
+
+                if (QC::String::strcmp(passA, passB) != 0)
+                {
+                    QK::Console::write("Passwords did not match. Try again.\r\n");
+                    continue;
+                }
+
+                const QC::Status st = sc.ownerEnroll(user, passA);
+                secureZero(passA, sizeof(passA));
+                secureZero(passB, sizeof(passB));
+
+                if (st == QC::Status::Success)
+                {
+                    QK::Console::write("Owner enrolled.\r\n");
+                    char recoveryCode[48];
+                    QC::String::memset(recoveryCode, 0, sizeof(recoveryCode));
+                    if (sc.consumePendingInstallRecoveryCode(recoveryCode) == QC::Status::Success)
+                    {
+                        QK::Console::write("One-time recovery code (displayed once): ");
+                        QK::Console::write(recoveryCode);
+                        QK::Console::write("\r\nStore it offline before continuing.\r\n");
+                        secureZero(recoveryCode, sizeof(recoveryCode));
+                    }
+                    break;
+                }
+
+                QK::Console::write("Enrollment failed. Try again.\r\n");
+            }
+        }
+
+        if (!sc.bypassEnabled() && !sc.ownerUnlocked())
+        {
+            QK::Console::write("\r\nOwner unlock required before desktop startup.\r\n");
+            char user[48];
+            char pass[96];
+            for (;;)
+            {
+                QC::String::memset(user, 0, sizeof(user));
+                QC::String::memset(pass, 0, sizeof(pass));
+
+                if (!PromptSecretLine("Owner username: ", user, sizeof(user)))
+                    continue;
+                if (!PromptSecretLine("Owner password: ", pass, sizeof(pass)))
+                    continue;
+
+                const QC::Status st = sc.ownerUnlock(user, pass);
+                secureZero(pass, sizeof(pass));
+
+                if (st == QC::Status::Success)
+                {
+                    QK::Console::write("Owner unlocked.\r\n");
+                    break;
+                }
+
+                if (st == QC::Status::Timeout)
+                {
+                    QK::Console::write("Unlock denied: lockout active. Wait and retry.\r\n");
+                    continue;
+                }
+
+                QK::Console::write("Unlock denied. Try again.\r\n");
+            }
         }
     }
 
@@ -275,6 +390,7 @@ namespace
     static bool g_prevPosValid = false;
     static QC::i32 g_prevX = 0;
     static QC::i32 g_prevY = 0;
+    static volatile bool g_stopDesktopRequested = false;
 
     static void logInt(QC::i32 value)
     {
@@ -377,6 +493,9 @@ namespace
 
         while (true)
         {
+            // Pump the event queue so ShutdownRequest and other system events are handled
+            // even when the desktop runtime loop is not running.
+            QK::Event::EventManager::instance().processEvents(0);
             QNet::Stack::instance().poll(QDrv::Timer::instance().milliseconds());
             QKDrv::Manager::instance().poll();
             QKDrv::PS2::Keyboard::instance().poll();
@@ -478,6 +597,10 @@ namespace QK::Boot::Desktop
         {
             g_Log("Initializing heap...\r\n");
             QK::Memory::Heap::instance().initialize(g_State.Heap.Buffer, g_State.Heap.Size);
+                // Once the desktop takes over the framebuffer, disable the boot-time
+                // framebuffer text mirror (if enabled) so serial logs don't scribble
+                // over the GUI.
+                QK::Debug::FramebufferText::SetEnabled(false);
             g_Log("Heap initialized\r\n");
         }
 
@@ -516,10 +639,9 @@ namespace QK::Boot::Desktop
         g_Log("Drivers initialized\r\n");
 
         if (!QK::SecurityCenter::instance().initialized())
-        {
-            EnsureNonTpmSecureStoreUnlocked();
             QK::SecurityCenter::instance().initialize(QK::Boot::Config::GetSecurityCenterMode());
-        }
+
+        EnsureNonTpmSecureStoreUnlocked();
 
         // Ensure SST exists after /system is mounted from the system volume.
         (void)QK::SecurityCenter::instance().ensureSst();
@@ -607,9 +729,10 @@ namespace QK::Boot::Desktop
                 const bool caps = (rep.modifiers & 0x08) != 0;
                 evt.character = keyToChar(evt.key, evt.shift, caps);
 
-                // In Desktop mode, keyboard input is owned by the windowing/event system.
-                // Routing keys to the serial console too causes accidental command execution.
-                if (QK::Boot::Config::GetStartupMode() != QK::Boot::Config::StartupMode::Desktop)
+                // Keyboard routing is controlled by the console input enable flag.
+                // This lets TERMINAL startup mode hand off to the desktop via `startx`
+                // without mutating the configured startup mode.
+                if (QK::Console::inputEnabled())
                 {
                     QK::Console::handleKeyEvent(evt);
                     return;
@@ -638,6 +761,23 @@ namespace QK::Boot::Desktop
         // Desktop owns keyboard input; keep serial console non-interactive.
         QK::Console::setInputEnabled(QK::Boot::Config::GetStartupMode() != QK::Boot::Config::StartupMode::Desktop);
 
+        // Mark input initialized even for console-only startup modes so a later
+        // `startx` can safely bring up the window system.
+        g_State.InputInitialized = true;
+
+        // v1 boot trust gate: require TAS/SST-backed SC integrity when enforcement is active.
+        if (QK::SecurityCenter::instance().mode() == QK::SecurityCenter::Mode::Enforce)
+        {
+            const QC::Status trustSt = QK::SecurityCenter::instance().checkBootTrustGate();
+            if (trustSt != QC::Status::Success)
+            {
+                g_Log("BootTrust gate failed: TAS/SC integrity check did not pass\r\n");
+                g_Log("Entering terminal-only safe path\r\n");
+                QK::Console::setInputEnabled(true);
+                enterTerminalOnlyLoop();
+            }
+        }
+
         if (QK::Boot::Config::GetStartupMode() != QK::Boot::Config::StartupMode::Desktop)
         {
             g_Log("Startup mode ");
@@ -646,7 +786,22 @@ namespace QK::Boot::Desktop
             enterTerminalOnlyLoop();
         }
 
-        g_State.InputInitialized = true;
+        // Pre-desktop owner registration/login gate: enrollment/unlock must complete
+        // before desktop initialization.
+        RunPreDesktopOwnerGate();
+    }
+
+    bool IsPrepared() { return g_State.Prepared; }
+    bool IsInputInitialized() { return g_State.InputInitialized; }
+    bool IsWindowSystemInitialized() { return g_State.WindowSystemInitialized; }
+    bool IsDesktopInitialized() { return g_State.DesktopInitialized; }
+
+    bool RequestStopDesktop()
+    {
+        if (!g_State.DesktopInitialized)
+            return false;
+        g_stopDesktopRequested = true;
+        return true;
     }
 
     void InitializeWindowSystem()
@@ -999,6 +1154,20 @@ namespace QK::Boot::Desktop
 
         while (true)
         {
+            if (g_stopDesktopRequested)
+            {
+                g_Log("stopx: tearing down desktop\r\n");
+                g_Desktop.shutdown();
+                QW::WindowManager::instance().shutdown();
+                g_State.DesktopInitialized = false;
+                g_State.WindowSystemInitialized = false;
+                QK::Console::setInputEnabled(true);
+                QK::Debug::FramebufferText::SetEnabled(true);
+                g_stopDesktopRequested = false;
+                g_Log("stopx: returning to terminal-only mode\r\n");
+                enterTerminalOnlyLoop();
+            }
+
             // Poll all active drivers.
             QKDrv::Manager::instance().poll();
 

@@ -120,6 +120,19 @@ namespace QFS
         return nullptr;
     }
 
+    VolumeManager::VolumeRecord *VolumeManager::findRecordByMountPath(const char *mountPath)
+    {
+        if (!mountPath)
+            return nullptr;
+
+        for (QC::usize i = 0; i < m_volumes.size(); ++i)
+        {
+            if (QC::String::strcmp(m_volumes[i].mountPath, mountPath) == 0)
+                return &m_volumes[i];
+        }
+        return nullptr;
+    }
+
     QC::Status VolumeManager::registerVolume(const VolumeDefinition &definition)
     {
         if (!definition.name || !definition.mountPath || !definition.device)
@@ -210,6 +223,31 @@ namespace QFS
         return mountRecord(*record);
     }
 
+    QC::Status VolumeManager::unmountVolume(const char *nameOrPath)
+    {
+        if (!nameOrPath || !nameOrPath[0])
+            return QC::Status::InvalidParam;
+
+        VolumeRecord *record = findRecord(nameOrPath);
+        if (!record)
+            record = findRecordByMountPath(nameOrPath);
+        if (!record)
+            return QC::Status::NotFound;
+        if (!record->mounted || !record->fs)
+            return QC::Status::NotFound;
+
+        QC::Status status = VFS::instance().unmount(record->mountPath);
+        if (status != QC::Status::Success)
+            return status;
+
+        status = record->fs->unmount();
+        delete record->fs;
+        record->fs = nullptr;
+        record->mounted = false;
+        QC_LOG_INFO("QFSVOL", "Unmounted %s from %s", record->name, record->mountPath);
+        return status;
+    }
+
     QC::Status VolumeManager::mountAll()
     {
         QC::Status last = QC::Status::Success;
@@ -247,6 +285,39 @@ namespace QFS
     {
         const VolumeRecord *record = findRecord(name);
         return record && record->mounted;
+    }
+
+    QC::Status VolumeManager::setAutoMount(const char *name, bool enabled)
+    {
+        VolumeRecord *record = findRecord(name);
+        if (!record)
+            return QC::Status::NotFound;
+        record->autoMount = enabled;
+        if (!enabled)
+            record->mountFailed = false;
+        return QC::Status::Success;
+    }
+
+    QC::usize VolumeManager::copyVolumeInfo(VolumeInfo *out, QC::usize cap) const
+    {
+        if (!out || cap == 0)
+            return 0;
+
+        QC::usize count = 0;
+        for (QC::usize i = 0; i < m_volumes.size() && count < cap; ++i)
+        {
+            const VolumeRecord &record = m_volumes[i];
+            VolumeInfo &dst = out[count++];
+            QC::String::memset(&dst, 0, sizeof(dst));
+            QC::String::strncpy(dst.name, record.name, sizeof(dst.name) - 1);
+            QC::String::strncpy(dst.mountPath, record.mountPath, sizeof(dst.mountPath) - 1);
+            dst.fsKind = record.fsKind;
+            dst.mounted = record.mounted;
+            dst.autoMount = record.autoMount;
+            dst.mountFailed = record.mountFailed;
+            dst.mountFailCount = record.mountFailCount;
+        }
+        return count;
     }
 
     QC::Status VolumeManager::mountRecord(VolumeRecord &record)

@@ -18,7 +18,15 @@ namespace QK::Boot::Desktop
 
     // Staged desktop bring-up (used by QKBoot pipeline).
     bool PrepareFromLimineRequests(QC::u64 FramebufferRequest[], QC::u64 ModuleRequest[], const EarlyHeap &Heap, FLogFn Log);
+
+    // Lightweight state queries (useful for console-only startup flows).
+    bool IsPrepared();
+    bool IsInputInitialized();
+    bool IsWindowSystemInitialized();
+    bool IsDesktopInitialized();
+
     void InitializeInput();
     void InitializeWindowSystem();
+    bool RequestStopDesktop();
     [[noreturn]] void InitializeDesktopAndRunLoop();
 }

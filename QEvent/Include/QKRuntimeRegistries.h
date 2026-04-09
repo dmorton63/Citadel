@@ -123,6 +123,33 @@ namespace QK::Runtime
         bool tpmAvailable = false;
         bool enforcementEnabled = false;
         QC::u32 measuredArtifactCount = 0; // summary-only for now
+
+        // SC runtime memory hardening markers (MVP policy surface).
+        bool scNoSwap = false;
+        bool scNoDump = false;
+        bool scMinimalExposure = false;
+
+        // General internal execution/data hardening markers.
+        bool guardedExecutionEnabled = false;
+        bool protectedAppExecutionSpace = false;
+        bool hiddenEncryptedScStorage = false;
+        bool scInternalOnly = false;
+        bool scBackgroundSystemTask = false;
+    };
+
+    enum class PortProtocol : QC::u8
+    {
+        Unknown = 0,
+        UDP = 1,
+        TCP = 2,
+    };
+
+    struct PortRecord
+    {
+        bool used = false;
+        PortProtocol protocol = PortProtocol::Unknown;
+        QC::u16 port = 0;
+        QC::u32 ownerPid = 0;
     };
 
     // Kernel-owned runtime registry hub.
@@ -140,6 +167,7 @@ namespace QK::Runtime
         static constexpr QC::usize MaxServices = 64;
         static constexpr QC::usize MaxWindows = 128;
         static constexpr QC::usize MaxResources = 256;
+        static constexpr QC::usize MaxPorts = 256;
 
         void reset();
 
@@ -154,6 +182,7 @@ namespace QK::Runtime
         QC::usize serviceCount() const;
         QC::usize windowCount() const;
         QC::usize resourceCount() const;
+        QC::usize portCount() const;
 
         // Copies up to cap window snapshots into out.
         // Returns number of snapshots copied.
@@ -185,6 +214,11 @@ namespace QK::Runtime
         void setSecurityState(const SecurityState &state) { m_security = state; }
         const SecurityState &securityState() const { return m_security; }
 
+        // Port ownership registry (MVP)
+        bool registerPort(PortProtocol protocol, QC::u16 port, QC::u32 ownerPid);
+        bool unregisterPort(PortProtocol protocol, QC::u16 port);
+        const PortRecord *findPort(PortProtocol protocol, QC::u16 port) const;
+
     private:
         Registries() = default;
 
@@ -199,6 +233,7 @@ namespace QK::Runtime
         ServiceRecord m_services[MaxServices] = {};
         WindowRecord m_windows[MaxWindows] = {};
         ResourceRecord m_resources[MaxResources] = {};
+        PortRecord m_ports[MaxPorts] = {};
 
         SecurityState m_security{};
 

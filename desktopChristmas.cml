@@ -19,7 +19,7 @@
                background="#8E0000"
                borderBottom="#5A0A0A">
             <Label id="headerTitle"
-                   text="QAIOS++ Christmas Desktop"
+                   text="CITADEL Christmas Desktop"
                    x="20"
                    y="16"
                    color="#FFEDE0"
@@ -94,7 +94,7 @@
                height="100%-56"
                background="rgba(255,240,240,0.18)">
             <Label id="welcomeLabel"
-                   text="Welcome to Christmas in QAIOS++"
+                   text="Welcome to Christmas in CITADEL"
                    x="40"
                    y="40"
                    color="#5A0A0A"
@@ -125,7 +125,7 @@
                        width="316"
                        height="32" />
                 <Label id="cardText"
-                       text="Kernel: QAIOS++ Experimental\nTheme: Christmas 2026\nRenderer: PainterSurface\nSeasonal Mode: Holiday"
+                       text="Kernel: QAIOSPLUSV1 Experimental\nTheme: Christmas 2026\nRenderer: PainterSurface\nSeasonal Mode: Holiday"
                        x="20"
                        y="60"
                        color="#8E0000"

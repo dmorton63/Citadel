@@ -146,6 +146,7 @@ namespace QKDrv
             void shutdown() override {}
             void poll() override;
             const char *name() const override { return "USB Tablet"; }
+            const char *driverId() const override { return "QDRV_XHCI_TABLET"; }
             ControllerType controllerType() const override { return ControllerType::XHCI; }
 
             void setCallback(MouseCallback callback) override { m_callback = callback; }
@@ -180,6 +181,7 @@ namespace QKDrv
             void shutdown() override {}
             void poll() override;
             const char *name() const override { return "USB Mouse"; }
+            const char *driverId() const override { return "QDRV_XHCI_MOUSE"; }
             ControllerType controllerType() const override { return ControllerType::XHCI; }
 
             void setCallback(MouseCallback callback) override { m_callback = callback; }
@@ -216,6 +218,7 @@ namespace QKDrv
             void shutdown() override {}
             void poll() override;
             const char *name() const override { return "USB Keyboard"; }
+            const char *driverId() const override { return "QDRV_XHCI_KEYBOARD"; }
             ControllerType controllerType() const override { return ControllerType::XHCI; }
 
             void setCallback(KeyboardCallback callback) override { m_callback = callback; }
@@ -248,6 +251,7 @@ namespace QKDrv
             void shutdown() override;
             void poll() override;
             const char *name() const override { return "xHCI"; }
+            const char *driverId() const override { return "QDRV_XHCI_CONTROLLER"; }
             ControllerType controllerType() const override { return ControllerType::XHCI; }
 
             void setMouseCallback(MouseCallback callback) override { m_mouseCallback = callback; }

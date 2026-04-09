@@ -7,9 +7,14 @@
 
 #include "QCString.h"
 
+#include "QCBuiltins.h"
+#include "QCJson.h"
+
 #include "QFSDirectory.h"
 #include "QFSFile.h"
+#include "QFSStat.h"
 #include "QFSVFS.h"
+#include "QFSVolumeManager.h"
 
 #include "QKEventManager.h"
 #include "QKShutdownController.h"
@@ -27,6 +32,11 @@
 #include "QQExecutor.h"
 #include "QKSecureStore.h"
 #include "QKSecurityCenter.h"
+#include "QKAIRuntime.h"
+#include "QKImageReader.h"
+#include "QKModuleLoader.h"
+#include "QKSimpleDb.h"
+#include "QKBootEventLog.h"
 
 #include "QSCSecurityCenter.h"
 #include "QKSystemPump.h"
@@ -38,6 +48,28 @@
 #include "QNetDHCP.h"
 #include "QNetDNS.h"
 #include "QNetTCP.h"
+
+namespace QK::Boot::Config
+{
+    enum class StartupMode : QC::u8
+    {
+        Desktop,
+        Terminal,
+        Safe,
+        Recovery,
+        Installer,
+        Network
+    };
+
+    StartupMode GetStartupMode();
+    const char *StartupModeName(StartupMode Mode);
+    QC::Status PersistStartupMode(StartupMode Mode, void (*Log)(const char *));
+}
+
+namespace QK::Boot::Desktop
+{
+    bool RequestStopDesktop();
+}
 
 namespace QK::CmdCenter
 {
@@ -60,6 +92,69 @@ namespace QK::CmdCenter
                 return "system";
             }
             return "?";
+        }
+
+        static const char *statusName(QC::Status st)
+        {
+            switch (st)
+            {
+            case QC::Status::Success:
+                return "Success";
+            case QC::Status::Error:
+                return "Error";
+            case QC::Status::InvalidParam:
+                return "InvalidParam";
+            case QC::Status::OutOfMemory:
+                return "OutOfMemory";
+            case QC::Status::NotFound:
+                return "NotFound";
+            case QC::Status::Timeout:
+                return "Timeout";
+            case QC::Status::Busy:
+                return "Busy";
+            case QC::Status::NotSupported:
+                return "NotSupported";
+            }
+            return "?";
+        }
+
+        static QC::Status loadFstabStore(QK::Db::Store &db)
+        {
+            (void)QFS::VFS::instance().createDir("/system");
+            (void)QFS::VFS::instance().createDir("/system/db");
+            return db.load("/system/db/FSTAB.DB");
+        }
+
+        static void fstabKeyForVolume(const char *name, char *out, QC::usize outCap)
+        {
+            if (!out || outCap == 0)
+                return;
+            QC::String::memset(out, 0, outCap);
+            QC::String::strncpy(out, "fstab.", outCap - 1);
+            const QC::usize used = QC::String::strlen(out);
+            if (used + 1 < outCap)
+                QC::String::strncpy(out + used, name ? name : "", outCap - used - 1);
+        }
+
+        static QC::Status applyFstabAutoMountOverrides()
+        {
+            QK::Db::Store &db = QK::Db::Store::instance();
+            QC::Status st = loadFstabStore(db);
+            if (st != QC::Status::Success)
+                return st;
+
+            QK::Db::Entry entries[64] = {};
+            const QC::usize count = db.list(entries, sizeof(entries) / sizeof(entries[0]));
+            for (QC::usize i = 0; i < count; ++i)
+            {
+                if (QC::String::memcmp(entries[i].key, "fstab.", 6) != 0)
+                    continue;
+                const char *name = entries[i].key + 6;
+                const bool enabled = entries[i].value[0] == '1';
+                (void)QFS::VolumeManager::instance().setAutoMount(name, enabled);
+            }
+
+            return QFS::VolumeManager::instance().mountPending();
         }
 
         static bool cmdWhoami(const char *, const QC::Cmd::Context &ctx, void *)
@@ -269,6 +364,11 @@ namespace QK::CmdCenter
         }
         static Session g_session;
         static bool g_sessionInitialized = false;
+        static constexpr const char *kAliasMapPath = "/system/config/CMDALIAS.CFG";
+        static constexpr QC::usize kMaxScriptDepth = 4;
+        static QC::usize g_scriptDepth = 0;
+        static IpcHookFn g_ipcHook = nullptr;
+        static void *g_ipcHookUser = nullptr;
 
         static bool isSpace(char c)
         {
@@ -383,6 +483,547 @@ namespace QK::CmdCenter
                 }
             }
 
+            return true;
+        }
+
+        static bool appendString(char *dest, QC::usize destSize, const char *src);
+        static bool appendU64Dec(char *dest, QC::usize destSize, QC::u64 value);
+        static bool readFileToNullTerminatedBuffer(const char *absPath, QC::Vector<char> &out, QC::usize maxBytes);
+
+        static void trimInPlace(char *text)
+        {
+            if (!text)
+                return;
+
+            QC::usize len = QC::String::strlen(text);
+            QC::usize start = 0;
+            while (start < len && isSpace(text[start]))
+                ++start;
+
+            QC::usize end = len;
+            while (end > start && isSpace(text[end - 1]))
+                --end;
+
+            QC::usize out = 0;
+            for (QC::usize i = start; i < end; ++i)
+                text[out++] = text[i];
+            text[out] = '\0';
+        }
+
+        static void clearAliasMap()
+        {
+            auto &reg = QC::Cmd::Registry::instance();
+            char names[64][48];
+            QC::usize count = reg.aliasCount();
+            if (count > 64)
+                count = 64;
+
+            for (QC::usize i = 0; i < count; ++i)
+            {
+                QC::String::memset(names[i], 0, sizeof(names[i]));
+                const char *n = reg.aliasNameAt(i);
+                if (n)
+                    QC::String::strncpy(names[i], n, sizeof(names[i]) - 1);
+            }
+
+            for (QC::usize i = 0; i < count; ++i)
+            {
+                if (names[i][0])
+                    (void)reg.removeAlias(names[i]);
+            }
+        }
+
+        static bool writeAll(QFS::File *file, const char *text)
+        {
+            if (!file || !text)
+                return false;
+
+            const QC::usize total = QC::String::strlen(text);
+            QC::usize off = 0;
+            while (off < total)
+            {
+                const QC::isize n = file->write(text + off, total - off);
+                if (n <= 0)
+                    return false;
+                off += static_cast<QC::usize>(n);
+            }
+            return true;
+        }
+
+        static bool saveAliasMap(const QC::Cmd::Context *ctx)
+        {
+            QFS::FileInfo info;
+            QC::String::memset(&info, 0, sizeof(info));
+            if (QFS::VFS::instance().stat("/system/config", &info) != QC::Status::Success)
+                (void)QFS::VFS::instance().createDir("/system/config");
+
+            QFS::File *file = QFS::VFS::instance().open(kAliasMapPath,
+                                                        QFS::OpenMode::Write | QFS::OpenMode::Create | QFS::OpenMode::Truncate);
+            if (!file)
+            {
+                if (ctx)
+                    ctx->writeLine("alias: failed to persist map");
+                return false;
+            }
+
+            bool ok = true;
+            ok = ok && writeAll(file, "# Citadel command alias map\n");
+            ok = ok && writeAll(file, "# format: alias=command expansion\n");
+
+            auto &reg = QC::Cmd::Registry::instance();
+            for (QC::usize i = 0; i < reg.aliasCount(); ++i)
+            {
+                const char *name = reg.aliasNameAt(i);
+                const char *exp = reg.aliasExpansionAt(i);
+                if (!name || !*name || !exp || !*exp)
+                    continue;
+
+                char line[320];
+                QC::String::memset(line, 0, sizeof(line));
+                if (!appendString(line, sizeof(line), name) ||
+                    !appendString(line, sizeof(line), "=") ||
+                    !appendString(line, sizeof(line), exp) ||
+                    !appendString(line, sizeof(line), "\n"))
+                {
+                    ok = false;
+                    break;
+                }
+                ok = ok && writeAll(file, line);
+            }
+
+            QFS::VFS::instance().close(file);
+            if (!ok && ctx)
+                ctx->writeLine("alias: failed while writing map");
+            return ok;
+        }
+
+        static bool loadAliasMap(const QC::Cmd::Context *ctx, bool report)
+        {
+            QFS::FileInfo info;
+            QC::String::memset(&info, 0, sizeof(info));
+            if (QFS::VFS::instance().stat(kAliasMapPath, &info) != QC::Status::Success)
+            {
+                if (report && ctx)
+                    ctx->writeLine("aliasreload: no persisted alias map");
+                return true;
+            }
+
+            QC::Vector<char> fileBuf;
+            if (!readFileToNullTerminatedBuffer(kAliasMapPath, fileBuf, 64 * 1024))
+            {
+                if (report && ctx)
+                    ctx->writeLine("aliasreload: read failed");
+                return false;
+            }
+
+            clearAliasMap();
+
+            auto &reg = QC::Cmd::Registry::instance();
+            QC::usize loaded = 0;
+
+            char line[320];
+            QC::String::memset(line, 0, sizeof(line));
+            QC::usize li = 0;
+
+            auto parseLine = [&](char *raw)
+            {
+                trimInPlace(raw);
+                if (raw[0] == '\0' || raw[0] == '#')
+                    return;
+
+                char *eq = raw;
+                while (*eq && *eq != '=')
+                    ++eq;
+                if (*eq != '=')
+                    return;
+
+                *eq = '\0';
+                char *rhs = eq + 1;
+                trimInPlace(raw);
+                trimInPlace(rhs);
+                if (raw[0] == '\0' || rhs[0] == '\0')
+                    return;
+
+                if (reg.registerAlias(raw, rhs, true))
+                    ++loaded;
+            };
+
+            const char *p = fileBuf.data();
+            while (p && *p)
+            {
+                char c = *p++;
+                if (c == '\r')
+                    continue;
+                if (c == '\n')
+                {
+                    line[li] = '\0';
+                    parseLine(line);
+                    li = 0;
+                    line[0] = '\0';
+                    continue;
+                }
+                if (li + 1 < sizeof(line))
+                    line[li++] = c;
+            }
+            if (li)
+            {
+                line[li] = '\0';
+                parseLine(line);
+            }
+
+            if (report && ctx)
+            {
+                char msg[96];
+                QC::String::memset(msg, 0, sizeof(msg));
+                (void)appendString(msg, sizeof(msg), "aliasreload: loaded ");
+                (void)appendU64Dec(msg, sizeof(msg), static_cast<QC::u64>(loaded));
+                ctx->writeLine(msg);
+            }
+
+            return true;
+        }
+
+        static bool readFileToNullTerminatedBuffer(const char *absPath, QC::Vector<char> &out, QC::usize maxBytes)
+        {
+            out.clear();
+
+            if (!absPath || absPath[0] == '\0')
+                return false;
+
+            QFS::FileInfo info;
+            QC::String::memset(&info, 0, sizeof(info));
+            const QC::Status st = QFS::VFS::instance().stat(absPath, &info);
+            if (st != QC::Status::Success)
+                return false;
+            if (info.type != QFS::FileType::Regular)
+                return false;
+            if (info.size > maxBytes)
+                return false;
+
+            const QC::usize size = static_cast<QC::usize>(info.size);
+            out.resize(size + 1);
+            if (out.size() != size + 1)
+            {
+                out.clear();
+                return false;
+            }
+
+            QC::usize bytesRead = 0;
+            const QC::Status readSt = QK::SecurityCenter::instance().secureReadFile(absPath, out.data(), size, &bytesRead);
+            if (readSt != QC::Status::Success || bytesRead != size)
+            {
+                out.clear();
+                return false;
+            }
+
+            out[size] = '\0';
+            return true;
+        }
+
+        static bool validateJsonFile(const char *absPath, const QC::Cmd::Context &ctx, const char *label)
+        {
+            QC::Vector<char> buf;
+            if (!readFileToNullTerminatedBuffer(absPath, buf, 1024 * 1024))
+            {
+                char line[256];
+                QC::String::memset(line, 0, sizeof(line));
+                (void)appendString(line, sizeof(line), label);
+                (void)appendString(line, sizeof(line), ": missing or unreadable: ");
+                (void)appendString(line, sizeof(line), absPath);
+                ctx.writeLine(line);
+                return false;
+            }
+
+            QC::JSON::Value root;
+            const bool ok = QC::JSON::parse(buf.data(), root);
+            if (!ok)
+            {
+                char line[256];
+                QC::String::memset(line, 0, sizeof(line));
+                (void)appendString(line, sizeof(line), label);
+                (void)appendString(line, sizeof(line), ": JSON parse failed: ");
+                (void)appendString(line, sizeof(line), absPath);
+                ctx.writeLine(line);
+                return false;
+            }
+
+            char line[256];
+            QC::String::memset(line, 0, sizeof(line));
+            (void)appendString(line, sizeof(line), label);
+            (void)appendString(line, sizeof(line), ": ok ");
+            (void)appendString(line, sizeof(line), absPath);
+            ctx.writeLine(line);
+            return true;
+        }
+
+        static bool copyFileTruncate(const char *srcAbsPath, const char *dstAbsPath, const QC::Cmd::Context &ctx, const char *label)
+        {
+            if (!srcAbsPath || !dstAbsPath)
+                return false;
+
+            if (!allowWriteToPath(dstAbsPath, ctx, label))
+                return false;
+
+            QFS::File *src = QFS::VFS::instance().open(srcAbsPath, QFS::OpenMode::Read);
+            if (!src)
+            {
+                char line[256];
+                QC::String::memset(line, 0, sizeof(line));
+                (void)appendString(line, sizeof(line), label);
+                (void)appendString(line, sizeof(line), ": source missing: ");
+                (void)appendString(line, sizeof(line), srcAbsPath);
+                ctx.writeLine(line);
+                return false;
+            }
+
+            QFS::File *dst = QFS::VFS::instance().open(dstAbsPath, QFS::OpenMode::Write | QFS::OpenMode::Create | QFS::OpenMode::Truncate);
+            if (!dst)
+            {
+                QFS::VFS::instance().close(src);
+                char line[256];
+                QC::String::memset(line, 0, sizeof(line));
+                (void)appendString(line, sizeof(line), label);
+                (void)appendString(line, sizeof(line), ": cannot open dest: ");
+                (void)appendString(line, sizeof(line), dstAbsPath);
+                ctx.writeLine(line);
+                return false;
+            }
+
+            char buf[4096];
+            while (true)
+            {
+                QC::isize n = src->read(buf, sizeof(buf));
+                if (n <= 0)
+                    break;
+
+                QC::usize off = 0;
+                while (off < static_cast<QC::usize>(n))
+                {
+                    QC::isize w = dst->write(buf + off, static_cast<QC::usize>(n) - off);
+                    if (w <= 0)
+                    {
+                        QFS::VFS::instance().close(dst);
+                        QFS::VFS::instance().close(src);
+                        ctx.writeLine("recover: write failed");
+                        return false;
+                    }
+                    off += static_cast<QC::usize>(w);
+                }
+            }
+
+            QFS::VFS::instance().close(dst);
+            QFS::VFS::instance().close(src);
+
+            char line[256];
+            QC::String::memset(line, 0, sizeof(line));
+            (void)appendString(line, sizeof(line), label);
+            (void)appendString(line, sizeof(line), ": restored ");
+            (void)appendString(line, sizeof(line), dstAbsPath);
+            ctx.writeLine(line);
+            return true;
+        }
+
+        static bool cmdRecover(const char *args, const QC::Cmd::Context &ctx, void *)
+        {
+            const char *p = args ? skipSpaces(args) : nullptr;
+            if (!p || *p == '\0')
+            {
+                ctx.writeLine("usage: recover config|desktop|services");
+                return true;
+            }
+
+            char which[32];
+            QC::String::memset(which, 0, sizeof(which));
+            (void)readToken(p, which, sizeof(which));
+
+            if (streqIgnoreCase(which, "config"))
+            {
+                // Default to boot.json (paths.golden_config -> paths.production_config). If parse fails, use known defaults.
+                char srcBuf[256];
+                char dstBuf[256];
+                QC::String::memset(srcBuf, 0, sizeof(srcBuf));
+                QC::String::memset(dstBuf, 0, sizeof(dstBuf));
+                QC::String::strncpy(srcBuf, "/system/golden/config.json", sizeof(srcBuf) - 1);
+                QC::String::strncpy(dstBuf, "/system/config/config.json", sizeof(dstBuf) - 1);
+                srcBuf[sizeof(srcBuf) - 1] = '\0';
+                dstBuf[sizeof(dstBuf) - 1] = '\0';
+
+                QC::Vector<char> bootBuf;
+                const char *bootCandidates[] = {"/boot.json", "/BOOT.JSN"};
+                for (QC::usize i = 0; i < sizeof(bootCandidates) / sizeof(bootCandidates[0]); ++i)
+                {
+                    if (!readFileToNullTerminatedBuffer(bootCandidates[i], bootBuf, 256 * 1024))
+                        continue;
+
+                    QC::JSON::Value root;
+                    if (!QC::JSON::parse(bootBuf.data(), root))
+                        continue;
+
+                    // Expect: { paths: { golden_config: <str>, production_config: <str> } }
+                    const QC::JSON::Value *paths = root.find("paths");
+                    if (paths && paths->isObject())
+                    {
+                        const QC::JSON::Value *g = paths->find("golden_config");
+                        const QC::JSON::Value *r = paths->find("production_config");
+                        if (g && r && g->isString() && r->isString())
+                        {
+                            const char *gs = g->asString(nullptr);
+                            const char *rs = r->asString(nullptr);
+                            if (gs && *gs)
+                            {
+                                QC::String::strncpy(srcBuf, gs, sizeof(srcBuf) - 1);
+                                srcBuf[sizeof(srcBuf) - 1] = '\0';
+                            }
+                            if (rs && *rs)
+                            {
+                                QC::String::strncpy(dstBuf, rs, sizeof(dstBuf) - 1);
+                                dstBuf[sizeof(dstBuf) - 1] = '\0';
+                            }
+                        }
+                    }
+                    break;
+                }
+
+                bool ok = true;
+                ok = copyFileTruncate(srcBuf, dstBuf, ctx, "recover config") && ok;
+                ok = validateJsonFile(dstBuf, ctx, "validate config") && ok;
+                ctx.writeLine(ok ? "recover config: ok" : "recover config: failed");
+                return true;
+            }
+
+            if (streqIgnoreCase(which, "desktop"))
+            {
+                bool ok = true;
+                ok = copyFileTruncate("/GOLDEN/DESKTOP.JSN", "/PROD/DESKTOP.JSN", ctx, "recover desktop") && ok;
+
+                // Overrides are optional; copy only if present.
+                QFS::FileInfo info;
+                QC::String::memset(&info, 0, sizeof(info));
+                if (QFS::VFS::instance().stat("/GOLDEN/DESKOVR.JSN", &info) == QC::Status::Success)
+                {
+                    ok = copyFileTruncate("/GOLDEN/DESKOVR.JSN", "/PROD/DESKOVR.JSN", ctx, "recover desktop") && ok;
+                }
+                else
+                {
+                    ctx.writeLine("recover desktop: /GOLDEN/DESKOVR.JSN missing (skipping overrides)");
+                }
+
+                ok = validateJsonFile("/PROD/DESKTOP.JSN", ctx, "validate desktop") && ok;
+                if (QFS::VFS::instance().stat("/PROD/DESKOVR.JSN", &info) == QC::Status::Success)
+                    ok = validateJsonFile("/PROD/DESKOVR.JSN", ctx, "validate desktop_overrides") && ok;
+
+                ctx.writeLine(ok ? "recover desktop: ok" : "recover desktop: failed");
+                return true;
+            }
+
+            if (streqIgnoreCase(which, "services"))
+            {
+                bool ok = true;
+                ok = copyFileTruncate("/GOLDEN/SERVICES.JSN", "/PROD/SERVICES.JSN", ctx, "recover services") && ok;
+                ok = validateJsonFile("/PROD/SERVICES.JSN", ctx, "validate services") && ok;
+                ctx.writeLine(ok ? "recover services: ok" : "recover services: failed");
+                return true;
+            }
+
+            ctx.writeLine("recover: unknown target");
+            ctx.writeLine("usage: recover config|desktop|services");
+            return true;
+        }
+
+        static bool cmdValidate(const char *args, const QC::Cmd::Context &ctx, void *)
+        {
+            const char *p = args ? skipSpaces(args) : nullptr;
+            char which[32];
+            QC::String::memset(which, 0, sizeof(which));
+            if (p && *p)
+                (void)readToken(p, which, sizeof(which));
+
+            bool ok = true;
+            if (which[0] == 0 || streqIgnoreCase(which, "all"))
+            {
+                // config
+                ok = validateJsonFile("/system/config/config.json", ctx, "validate config") && ok;
+                // desktop
+                ok = validateJsonFile("/PROD/DESKTOP.JSN", ctx, "validate desktop") && ok;
+                QFS::FileInfo info;
+                QC::String::memset(&info, 0, sizeof(info));
+                if (QFS::VFS::instance().stat("/PROD/DESKOVR.JSN", &info) == QC::Status::Success)
+                    ok = validateJsonFile("/PROD/DESKOVR.JSN", ctx, "validate desktop_overrides") && ok;
+                // services
+                ok = validateJsonFile("/PROD/SERVICES.JSN", ctx, "validate services") && ok;
+
+                ctx.writeLine(ok ? "validate: ok" : "validate: failed");
+                return true;
+            }
+
+            if (streqIgnoreCase(which, "config"))
+                ok = validateJsonFile("/system/config/config.json", ctx, "validate config");
+            else if (streqIgnoreCase(which, "desktop"))
+            {
+                ok = validateJsonFile("/PROD/DESKTOP.JSN", ctx, "validate desktop");
+                QFS::FileInfo info;
+                QC::String::memset(&info, 0, sizeof(info));
+                if (QFS::VFS::instance().stat("/PROD/DESKOVR.JSN", &info) == QC::Status::Success)
+                    ok = validateJsonFile("/PROD/DESKOVR.JSN", ctx, "validate desktop_overrides") && ok;
+            }
+            else if (streqIgnoreCase(which, "services"))
+                ok = validateJsonFile("/PROD/SERVICES.JSN", ctx, "validate services");
+            else
+            {
+                ctx.writeLine("usage: validate [all|config|desktop|services]");
+                return true;
+            }
+
+            ctx.writeLine(ok ? "validate: ok" : "validate: failed");
+            return true;
+        }
+
+        static void rebootHardwareNow()
+        {
+            // Try common reboot mechanisms.
+            // 1) PCI reset control port (many chipsets/QEMU)
+            QC::outb(0xCF9, 0x02);
+            QC::outb(0xCF9, 0x06);
+
+            // 2) Keyboard controller reset
+            for (QC::u32 i = 0; i < 100000; ++i)
+            {
+                if ((QC::inb(0x64) & 0x02) == 0)
+                    break;
+            }
+            QC::outb(0x64, 0xFE);
+
+            // 3) Fast A20/reset port (legacy)
+            QC::u8 p92 = QC::inb(0x92);
+            QC::outb(0x92, static_cast<QC::u8>(p92 | 0x01));
+
+            QC::cli();
+            for (;;)
+                QC::halt();
+        }
+
+        static bool cmdReboot(const char *args, const QC::Cmd::Context &ctx, void *)
+        {
+            const char *p = args ? skipSpaces(args) : nullptr;
+            if (!p || *p == '\0')
+            {
+                ctx.writeLine("reboot: confirmation required");
+                ctx.writeLine("usage: reboot now");
+                return true;
+            }
+
+            char tok[16];
+            QC::String::memset(tok, 0, sizeof(tok));
+            (void)readToken(p, tok, sizeof(tok));
+            if (!streqIgnoreCase(tok, "now"))
+            {
+                ctx.writeLine("reboot: confirmation required");
+                ctx.writeLine("usage: reboot now");
+                return true;
+            }
+
+            ctx.writeLine("reboot: restarting");
+            rebootHardwareNow();
             return true;
         }
 
@@ -627,8 +1268,30 @@ namespace QK::CmdCenter
                 return false;
 
             QC::usize i = 0;
-            while (*p && !isSpace(*p) && i + 1 < outSize)
-                out[i++] = *p++;
+            if (*p == '"')
+            {
+                ++p;
+                while (*p && i + 1 < outSize)
+                {
+                    if (*p == '"')
+                    {
+                        ++p;
+                        break;
+                    }
+                    if (*p == '\\' && p[1])
+                    {
+                        out[i++] = p[1];
+                        p += 2;
+                        continue;
+                    }
+                    out[i++] = *p++;
+                }
+            }
+            else
+            {
+                while (*p && !isSpace(*p) && i + 1 < outSize)
+                    out[i++] = *p++;
+            }
             out[i] = '\0';
             p = skipSpaces(p);
             return i > 0;
@@ -773,6 +1436,12 @@ namespace QK::CmdCenter
 
                     const char *desc = reg.commandDescriptionAt(i);
                     writeKeyValue(ctx, name, desc ? desc : "");
+                        const char *usage = reg.commandUsageAt(i);
+                        const char *schema = reg.commandArgSchemaAt(i);
+                        if (usage && *usage)
+                            writeKeyValue(ctx, "usage", usage);
+                        if (schema && *schema)
+                            writeKeyValue(ctx, "schema", schema);
                     return true;
                 }
                 if (!found)
@@ -799,6 +1468,13 @@ namespace QK::CmdCenter
                 {
                     (void)appendString(line, sizeof(line), " - ");
                     (void)appendString(line, sizeof(line), desc);
+                }
+                const char *usage = reg.commandUsageAt(i);
+                if (usage && *usage)
+                {
+                    (void)appendString(line, sizeof(line), " [");
+                    (void)appendString(line, sizeof(line), usage);
+                    (void)appendString(line, sizeof(line), "]");
                 }
                 ctx.writeLine(line);
             }
@@ -838,6 +1514,13 @@ namespace QK::CmdCenter
             if (!redir)
             {
                 ctx.writeLine(p);
+                return true;
+            }
+
+            // Redirection writes to the filesystem; require admin.
+            if (static_cast<QC::u8>(ctx.callerAccess) < static_cast<QC::u8>(QC::Cmd::AccessLevel::Admin))
+            {
+                ctx.writeLine("echo: permission denied (redirection requires admin)");
                 return true;
             }
 
@@ -910,21 +1593,24 @@ namespace QK::CmdCenter
             if (!appendMode)
                 mode = mode | QFS::OpenMode::Truncate;
 
-            QFS::File *file = QFS::VFS::instance().open(path, mode);
-            if (!file)
+            char lineOut[384];
+            QC::String::memset(lineOut, 0, sizeof(lineOut));
+            QC::usize li = 0;
+            for (const char *q = textStart; q < textEnd && li + 1 < sizeof(lineOut); ++q)
+                lineOut[li++] = *q;
+            if (li + 2 < sizeof(lineOut))
+            {
+                lineOut[li++] = '\r';
+                lineOut[li++] = '\n';
+            }
+            lineOut[li] = '\0';
+
+            const QC::Status wst = QK::SecurityCenter::instance().secureWriteFile(path, lineOut, li, appendMode);
+            if (wst != QC::Status::Success)
             {
                 ctx.writeLine("echo: cannot open output file");
                 return true;
             }
-
-            if (appendMode)
-                (void)file->seek(0, QFS::SeekOrigin::End);
-
-            if (textEnd > textStart)
-                (void)file->write(textStart, static_cast<QC::usize>(textEnd - textStart));
-            (void)file->write("\r\n", 2);
-
-            QFS::VFS::instance().close(file);
             return true;
         }
 
@@ -1069,46 +1755,39 @@ namespace QK::CmdCenter
                 return true;
             }
 
-            QFS::File *file = QFS::VFS::instance().open(path, QFS::OpenMode::Read);
-            if (!file)
+            QC::Vector<char> fileBuf;
+            if (!readFileToNullTerminatedBuffer(path, fileBuf, 256 * 1024))
             {
                 ctx.writeLine("cat: cannot open file");
                 return true;
             }
 
             // Stream as lines.
-            char inBuf[256];
             char lineBuf[512];
             QC::usize lineLen = 0;
             QC::String::memset(lineBuf, 0, sizeof(lineBuf));
 
-            while (true)
+            const char *in = fileBuf.data();
+            for (QC::usize k = 0; in && in[k]; ++k)
             {
-                QC::isize n = file->read(inBuf, sizeof(inBuf));
-                if (n <= 0)
-                    break;
-
-                for (QC::isize i = 0; i < n; ++i)
+                char c = in[k];
+                if (c == '\r')
+                    continue;
+                if (c == '\n')
                 {
-                    char c = inBuf[i];
-                    if (c == '\r')
-                        continue;
-                    if (c == '\n')
-                    {
-                        lineBuf[lineLen] = '\0';
-                        ctx.writeLine(lineBuf);
-                        lineLen = 0;
-                        continue;
-                    }
-
-                    if (lineLen + 1 >= sizeof(lineBuf))
-                    {
-                        lineBuf[lineLen] = '\0';
-                        ctx.writeLine(lineBuf);
-                        lineLen = 0;
-                    }
-                    lineBuf[lineLen++] = c;
+                    lineBuf[lineLen] = '\0';
+                    ctx.writeLine(lineBuf);
+                    lineLen = 0;
+                    continue;
                 }
+
+                if (lineLen + 1 >= sizeof(lineBuf))
+                {
+                    lineBuf[lineLen] = '\0';
+                    ctx.writeLine(lineBuf);
+                    lineLen = 0;
+                }
+                lineBuf[lineLen++] = c;
             }
 
             if (lineLen > 0)
@@ -1116,8 +1795,1279 @@ namespace QK::CmdCenter
                 lineBuf[lineLen] = '\0';
                 ctx.writeLine(lineBuf);
             }
+            return true;
+        }
 
-            QFS::VFS::instance().close(file);
+        static bool cmdStat(const char *args, const QC::Cmd::Context &ctx, void *)
+        {
+            Session *s = sessionFrom();
+            char tok[256];
+            QC::String::memset(tok, 0, sizeof(tok));
+            const char *p = args;
+            if (!readToken(p, tok, sizeof(tok)))
+            {
+                ctx.writeLine("usage: stat <path>");
+                return true;
+            }
+
+            char path[256];
+            QC::String::memset(path, 0, sizeof(path));
+            if (!resolvePath(s, tok, path, sizeof(path)))
+            {
+                ctx.writeLine("stat: invalid path");
+                return true;
+            }
+
+            QFS::FileInfo info;
+            QC::String::memset(&info, 0, sizeof(info));
+            const QC::Status st = QFS::statPath(path, &info);
+            if (st != QC::Status::Success)
+            {
+                ctx.writeLine("stat: not found");
+                return true;
+            }
+
+            const char *type = "other";
+            if (info.type == QFS::FileType::Regular)
+                type = "file";
+            else if (info.type == QFS::FileType::Directory)
+                type = "dir";
+            else if (info.type == QFS::FileType::SymLink)
+                type = "symlink";
+
+            char line[256];
+            QC::String::memset(line, 0, sizeof(line));
+            (void)appendString(line, sizeof(line), "path=");
+            (void)appendString(line, sizeof(line), path);
+            (void)appendString(line, sizeof(line), " type=");
+            (void)appendString(line, sizeof(line), type);
+            (void)appendString(line, sizeof(line), " size=");
+            (void)appendU64Dec(line, sizeof(line), info.size);
+            ctx.writeLine(line);
+            return true;
+        }
+
+        static bool cmdSync(const char *, const QC::Cmd::Context &ctx, void *)
+        {
+            const QC::Status st = QFS::VFS::instance().syncAll();
+            if (st == QC::Status::Success)
+                ctx.writeLine("sync: ok");
+            else
+                ctx.writeLine("sync: completed with filesystem errors");
+            return true;
+        }
+
+        static bool cmdMount(const char *args, const QC::Cmd::Context &ctx, void *)
+        {
+            char tok[128];
+            QC::String::memset(tok, 0, sizeof(tok));
+            const char *p = args;
+            if (!readToken(p, tok, sizeof(tok)) || QC::String::strcmp(tok, "list") == 0)
+            {
+                QFS::VolumeInfo info[32] = {};
+                const QC::usize count = QFS::VolumeManager::instance().copyVolumeInfo(info, sizeof(info) / sizeof(info[0]));
+                if (count == 0)
+                {
+                    ctx.writeLine("mount: no registered volumes");
+                    return true;
+                }
+                for (QC::usize i = 0; i < count; ++i)
+                {
+                    char line[256];
+                    QC::String::memset(line, 0, sizeof(line));
+                    (void)appendString(line, sizeof(line), info[i].name);
+                    (void)appendString(line, sizeof(line), " -> ");
+                    (void)appendString(line, sizeof(line), info[i].mountPath);
+                    (void)appendString(line, sizeof(line), info[i].mounted ? " mounted=" : " mounted=");
+                    (void)appendString(line, sizeof(line), info[i].mounted ? "1" : "0");
+                    (void)appendString(line, sizeof(line), " auto=");
+                    (void)appendString(line, sizeof(line), info[i].autoMount ? "1" : "0");
+                    ctx.writeLine(line);
+                }
+                return true;
+            }
+
+            QC::Status st = QC::Status::Success;
+            if (QC::String::strcmp(tok, "all") == 0)
+            {
+                (void)applyFstabAutoMountOverrides();
+                st = QFS::VolumeManager::instance().mountAll();
+            }
+            else
+            {
+                st = QFS::VolumeManager::instance().mountVolume(tok);
+            }
+
+            char line[96];
+            QC::String::memset(line, 0, sizeof(line));
+            (void)appendString(line, sizeof(line), "mount: ");
+            (void)appendString(line, sizeof(line), statusName(st));
+            ctx.writeLine(line);
+            return true;
+        }
+
+        static bool cmdUmount(const char *args, const QC::Cmd::Context &ctx, void *)
+        {
+            char tok[128];
+            QC::String::memset(tok, 0, sizeof(tok));
+            const char *p = args;
+            if (!readToken(p, tok, sizeof(tok)))
+            {
+                ctx.writeLine("usage: umount <volume|mount_path>");
+                return true;
+            }
+
+            const QC::Status st = QFS::VolumeManager::instance().unmountVolume(tok);
+            char line[96];
+            QC::String::memset(line, 0, sizeof(line));
+            (void)appendString(line, sizeof(line), "umount: ");
+            (void)appendString(line, sizeof(line), statusName(st));
+            ctx.writeLine(line);
+            return true;
+        }
+
+        static bool cmdFstab(const char *args, const QC::Cmd::Context &ctx, void *)
+        {
+            char op[64];
+            QC::String::memset(op, 0, sizeof(op));
+            const char *p = args;
+            if (!readToken(p, op, sizeof(op)) || QC::String::strcmp(op, "list") == 0)
+            {
+                QK::Db::Store &db = QK::Db::Store::instance();
+                (void)loadFstabStore(db);
+                QK::Db::Entry entries[64] = {};
+                const QC::usize count = db.list(entries, sizeof(entries) / sizeof(entries[0]));
+                if (count == 0)
+                {
+                    ctx.writeLine("fstab: empty");
+                    return true;
+                }
+                for (QC::usize i = 0; i < count; ++i)
+                {
+                    if (QC::String::memcmp(entries[i].key, "fstab.", 6) != 0)
+                        continue;
+                    char line[256];
+                    QC::String::memset(line, 0, sizeof(line));
+                    (void)appendString(line, sizeof(line), entries[i].key + 6);
+                    (void)appendString(line, sizeof(line), " auto=");
+                    (void)appendString(line, sizeof(line), entries[i].value);
+                    ctx.writeLine(line);
+                }
+                return true;
+            }
+
+            if (QC::String::strcmp(op, "apply") == 0)
+            {
+                const QC::Status st = applyFstabAutoMountOverrides();
+                char line[96];
+                QC::String::memset(line, 0, sizeof(line));
+                (void)appendString(line, sizeof(line), "fstab: apply=");
+                (void)appendString(line, sizeof(line), statusName(st));
+                ctx.writeLine(line);
+                return true;
+            }
+
+            char vol[64];
+            QC::String::memset(vol, 0, sizeof(vol));
+            if (!readToken(p, vol, sizeof(vol)))
+            {
+                ctx.writeLine("usage: fstab <list|apply|add|del> <volume>");
+                return true;
+            }
+
+            QK::Db::Store &db = QK::Db::Store::instance();
+            QC::Status st = loadFstabStore(db);
+            if (st != QC::Status::Success)
+            {
+                ctx.writeLine("fstab: load failed");
+                return true;
+            }
+
+            char key[96];
+            fstabKeyForVolume(vol, key, sizeof(key));
+            if (QC::String::strcmp(op, "add") == 0)
+            {
+                (void)QFS::VolumeManager::instance().setAutoMount(vol, true);
+                st = db.set(key, "1");
+                if (st == QC::Status::Success)
+                    st = db.save();
+            }
+            else if (QC::String::strcmp(op, "del") == 0)
+            {
+                (void)QFS::VolumeManager::instance().setAutoMount(vol, false);
+                st = db.erase(key);
+                if (st == QC::Status::Success)
+                    st = db.save();
+            }
+            else
+            {
+                ctx.writeLine("usage: fstab <list|apply|add|del> <volume>");
+                return true;
+            }
+
+            char line[96];
+            QC::String::memset(line, 0, sizeof(line));
+            (void)appendString(line, sizeof(line), "fstab: ");
+            (void)appendString(line, sizeof(line), statusName(st));
+            ctx.writeLine(line);
+            return true;
+        }
+
+        static bool cmdTodoAdd(const char *args, const QC::Cmd::Context &ctx, void *)
+        {
+            const char *p = args ? skipSpaces(args) : nullptr;
+            if (!p || !*p)
+            {
+                ctx.writeLine("usage: todoadd <note text>");
+                return true;
+            }
+
+            static constexpr const char *kTodoInboxPath = "/system/config/TODO_INBOX.TXT";
+            if (!allowWriteToPath(kTodoInboxPath, ctx, "todoadd"))
+                return true;
+
+            (void)QFS::VFS::instance().createDir("/system/config");
+            QFS::File *f = QFS::VFS::instance().open(kTodoInboxPath,
+                                                     QFS::OpenMode::Write | QFS::OpenMode::Create | QFS::OpenMode::Append);
+            if (!f)
+            {
+                ctx.writeLine("todoadd: cannot open inbox");
+                return true;
+            }
+
+            char line[384];
+            QC::String::memset(line, 0, sizeof(line));
+            (void)appendString(line, sizeof(line), "- [ ] ");
+            (void)appendString(line, sizeof(line), p);
+            (void)appendString(line, sizeof(line), "\\n");
+
+            const QC::usize total = QC::String::strlen(line);
+            QC::usize off = 0;
+            while (off < total)
+            {
+                const QC::isize n = f->write(line + off, total - off);
+                if (n <= 0)
+                {
+                    QFS::VFS::instance().close(f);
+                    ctx.writeLine("todoadd: write failed");
+                    return true;
+                }
+                off += static_cast<QC::usize>(n);
+            }
+
+            (void)f->sync();
+            QFS::VFS::instance().close(f);
+            ctx.writeLine("todoadd: added");
+            return true;
+        }
+
+        static bool cmdAlias(const char *args, const QC::Cmd::Context &ctx, void *)
+        {
+            const char *p = args;
+            p = p ? skipSpaces(p) : nullptr;
+
+            auto &reg = QC::Cmd::Registry::instance();
+            if (!p || *p == '\0')
+            {
+                if (reg.aliasCount() == 0)
+                {
+                    ctx.writeLine("alias: (empty)");
+                    return true;
+                }
+
+                for (QC::usize i = 0; i < reg.aliasCount(); ++i)
+                {
+                    const char *name = reg.aliasNameAt(i);
+                    const char *exp = reg.aliasExpansionAt(i);
+                    if (!name || !*name || !exp || !*exp)
+                        continue;
+
+                    char line[320];
+                    QC::String::memset(line, 0, sizeof(line));
+                    (void)appendString(line, sizeof(line), name);
+                    (void)appendString(line, sizeof(line), " => ");
+                    (void)appendString(line, sizeof(line), exp);
+                    ctx.writeLine(line);
+                }
+                return true;
+            }
+
+            char name[48];
+            QC::String::memset(name, 0, sizeof(name));
+            if (!readToken(p, name, sizeof(name)))
+            {
+                ctx.writeLine("usage: alias <name> <expansion>");
+                return true;
+            }
+
+            p = skipSpaces(p);
+            if (!p || *p == '\0')
+            {
+                ctx.writeLine("usage: alias <name> <expansion>");
+                return true;
+            }
+
+            if (!reg.registerAlias(name, p, true))
+            {
+                ctx.writeLine("alias: failed");
+                return true;
+            }
+
+            if (!saveAliasMap(&ctx))
+            {
+                ctx.writeLine("alias: set but not persisted");
+                return true;
+            }
+
+            ctx.writeLine("alias: ok");
+            return true;
+        }
+
+        static bool cmdUnalias(const char *args, const QC::Cmd::Context &ctx, void *)
+        {
+            const char *p = args;
+            char name[48];
+            QC::String::memset(name, 0, sizeof(name));
+            if (!readToken(p, name, sizeof(name)))
+            {
+                ctx.writeLine("usage: unalias <name>");
+                return true;
+            }
+
+            auto &reg = QC::Cmd::Registry::instance();
+            if (!reg.removeAlias(name))
+            {
+                ctx.writeLine("unalias: not found");
+                return true;
+            }
+
+            if (!saveAliasMap(&ctx))
+            {
+                ctx.writeLine("unalias: removed but not persisted");
+                return true;
+            }
+
+            ctx.writeLine("unalias: ok");
+            return true;
+        }
+
+        static bool cmdAliasReload(const char *, const QC::Cmd::Context &ctx, void *)
+        {
+            (void)loadAliasMap(&ctx, true);
+            return true;
+        }
+
+        static bool cmdSource(const char *args, const QC::Cmd::Context &ctx, void *)
+        {
+            Session *s = sessionFrom();
+            char tok[256];
+            QC::String::memset(tok, 0, sizeof(tok));
+            const char *p = args;
+            if (!readToken(p, tok, sizeof(tok)))
+            {
+                ctx.writeLine("usage: source <file.cmd>");
+                return true;
+            }
+
+            char path[256];
+            QC::String::memset(path, 0, sizeof(path));
+            if (!resolvePath(s, tok, path, sizeof(path)))
+            {
+                ctx.writeLine("source: invalid path");
+                return true;
+            }
+
+            if (g_scriptDepth >= kMaxScriptDepth)
+            {
+                ctx.writeLine("source: script nesting limit reached");
+                return true;
+            }
+
+            QC::Vector<char> buf;
+            if (!readFileToNullTerminatedBuffer(path, buf, 128 * 1024))
+            {
+                ctx.writeLine("source: cannot read script");
+                return true;
+            }
+
+            ++g_scriptDepth;
+
+            QC::usize commands = 0;
+            QC::usize failures = 0;
+            char line[320];
+            QC::String::memset(line, 0, sizeof(line));
+            QC::usize li = 0;
+
+            auto runLine = [&](char *raw)
+            {
+                trimInPlace(raw);
+                if (raw[0] == '\0' || raw[0] == '#')
+                    return;
+                ++commands;
+                if (!QC::Cmd::Registry::instance().execute(raw, ctx))
+                    ++failures;
+            };
+
+            const char *it = buf.data();
+            while (it && *it)
+            {
+                char c = *it++;
+                if (c == '\r')
+                    continue;
+                if (c == '\n')
+                {
+                    line[li] = '\0';
+                    runLine(line);
+                    li = 0;
+                    line[0] = '\0';
+                    continue;
+                }
+                if (li + 1 < sizeof(line))
+                    line[li++] = c;
+            }
+            if (li)
+            {
+                line[li] = '\0';
+                runLine(line);
+            }
+
+            --g_scriptDepth;
+
+            char summary[128];
+            QC::String::memset(summary, 0, sizeof(summary));
+            (void)appendString(summary, sizeof(summary), "source: commands=");
+            (void)appendU64Dec(summary, sizeof(summary), static_cast<QC::u64>(commands));
+            (void)appendString(summary, sizeof(summary), " failures=");
+            (void)appendU64Dec(summary, sizeof(summary), static_cast<QC::u64>(failures));
+            ctx.writeLine(summary);
+
+            return true;
+        }
+
+        static bool cmdImgPreview(const char *args, const QC::Cmd::Context &ctx, void *)
+        {
+            Session *s = sessionFrom();
+            char tok[256];
+            QC::String::memset(tok, 0, sizeof(tok));
+            const char *p = args;
+            if (!readToken(p, tok, sizeof(tok)))
+            {
+                ctx.writeLine("usage: imgpreview <path>");
+                return true;
+            }
+
+            char path[256];
+            QC::String::memset(path, 0, sizeof(path));
+            if (!resolvePath(s, tok, path, sizeof(path)))
+            {
+                ctx.writeLine("imgpreview: invalid path");
+                return true;
+            }
+
+            QK::ImageReader::LoadResult res;
+            const QC::Status st = QK::ImageReader::loadAsset(path, res);
+            if (st != QC::Status::Success)
+            {
+                ctx.writeLine("imgpreview: decode failed");
+                return true;
+            }
+
+            char line[192];
+            QC::String::memset(line, 0, sizeof(line));
+            (void)appendString(line, sizeof(line), "imgpreview: format=");
+            (void)appendString(line, sizeof(line), QK::ImageReader::formatName(res.format));
+            (void)appendString(line, sizeof(line), " size=");
+            (void)appendU64Dec(line, sizeof(line), res.surface.width);
+            (void)appendString(line, sizeof(line), "x");
+            (void)appendU64Dec(line, sizeof(line), res.surface.height);
+            (void)appendString(line, sizeof(line), " pixels=");
+            (void)appendU64Dec(line, sizeof(line), static_cast<QC::u64>(res.surface.pixels.size()));
+            ctx.writeLine(line);
+
+            if (!res.surface.pixels.empty())
+            {
+                char p0[64];
+                QC::String::memset(p0, 0, sizeof(p0));
+                (void)appendString(p0, sizeof(p0), "imgpreview: argb0=");
+                (void)appendU64Dec(p0, sizeof(p0), static_cast<QC::u64>(res.surface.pixels[0]));
+                ctx.writeLine(p0);
+            }
+
+            return true;
+        }
+
+        static bool cmdModFetch(const char *args, const QC::Cmd::Context &ctx, void *)
+        {
+            char id[48];
+            QC::String::memset(id, 0, sizeof(id));
+            const char *p = args;
+            if (!readToken(p, id, sizeof(id)))
+            {
+                ctx.writeLine("usage: modfetch <module_id>");
+                return true;
+            }
+
+            QK::Module::FetchReport rep;
+            const QC::Status st = QK::Module::Loader::instance().fetchWithDependencies(id, &rep);
+            if (st != QC::Status::Success)
+            {
+                QK::Module::InspectionState insp{};
+                (void)QK::Module::Loader::instance().lastInspectionState(insp);
+                if (insp.detail[0])
+                {
+                    char fail[256];
+                    QC::String::memset(fail, 0, sizeof(fail));
+                    (void)appendString(fail, sizeof(fail), "modfetch: failed (");
+                    (void)appendString(fail, sizeof(fail), insp.detail);
+                    if (insp.quarantinePath[0])
+                    {
+                        (void)appendString(fail, sizeof(fail), "; quarantine=");
+                        (void)appendString(fail, sizeof(fail), insp.quarantinePath);
+                    }
+                    (void)appendString(fail, sizeof(fail), ")");
+                    ctx.writeLine(fail);
+                }
+                else
+                {
+                    ctx.writeLine("modfetch: failed (catalog/module/dependency error)");
+                }
+                return true;
+            }
+
+            char line[160];
+            QC::String::memset(line, 0, sizeof(line));
+            (void)appendString(line, sizeof(line), "modfetch: loaded modules=");
+            (void)appendU64Dec(line, sizeof(line), rep.loadedModules);
+            (void)appendString(line, sizeof(line), " bytes=");
+            (void)appendU64Dec(line, sizeof(line), rep.loadedBytes);
+            (void)appendString(line, sizeof(line), " parked=");
+            (void)appendU64Dec(line, sizeof(line), rep.parkedModules);
+            ctx.writeLine(line);
+            return true;
+        }
+
+        static bool cmdDepGraph(const char *args, const QC::Cmd::Context &ctx, void *)
+        {
+            char id[48];
+            QC::String::memset(id, 0, sizeof(id));
+            const char *p = args;
+            if (!readToken(p, id, sizeof(id)))
+            {
+                ctx.writeLine("usage: depgraph <module_id>");
+                return true;
+            }
+
+            QK::Module::DependencyEdge edges[64];
+            QC::usize n = QK::Module::Loader::instance().buildDependencyGraph(id, edges, 64);
+            if (n == 0)
+            {
+                ctx.writeLine("depgraph: no dependencies or module not found");
+                return true;
+            }
+
+            ctx.writeLine("depgraph: mermaid");
+            ctx.writeLine("graph TD");
+            for (QC::usize i = 0; i < n; ++i)
+            {
+                char line[128];
+                QC::String::memset(line, 0, sizeof(line));
+                (void)appendString(line, sizeof(line), "  ");
+                (void)appendString(line, sizeof(line), edges[i].from);
+                (void)appendString(line, sizeof(line), " --> ");
+                (void)appendString(line, sizeof(line), edges[i].to);
+                ctx.writeLine(line);
+            }
+            return true;
+        }
+
+        static bool cmdModule(const char *args, const QC::Cmd::Context &ctx, void *)
+        {
+            char sub[16];
+            QC::String::memset(sub, 0, sizeof(sub));
+            const char *p = args;
+            if (!readToken(p, sub, sizeof(sub)))
+            {
+                ctx.writeLine("usage: module <list|load|unload> [module_id]");
+                return true;
+            }
+
+            auto &loader = QK::Module::Loader::instance();
+
+            if (streqIgnoreCase(sub, "list"))
+            {
+                QK::Module::LoadedModule mods[32] = {};
+                const QC::usize total = loader.listLoaded(mods, sizeof(mods) / sizeof(mods[0]));
+                if (total == 0)
+                {
+                    ctx.writeLine("module: no loaded modules");
+                    return true;
+                }
+
+                const QC::usize shown = (total < (sizeof(mods) / sizeof(mods[0]))) ? total : (sizeof(mods) / sizeof(mods[0]));
+                for (QC::usize i = 0; i < shown; ++i)
+                {
+                    char line[256];
+                    QC::String::memset(line, 0, sizeof(line));
+                    (void)appendString(line, sizeof(line), "module id=");
+                    (void)appendString(line, sizeof(line), mods[i].id);
+                    (void)appendString(line, sizeof(line), " bytes=");
+                    (void)appendU64Dec(line, sizeof(line), mods[i].bytes);
+                    (void)appendString(line, sizeof(line), " deps=");
+                    (void)appendU64Dec(line, sizeof(line), mods[i].depCount);
+                    ctx.writeLine(line);
+                }
+                if (shown < total)
+                    ctx.writeLine("module: list truncated");
+                return true;
+            }
+
+            char id[48];
+            QC::String::memset(id, 0, sizeof(id));
+            if (!readToken(p, id, sizeof(id)))
+            {
+                ctx.writeLine("usage: module <load|unload> <module_id>");
+                return true;
+            }
+
+            if (streqIgnoreCase(sub, "load"))
+            {
+                bool sandboxLoad = false;
+                char modeTok[16];
+                QC::String::memset(modeTok, 0, sizeof(modeTok));
+                if (readToken(p, modeTok, sizeof(modeTok)))
+                {
+                    if (streqIgnoreCase(modeTok, "sandbox") || streqIgnoreCase(modeTok, "first"))
+                        sandboxLoad = true;
+                    else
+                    {
+                        ctx.writeLine("module: optional mode must be 'sandbox'");
+                        return true;
+                    }
+                }
+
+                char execPayload[128];
+                QC::String::memset(execPayload, 0, sizeof(execPayload));
+                (void)appendString(execPayload, sizeof(execPayload), "module load id=");
+                (void)appendString(execPayload, sizeof(execPayload), id);
+                (void)appendString(execPayload, sizeof(execPayload), sandboxLoad ? " sandbox=1" : " sandbox=0");
+
+                QK::SecurityCenter::DispatchRequest req{};
+                req.op = QK::SecurityCenter::DispatchOp::ExecRequest;
+                req.payload = execPayload;
+                QK::SecurityCenter::DispatchResult res{};
+                const QC::Status execSt = QK::SecurityCenter::instance().dispatch(req, &res);
+                if (execSt != QC::Status::Success)
+                {
+                    char deny[192];
+                    QC::String::memset(deny, 0, sizeof(deny));
+                    (void)appendString(deny, sizeof(deny), "module: denied by SC");
+                    if (res.detail[0])
+                    {
+                        (void)appendString(deny, sizeof(deny), " (");
+                        (void)appendString(deny, sizeof(deny), res.detail);
+                        (void)appendString(deny, sizeof(deny), ")");
+                    }
+                    ctx.writeLine(deny);
+                    return true;
+                }
+
+                QK::Module::FetchReport rep{};
+                const QC::Status st = sandboxLoad ? loader.loadSandboxed(id, &rep) : loader.load(id, &rep);
+                if (st != QC::Status::Success)
+                {
+                    QK::Module::InspectionState insp{};
+                    (void)loader.lastInspectionState(insp);
+                    if (insp.detail[0])
+                    {
+                        char fail[256];
+                        QC::String::memset(fail, 0, sizeof(fail));
+                        (void)appendString(fail, sizeof(fail), "module: load failed (");
+                        (void)appendString(fail, sizeof(fail), insp.detail);
+                        if (insp.quarantinePath[0])
+                        {
+                            (void)appendString(fail, sizeof(fail), "; quarantine=");
+                            (void)appendString(fail, sizeof(fail), insp.quarantinePath);
+                        }
+                        (void)appendString(fail, sizeof(fail), ")");
+                        ctx.writeLine(fail);
+                    }
+                    else
+                    {
+                        ctx.writeLine("module: load failed");
+                    }
+                    return true;
+                }
+
+                char line[128];
+                QC::String::memset(line, 0, sizeof(line));
+                (void)appendString(line, sizeof(line), "module: loaded modules=");
+                (void)appendU64Dec(line, sizeof(line), rep.loadedModules);
+                (void)appendString(line, sizeof(line), " bytes=");
+                (void)appendU64Dec(line, sizeof(line), rep.loadedBytes);
+                (void)appendString(line, sizeof(line), " parked=");
+                (void)appendU64Dec(line, sizeof(line), rep.parkedModules);
+                (void)appendString(line, sizeof(line), sandboxLoad ? " mode=sandbox" : " mode=direct");
+                ctx.writeLine(line);
+                return true;
+            }
+
+            if (streqIgnoreCase(sub, "unload"))
+            {
+                const QC::Status st = loader.unload(id);
+                if (st == QC::Status::Busy)
+                {
+                    ctx.writeLine("module: unload blocked by loaded dependents");
+                    return true;
+                }
+                if (st != QC::Status::Success)
+                {
+                    ctx.writeLine("module: unload failed");
+                    return true;
+                }
+                ctx.writeLine("module: unloaded");
+                return true;
+            }
+
+            ctx.writeLine("usage: module <list|load|unload> [module_id] [sandbox]");
+            return true;
+        }
+
+        static bool dispatchSysOp(QK::SecurityCenter::DispatchOp op,
+                                  const char *payload,
+                                  QC::u32 flags,
+                                  const QC::Cmd::Context &ctx,
+                                  const char *prefix)
+        {
+            QK::SecurityCenter::DispatchRequest req{};
+            req.op = op;
+            req.flags = flags;
+            req.payload = payload;
+
+            QK::SecurityCenter::DispatchResult res{};
+            const QC::Status st = QK::SecurityCenter::instance().dispatch(req, &res);
+
+            char line[192];
+            QC::String::memset(line, 0, sizeof(line));
+            (void)appendString(line, sizeof(line), prefix);
+            (void)appendString(line, sizeof(line), ": ");
+            (void)appendString(line, sizeof(line), (st == QC::Status::Success) ? "ok" : "failed");
+            if (res.detail[0])
+            {
+                (void)appendString(line, sizeof(line), " (");
+                (void)appendString(line, sizeof(line), res.detail);
+                (void)appendString(line, sizeof(line), ")");
+            }
+            ctx.writeLine(line);
+            return st == QC::Status::Success;
+        }
+
+        static bool parsePrefixedU32(const char *token, const char *prefix, QC::u32 &out)
+        {
+            if (!token || !prefix)
+                return false;
+            const QC::usize prefixLen = QC::String::strlen(prefix);
+            if (QC::String::memcmp(token, prefix, prefixLen) != 0)
+                return false;
+            return parseU32(token + prefixLen, out);
+        }
+
+        static void parseAuditWindowArgs(const char *args, QC::usize defaultPageSize, QC::usize &outPage, QC::usize &outPageSize)
+        {
+            outPage = 0;
+            outPageSize = defaultPageSize;
+
+            char tok[32];
+            QC::String::memset(tok, 0, sizeof(tok));
+            const char *p = args;
+            bool plainSizeConsumed = false;
+            while (readToken(p, tok, sizeof(tok)))
+            {
+                QC::u32 v = 0;
+                if (parsePrefixedU32(tok, "page=", v))
+                {
+                    outPage = v;
+                    continue;
+                }
+                if (parsePrefixedU32(tok, "size=", v) && v > 0)
+                {
+                    outPageSize = v;
+                    continue;
+                }
+                if (!plainSizeConsumed && parseU32(tok, v) && v > 0)
+                {
+                    outPageSize = v;
+                    plainSizeConsumed = true;
+                }
+            }
+
+            if (outPageSize == 0)
+                outPageSize = defaultPageSize;
+            if (outPageSize > 256)
+                outPageSize = 256;
+        }
+
+        static bool dumpOwnerEvents(const QC::Cmd::Context &ctx, QC::usize page, QC::usize pageSize)
+        {
+            const QC::usize total = QK::Boot::Events::Count();
+            if (total == 0)
+            {
+                ctx.writeLine("sys_audit_view: no events");
+                return true;
+            }
+
+            if (pageSize == 0)
+                pageSize = 64;
+            const QC::usize pageOffset = page * pageSize;
+            if (pageOffset >= total)
+            {
+                ctx.writeLine("sys_audit_view: page out of range");
+                return true;
+            }
+
+            const QC::usize end = total - pageOffset;
+            const QC::usize start = (end > pageSize) ? (end - pageSize) : 0;
+            const QC::usize pageCount = (total + pageSize - 1) / pageSize;
+            char header[96];
+            QC::String::memset(header, 0, sizeof(header));
+            (void)appendString(header, sizeof(header), "audit page=");
+            (void)appendU64Dec(header, sizeof(header), static_cast<QC::u64>(page));
+            (void)appendString(header, sizeof(header), " pages=");
+            (void)appendU64Dec(header, sizeof(header), static_cast<QC::u64>(pageCount));
+            ctx.writeLine(header);
+
+            QK::Boot::Events::Record recs[8] = {};
+            QC::usize offset = start;
+            auto &sc = QK::SecurityCenter::instance();
+            while (offset < end)
+            {
+                const QC::usize remaining = end - offset;
+                const QC::usize n = QK::Boot::Events::CopyOut(offset, recs, remaining < 8 ? remaining : 8);
+                if (n == 0)
+                    break;
+                offset += n;
+
+                for (QC::usize i = 0; i < n; ++i)
+                {
+                    char line[320];
+                    char detail[160];
+                    QC::String::memset(line, 0, sizeof(line));
+                    QC::String::memset(detail, 0, sizeof(detail));
+                    (void)appendString(line, sizeof(line), "EV seq=");
+                    (void)appendU64Dec(line, sizeof(line), recs[i].seq);
+                    (void)appendString(line, sizeof(line), " stage=");
+                    (void)appendString(line, sizeof(line), recs[i].stage[0] ? recs[i].stage : "(none)");
+                    (void)appendString(line, sizeof(line), " type=");
+                    (void)appendString(line, sizeof(line), recs[i].type[0] ? recs[i].type : "(none)");
+                    if (recs[i].details[0])
+                    {
+                        sc.redactAuditText(recs[i].details, detail, sizeof(detail));
+                        if (detail[0])
+                        {
+                            (void)appendString(line, sizeof(line), " ");
+                            (void)appendString(line, sizeof(line), detail);
+                        }
+                    }
+                    ctx.writeLine(line);
+                }
+            }
+
+            return true;
+        }
+
+        static bool ownerLogPolicySatisfied(const char *args, const QC::Cmd::Context &ctx)
+        {
+            auto &sc = QK::SecurityCenter::instance();
+            if (!sc.ownerUnlocked())
+            {
+                ctx.writeLine("ownerlogs: owner unlock required");
+                return false;
+            }
+
+            if (sc.ownerLockedOut())
+            {
+                ctx.writeLine("ownerlogs: owner lockout active");
+                return false;
+            }
+
+            const auto mode = QK::Boot::Config::GetStartupMode();
+            if (!(mode == QK::Boot::Config::StartupMode::Terminal || mode == QK::Boot::Config::StartupMode::Recovery))
+            {
+                ctx.writeLine("ownerlogs: physical presence required (console session)");
+                return false;
+            }
+
+            char tok[32];
+            QC::String::memset(tok, 0, sizeof(tok));
+            const char *p = args;
+            bool hasPresence = false;
+            while (readToken(p, tok, sizeof(tok)))
+            {
+                if (streqIgnoreCase(tok, "present") || streqIgnoreCase(tok, "physical"))
+                {
+                    hasPresence = true;
+                    break;
+                }
+            }
+
+            if (!hasPresence)
+            {
+                ctx.writeLine("ownerlogs: add 'present' to confirm physical presence");
+                return false;
+            }
+            return true;
+        }
+
+        static bool cmdOwnerLogs(const char *args, const QC::Cmd::Context &ctx, void *)
+        {
+            if (!ownerLogPolicySatisfied(args, ctx))
+                return true;
+
+            if (QK::SecurityCenter::instance().allowAuditLogAccess(false) == QC::Status::Busy)
+            {
+                ctx.writeLine("ownerlogs: rate limited");
+                return true;
+            }
+
+            QC::usize page = 0;
+            QC::usize pageSize = 64;
+            parseAuditWindowArgs(args, 64, page, pageSize);
+            return dumpOwnerEvents(ctx, page, pageSize);
+        }
+
+        static bool cmdSysAuditView(const char *args, const QC::Cmd::Context &ctx, void *)
+        {
+            if (!ownerLogPolicySatisfied(args, ctx))
+                return true;
+
+            if (!dispatchSysOp(QK::SecurityCenter::DispatchOp::AuditView, args, 0, ctx, "sys_audit_view"))
+                return true;
+
+            QC::usize page = 0;
+            QC::usize pageSize = 64;
+            parseAuditWindowArgs(args, 64, page, pageSize);
+            return dumpOwnerEvents(ctx, page, pageSize);
+        }
+
+        static bool cmdSysExecRequest(const char *args, const QC::Cmd::Context &ctx, void *)
+        {
+            const char *payload = args ? skipSpaces(args) : nullptr;
+            if (!payload || *payload == '\0')
+            {
+                ctx.writeLine("usage: sys_exec_request <request_text>");
+                return true;
+            }
+            (void)dispatchSysOp(QK::SecurityCenter::DispatchOp::ExecRequest, payload, 0, ctx, "sys_exec_request");
+            return true;
+        }
+
+        static bool cmdSysRotateSst(const char *args, const QC::Cmd::Context &ctx, void *)
+        {
+            if (!ownerLogPolicySatisfied(args, ctx))
+                return true;
+            QC::u32 flags = 1;
+            char tok[32];
+            QC::String::memset(tok, 0, sizeof(tok));
+            const char *p = args;
+            while (readToken(p, tok, sizeof(tok)))
+            {
+                if (QC::String::strcmp(tok, "policy") == 0)
+                    flags = 0;
+            }
+            (void)dispatchSysOp(QK::SecurityCenter::DispatchOp::RotateSst, args, flags, ctx, "sys_rotate_sst");
+            return true;
+        }
+
+        static bool cmdSysTrustCheck(const char *, const QC::Cmd::Context &ctx, void *)
+        {
+            (void)dispatchSysOp(QK::SecurityCenter::DispatchOp::TrustCheck, nullptr, 0, ctx, "sys_trust_check");
+            return true;
+        }
+
+        static bool cmdSysUpdateVerify(const char *args, const QC::Cmd::Context &ctx, void *)
+        {
+            const char *payload = args ? skipSpaces(args) : nullptr;
+            (void)dispatchSysOp(QK::SecurityCenter::DispatchOp::UpdateVerify, payload, 0, ctx, "sys_update_verify");
+            return true;
+        }
+
+        static bool cmdSysVaultRequest(const char *args, const QC::Cmd::Context &ctx, void *)
+        {
+            const char *payload = args ? skipSpaces(args) : nullptr;
+            if (!payload || *payload == '\0')
+            {
+                ctx.writeLine("usage: sys_vault_request <request_text>");
+                return true;
+            }
+            (void)dispatchSysOp(QK::SecurityCenter::DispatchOp::VaultRequest, payload, 0, ctx, "sys_vault_request");
+            return true;
+        }
+
+        static bool cmdShowMode(const char *, const QC::Cmd::Context &ctx, void *)
+        {
+            const auto mode = QK::Boot::Config::GetStartupMode();
+            char line[96];
+            QC::String::memset(line, 0, sizeof(line));
+            (void)appendString(line, sizeof(line), "startup mode: ");
+            (void)appendString(line, sizeof(line), QK::Boot::Config::StartupModeName(mode));
+            ctx.writeLine(line);
+            return true;
+        }
+
+        static bool cmdSetMode(const char *args, const QC::Cmd::Context &ctx, void *)
+        {
+            char tok[32];
+            QC::String::memset(tok, 0, sizeof(tok));
+            const char *p = args;
+            if (!readToken(p, tok, sizeof(tok)))
+            {
+                ctx.writeLine("usage: setmode <DESKTOP|TERMINAL|SAFE>");
+                return true;
+            }
+
+            QK::Boot::Config::StartupMode mode = QK::Boot::Config::StartupMode::Desktop;
+            if (streqIgnoreCase(tok, "DESKTOP"))
+                mode = QK::Boot::Config::StartupMode::Desktop;
+            else if (streqIgnoreCase(tok, "TERMINAL"))
+                mode = QK::Boot::Config::StartupMode::Terminal;
+            else if (streqIgnoreCase(tok, "SAFE"))
+                mode = QK::Boot::Config::StartupMode::Safe;
+            else
+            {
+                ctx.writeLine("setmode: allowed values DESKTOP|TERMINAL|SAFE");
+                return true;
+            }
+
+            const QC::Status st = QK::Boot::Config::PersistStartupMode(mode, nullptr);
+            if (st != QC::Status::Success)
+            {
+                ctx.writeLine("setmode: failed to persist startup.cfg");
+                return true;
+            }
+
+            ctx.writeLine("setmode: persisted (takes effect next boot)");
+            return true;
+        }
+
+        static bool cmdStopx(const char *, const QC::Cmd::Context &ctx, void *)
+        {
+            if (QK::Boot::Desktop::RequestStopDesktop())
+                ctx.writeLine("stopx: desktop stop requested");
+            else
+                ctx.writeLine("stopx: desktop is not active");
+            return true;
+        }
+
+        static bool cmdSysAuditExport(const char *args, const QC::Cmd::Context &ctx, void *)
+        {
+            if (!ownerLogPolicySatisfied(args, ctx))
+                return true;
+
+            if (!dispatchSysOp(QK::SecurityCenter::DispatchOp::AuditExport, args, 0, ctx, "sys_audit_export"))
+                return true;
+
+            Session *s = sessionFrom();
+            char pathTok[256];
+            QC::String::memset(pathTok, 0, sizeof(pathTok));
+            const char *p = args;
+            if (!readToken(p, pathTok, sizeof(pathTok)))
+            {
+                ctx.writeLine("usage: sys_audit_export <path> present");
+                return true;
+            }
+
+            char path[256];
+            QC::String::memset(path, 0, sizeof(path));
+            if (!resolvePath(s, pathTok, path, sizeof(path)))
+            {
+                ctx.writeLine("sys_audit_export: invalid path");
+                return true;
+            }
+
+            if (!allowWriteToPath(path, ctx, "sys_audit_export"))
+                return true;
+
+            QFS::File *f = QFS::VFS::instance().open(path,
+                                                     QFS::OpenMode::Write | QFS::OpenMode::Create | QFS::OpenMode::Truncate);
+            if (!f)
+            {
+                ctx.writeLine("sys_audit_export: cannot open output");
+                return true;
+            }
+
+            const QC::usize total = QK::Boot::Events::Count();
+            QK::Boot::Events::Record recs[8] = {};
+            QC::usize offset = 0;
+            while (offset < total)
+            {
+                const QC::usize n = QK::Boot::Events::CopyOut(offset, recs, sizeof(recs) / sizeof(recs[0]));
+                if (n == 0)
+                    break;
+                offset += n;
+
+                for (QC::usize i = 0; i < n; ++i)
+                {
+                    char line[384];
+                    char detail[160];
+                    QC::String::memset(line, 0, sizeof(line));
+                    QC::String::memset(detail, 0, sizeof(detail));
+                    (void)appendString(line, sizeof(line), "EV seq=");
+                    (void)appendU64Dec(line, sizeof(line), recs[i].seq);
+                    (void)appendString(line, sizeof(line), " t_ms=");
+                    (void)appendU64Dec(line, sizeof(line), recs[i].t_ms);
+                    (void)appendString(line, sizeof(line), " stage=");
+                    (void)appendString(line, sizeof(line), recs[i].stage[0] ? recs[i].stage : "(none)");
+                    (void)appendString(line, sizeof(line), " type=");
+                    (void)appendString(line, sizeof(line), recs[i].type[0] ? recs[i].type : "(none)");
+                    if (recs[i].details[0])
+                    {
+                        QK::SecurityCenter::instance().redactAuditText(recs[i].details, detail, sizeof(detail));
+                        (void)appendString(line, sizeof(line), " ");
+                        (void)appendString(line, sizeof(line), detail);
+                    }
+                    (void)appendString(line, sizeof(line), "\n");
+
+                    const QC::usize need = QC::String::strlen(line);
+                    QC::usize off = 0;
+                    while (off < need)
+                    {
+                        const QC::isize w = f->write(line + off, need - off);
+                        if (w <= 0)
+                        {
+                            QFS::VFS::instance().close(f);
+                            ctx.writeLine("sys_audit_export: write failed");
+                            return true;
+                        }
+                        off += static_cast<QC::usize>(w);
+                    }
+                }
+            }
+
+            QFS::VFS::instance().close(f);
+            ctx.writeLine("sys_audit_export: ok");
+            return true;
+        }
+
+        static bool cmdDb(const char *args, const QC::Cmd::Context &ctx, void *)
+        {
+            char sub[16];
+            QC::String::memset(sub, 0, sizeof(sub));
+            const char *p = args;
+            if (!readToken(p, sub, sizeof(sub)))
+            {
+                ctx.writeLine("usage: db <status|list|get|set|del|save|reload> ...");
+                return true;
+            }
+
+            auto &db = QK::Db::Store::instance();
+            if (streqIgnoreCase(sub, "reload"))
+            {
+                const QC::Status st = db.load();
+                ctx.writeLine(st == QC::Status::Success ? "db: reloaded" : "db: reload failed");
+                return true;
+            }
+
+            if (streqIgnoreCase(sub, "save"))
+            {
+                const QC::Status st = db.save();
+                ctx.writeLine(st == QC::Status::Success ? "db: saved" : "db: save failed");
+                return true;
+            }
+
+            if (streqIgnoreCase(sub, "status"))
+            {
+                char line[160];
+                QC::String::memset(line, 0, sizeof(line));
+                (void)appendString(line, sizeof(line), "db path=");
+                (void)appendString(line, sizeof(line), db.path());
+                (void)appendString(line, sizeof(line), " entries=");
+                (void)appendU64Dec(line, sizeof(line), db.list(nullptr, 0));
+                ctx.writeLine(line);
+                return true;
+            }
+
+            if (streqIgnoreCase(sub, "list"))
+            {
+                QK::Db::Entry entries[32] = {};
+                const QC::usize total = db.list(entries, sizeof(entries) / sizeof(entries[0]));
+                if (total == 0)
+                {
+                    ctx.writeLine("db: empty");
+                    return true;
+                }
+
+                const QC::usize shown = (total < (sizeof(entries) / sizeof(entries[0]))) ? total : (sizeof(entries) / sizeof(entries[0]));
+                for (QC::usize i = 0; i < shown; ++i)
+                {
+                    char line[272];
+                    QC::String::memset(line, 0, sizeof(line));
+                    (void)appendString(line, sizeof(line), entries[i].key);
+                    (void)appendString(line, sizeof(line), "=");
+                    (void)appendString(line, sizeof(line), entries[i].value);
+                    ctx.writeLine(line);
+                }
+                if (shown < total)
+                    ctx.writeLine("db: list truncated");
+                return true;
+            }
+
+            char key[48];
+            QC::String::memset(key, 0, sizeof(key));
+            if (!readToken(p, key, sizeof(key)))
+            {
+                ctx.writeLine("db: missing key");
+                return true;
+            }
+
+            if (streqIgnoreCase(sub, "get"))
+            {
+                char value[192];
+                QC::String::memset(value, 0, sizeof(value));
+                const QC::Status st = db.get(key, value, sizeof(value));
+                if (st != QC::Status::Success)
+                {
+                    ctx.writeLine("db: key not found");
+                    return true;
+                }
+                char line[256];
+                QC::String::memset(line, 0, sizeof(line));
+                (void)appendString(line, sizeof(line), key);
+                (void)appendString(line, sizeof(line), "=");
+                (void)appendString(line, sizeof(line), value);
+                ctx.writeLine(line);
+                return true;
+            }
+
+            if (streqIgnoreCase(sub, "del"))
+            {
+                const QC::Status st = db.erase(key);
+                if (st != QC::Status::Success)
+                {
+                    ctx.writeLine("db: key not found");
+                    return true;
+                }
+                ctx.writeLine("db: deleted");
+                return true;
+            }
+
+            if (streqIgnoreCase(sub, "set"))
+            {
+                const char *value = p ? skipSpaces(p) : nullptr;
+                if (!value || *value == '\0')
+                {
+                    ctx.writeLine("usage: db set <key> <value>");
+                    return true;
+                }
+                const QC::Status st = db.set(key, value);
+                if (st != QC::Status::Success)
+                {
+                    ctx.writeLine("db: set failed");
+                    return true;
+                }
+                ctx.writeLine("db: set");
+                return true;
+            }
+
+            ctx.writeLine("usage: db <status|list|get|set|del|save|reload> ...");
             return true;
         }
 
@@ -1159,15 +3109,12 @@ namespace QK::CmdCenter
                 return true;
             }
 
-            // Create if missing; if it already exists, do not truncate.
-            QFS::File *file = QFS::VFS::instance().open(path, QFS::OpenMode::Write | QFS::OpenMode::Create);
-            if (!file)
+            const QC::Status st = QK::SecurityCenter::instance().secureWriteFile(path, nullptr, 0, true);
+            if (st != QC::Status::Success)
             {
                 ctx.writeLine("touch: cannot create file");
                 return true;
             }
-
-            QFS::VFS::instance().close(file);
             return true;
         }
 
@@ -1637,8 +3584,8 @@ namespace QK::CmdCenter
                 return true;
             }
 
-            QFS::File *file = QFS::VFS::instance().open(path, QFS::OpenMode::Read);
-            if (!file)
+            QC::Vector<char> dump;
+            if (!readFileToNullTerminatedBuffer(path, dump, static_cast<QC::usize>(maxBytes)))
             {
                 ctx.writeLine("hexdump: cannot open file");
                 return true;
@@ -1646,10 +3593,13 @@ namespace QK::CmdCenter
 
             static const char kHex[] = "0123456789abcdef";
             QC::u64 offset = 0;
-            while (offset < maxBytes)
+            QC::usize inOff = 0;
+            while (offset < maxBytes && inOff < dump.size())
             {
                 QC::u8 buf[16];
-                QC::isize n = file->read(buf, sizeof(buf));
+                QC::isize n = 0;
+                for (; n < 16 && inOff < dump.size() && dump[inOff] != '\0'; ++n, ++inOff)
+                    buf[n] = static_cast<QC::u8>(dump[inOff]);
                 if (n <= 0)
                     break;
 
@@ -1703,8 +3653,6 @@ namespace QK::CmdCenter
                 ctx.writeLine(line);
                 offset += (QC::u64)n;
             }
-
-            QFS::VFS::instance().close(file);
             return true;
         }
 
@@ -2617,7 +4565,7 @@ namespace QK::CmdCenter
 
             if (keep)
             {
-                char keepLine[96];
+                char keepLine[128];
                 QC::String::memset(keepLine, 0, sizeof(keepLine));
                 (void)appendString(keepLine, sizeof(keepLine), "httpget: kept connection (lp=");
                 (void)appendU64Dec(keepLine, sizeof(keepLine), conn->localPort);
@@ -2668,6 +4616,32 @@ namespace QK::CmdCenter
                 ctx.writeLine("tcpdrop: dropped");
             else
                 ctx.writeLine("tcpdrop: not found");
+            return true;
+        }
+
+        static bool cmdPorts(const char *args, const QC::Cmd::Context &ctx, void *)
+        {
+            const char *p = args ? skipSpaces(args) : nullptr;
+            if (!p || *p == '\0' || streqIgnoreCase(p, "status"))
+            {
+                ctx.writeLine("ports: usage: ports close-unused");
+                return true;
+            }
+
+            if (!streqIgnoreCase(p, "close-unused"))
+            {
+                ctx.writeLine("ports: unknown arg (use close-unused)");
+                return true;
+            }
+
+            QNet::Stack::instance().initialize();
+            const QC::usize n = QNet::Stack::instance().closeUnusedPorts();
+
+            char line[96];
+            QC::String::memset(line, 0, sizeof(line));
+            (void)appendString(line, sizeof(line), "ports: closed=");
+            (void)appendU64Dec(line, sizeof(line), static_cast<QC::u64>(n));
+            ctx.writeLine(line);
             return true;
         }
 
@@ -3065,6 +5039,17 @@ namespace QK::CmdCenter
             (void)appendU64Dec(counts, sizeof(counts), static_cast<QC::u64>(regs.resourceCount()));
             ctx.writeLine(counts);
 
+            {
+                auto &cr = QC::Cmd::Registry::instance();
+                char cmdLine[160];
+                QC::String::memset(cmdLine, 0, sizeof(cmdLine));
+                (void)appendString(cmdLine, sizeof(cmdLine), "CommandRuntime: exec=");
+                (void)appendU64Dec(cmdLine, sizeof(cmdLine), cr.executionCount());
+                (void)appendString(cmdLine, sizeof(cmdLine), " parse_err=");
+                (void)appendU64Dec(cmdLine, sizeof(cmdLine), cr.parseErrorCount());
+                ctx.writeLine(cmdLine);
+            }
+
             const auto &sec = regs.securityState();
             char secLine[256];
             QC::String::memset(secLine, 0, sizeof(secLine));
@@ -3074,6 +5059,18 @@ namespace QK::CmdCenter
             (void)appendString(secLine, sizeof(secLine), sec.enforcementEnabled ? "true" : "false");
             (void)appendString(secLine, sizeof(secLine), " measured=");
             (void)appendU64Dec(secLine, sizeof(secLine), static_cast<QC::u64>(sec.measuredArtifactCount));
+            (void)appendString(secLine, sizeof(secLine), " sc_mem(ns/nd/me)=");
+            (void)appendString(secLine, sizeof(secLine), sec.scNoSwap ? "1" : "0");
+            (void)appendString(secLine, sizeof(secLine), "/");
+            (void)appendString(secLine, sizeof(secLine), sec.scNoDump ? "1" : "0");
+            (void)appendString(secLine, sizeof(secLine), "/");
+            (void)appendString(secLine, sizeof(secLine), sec.scMinimalExposure ? "1" : "0");
+            (void)appendString(secLine, sizeof(secLine), " exec_guard=");
+            (void)appendString(secLine, sizeof(secLine), sec.guardedExecutionEnabled ? "1" : "0");
+            (void)appendString(secLine, sizeof(secLine), " app_space=");
+            (void)appendString(secLine, sizeof(secLine), sec.protectedAppExecutionSpace ? "1" : "0");
+            (void)appendString(secLine, sizeof(secLine), " sc_hidden=");
+            (void)appendString(secLine, sizeof(secLine), sec.hiddenEncryptedScStorage ? "1" : "0");
             ctx.writeLine(secLine);
 
             const auto tf = QSC::SecurityCenter::instance().taskFlowMetrics();
@@ -3085,8 +5082,10 @@ namespace QK::CmdCenter
             (void)appendU64Dec(tfLine, sizeof(tfLine), static_cast<QC::u64>(tf.running));
             (void)appendString(tfLine, sizeof(tfLine), " completed=");
             (void)appendU64Dec(tfLine, sizeof(tfLine), static_cast<QC::u64>(tf.completed));
-            (void)appendString(tfLine, sizeof(tfLine), " total=");
+            (void)appendString(tfLine, sizeof(tfLine), " executed=");
             (void)appendU64Dec(tfLine, sizeof(tfLine), tf.totalExecuted);
+            (void)appendString(tfLine, sizeof(tfLine), " cached=");
+            (void)appendU64Dec(tfLine, sizeof(tfLine), tf.cachedCompletions);
             (void)appendString(tfLine, sizeof(tfLine), " memo(h/m/r)=");
             (void)appendU64Dec(tfLine, sizeof(tfLine), tf.memoHits);
             (void)appendString(tfLine, sizeof(tfLine), "/");
@@ -3094,6 +5093,44 @@ namespace QK::CmdCenter
             (void)appendString(tfLine, sizeof(tfLine), "/");
             (void)appendU64Dec(tfLine, sizeof(tfLine), tf.memoRefused);
             ctx.writeLine(tfLine);
+
+            char tfTimeLine[256];
+            QC::String::memset(tfTimeLine, 0, sizeof(tfTimeLine));
+            (void)appendString(tfTimeLine, sizeof(tfTimeLine), "TaskFlowTiming: build(total/avg)=");
+            (void)appendU64Dec(tfTimeLine, sizeof(tfTimeLine), tf.totalBuildMs);
+            (void)appendString(tfTimeLine, sizeof(tfTimeLine), "/");
+            (void)appendU64Dec(tfTimeLine, sizeof(tfTimeLine), tf.averageBuildMs);
+            (void)appendString(tfTimeLine, sizeof(tfTimeLine), " exec(total/avg)=");
+            (void)appendU64Dec(tfTimeLine, sizeof(tfTimeLine), tf.totalExecutionMs);
+            (void)appendString(tfTimeLine, sizeof(tfTimeLine), "/");
+            (void)appendU64Dec(tfTimeLine, sizeof(tfTimeLine), tf.averageExecutionMs);
+            (void)appendString(tfTimeLine, sizeof(tfTimeLine), " qwait(total/avg)=");
+            (void)appendU64Dec(tfTimeLine, sizeof(tfTimeLine), tf.totalQueueDelayMs);
+            (void)appendString(tfTimeLine, sizeof(tfTimeLine), "/");
+            (void)appendU64Dec(tfTimeLine, sizeof(tfTimeLine), tf.averageQueueDelayMs);
+            (void)appendString(tfTimeLine, sizeof(tfTimeLine), " sched(+/-)=");
+            (void)appendU64Dec(tfTimeLine, sizeof(tfTimeLine), tf.schedulerPromotions);
+            (void)appendString(tfTimeLine, sizeof(tfTimeLine), "/");
+            (void)appendU64Dec(tfTimeLine, sizeof(tfTimeLine), tf.schedulerDemotions);
+            ctx.writeLine(tfTimeLine);
+
+            char tfPerf[256];
+            QC::String::memset(tfPerf, 0, sizeof(tfPerf));
+            (void)appendString(tfPerf, sizeof(tfPerf), "TaskFlowPerf: cross(+/-)=");
+            (void)appendU64Dec(tfPerf, sizeof(tfPerf), tf.crossFlowPromotions);
+            (void)appendString(tfPerf, sizeof(tfPerf), "/");
+            (void)appendU64Dec(tfPerf, sizeof(tfPerf), tf.crossFlowDemotions);
+            (void)appendString(tfPerf, sizeof(tfPerf), " policy(a/t/s/c)=");
+            (void)appendU64Dec(tfPerf, sizeof(tfPerf), tf.policyAllow);
+            (void)appendString(tfPerf, sizeof(tfPerf), "/");
+            (void)appendU64Dec(tfPerf, sizeof(tfPerf), tf.policyThrottle);
+            (void)appendString(tfPerf, sizeof(tfPerf), "/");
+            (void)appendU64Dec(tfPerf, sizeof(tfPerf), tf.policySuspend);
+            (void)appendString(tfPerf, sizeof(tfPerf), "/");
+            (void)appendU64Dec(tfPerf, sizeof(tfPerf), tf.policyCancel);
+            (void)appendString(tfPerf, sizeof(tfPerf), " redundant=");
+            (void)appendU64Dec(tfPerf, sizeof(tfPerf), tf.redundantSubmissions);
+            ctx.writeLine(tfPerf);
 
             if (seed.moduleCount > 0)
             {
@@ -3170,7 +5207,7 @@ namespace QK::CmdCenter
             return true;
         }
 
-        static bool cmdBootLog(const char *, const QC::Cmd::Context &ctx, void *)
+        static bool cmdBootLog(const char *args, const QC::Cmd::Context &ctx, void *)
         {
             const QC::usize total = QK::Boot::Log::Size();
             if (total == 0)
@@ -3179,10 +5216,96 @@ namespace QK::CmdCenter
                 return true;
             }
 
+            QC::usize startOffset = 0;
+            const char *p = args ? skipSpaces(args) : nullptr;
+            if (p && *p)
+            {
+                char mode[16];
+                QC::String::memset(mode, 0, sizeof(mode));
+                if (!readToken(p, mode, sizeof(mode)))
+                {
+                    ctx.writeLine("usage: bootlog [tail [lines]]");
+                    return true;
+                }
+
+                if (!streqIgnoreCase(mode, "tail"))
+                {
+                    ctx.writeLine("usage: bootlog [tail [lines]]");
+                    return true;
+                }
+
+                constexpr QC::u32 kDefaultTailLines = 120;
+                constexpr QC::u32 kMaxTailLines = 512;
+
+                QC::u32 tailLines = kDefaultTailLines;
+                char linesTok[16];
+                QC::String::memset(linesTok, 0, sizeof(linesTok));
+                if (readToken(p, linesTok, sizeof(linesTok)))
+                {
+                    QC::u32 parsed = 0;
+                    if (!parseU32(linesTok, parsed) || parsed == 0)
+                    {
+                        ctx.writeLine("bootlog: invalid line count");
+                        return true;
+                    }
+                    tailLines = parsed;
+                    if (tailLines > kMaxTailLines)
+                        tailLines = kMaxTailLines;
+                }
+
+                // Find the byte offset for the last N lines.
+                // We track line starts in a bounded ring to stay freestanding-friendly.
+                constexpr QC::usize kTrack = static_cast<QC::usize>(kMaxTailLines + 1);
+                QC::usize starts[kTrack];
+                QC::usize head = 0;
+                QC::usize count = 1;
+                starts[0] = 0;
+
+                auto pushStart = [&](QC::usize off)
+                {
+                    if (count < kTrack)
+                    {
+                        starts[(head + count) % kTrack] = off;
+                        ++count;
+                        return;
+                    }
+
+                    starts[head] = off;
+                    head = (head + 1) % kTrack;
+                };
+
+                char scan[256];
+                QC::usize off = 0;
+                while (off < total)
+                {
+                    const QC::usize n = QK::Boot::Log::CopyOut(off, scan, sizeof(scan));
+                    if (n == 0)
+                        break;
+
+                    for (QC::usize i = 0; i < n; ++i)
+                    {
+                        if (scan[i] == '\n')
+                        {
+                            const QC::usize next = off + i + 1;
+                            if (next < total)
+                                pushStart(next);
+                        }
+                    }
+
+                    off += n;
+                }
+
+                if (count > static_cast<QC::usize>(tailLines))
+                {
+                    const QC::usize idx = (head + (count - static_cast<QC::usize>(tailLines))) % kTrack;
+                    startOffset = starts[idx];
+                }
+            }
+
             char chunk[256];
             char line[512];
             QC::usize lineLen = 0;
-            QC::usize offset = 0;
+            QC::usize offset = startOffset;
 
             while (offset < total)
             {
@@ -3353,6 +5476,8 @@ namespace QK::CmdCenter
                 return "Pending";
             case QQ::TaskState::Queued:
                 return "Queued";
+            case QQ::TaskState::Blocked:
+                return "Blocked";
             case QQ::TaskState::Running:
                 return "Running";
             case QQ::TaskState::Suspended:
@@ -3619,6 +5744,14 @@ namespace QK::CmdCenter
                 (void)appendU64Dec(line, sizeof(line), ex.memoizationMisses());
                 (void)appendString(line, sizeof(line), " refused=");
                 (void)appendU64Dec(line, sizeof(line), ex.memoizationRefused());
+                (void)appendString(line, sizeof(line), " evict=");
+                (void)appendU64Dec(line, sizeof(line), ex.memoizationEvictions());
+                (void)appendString(line, sizeof(line), " safetyrej=");
+                (void)appendU64Dec(line, sizeof(line), ex.memoizationSafetyRejected());
+                (void)appendString(line, sizeof(line), " cache=");
+                (void)appendU64Dec(line, sizeof(line), ex.memoizationCacheEntries());
+                (void)appendString(line, sizeof(line), "/");
+                (void)appendU64Dec(line, sizeof(line), ex.memoizationCacheCapacity());
                 (void)appendString(line, sizeof(line), " allowlist=");
                 (void)appendString(line, sizeof(line), ex.memoizationAllowlistEnabled() ? "1" : "0");
                 (void)appendString(line, sizeof(line), " allowcnt=");
@@ -3818,6 +5951,396 @@ namespace QK::CmdCenter
             return true;
         }
 
+        static bool cmdAiruntime(const char *args, const QC::Cmd::Context &ctx, void *)
+        {
+            const char *a = args;
+            while (a && (*a == ' ' || *a == '\t'))
+                ++a;
+
+            auto equalsIgnoreCaseToken = [](const char *s, const char *token) -> bool {
+                if (!s || !token)
+                    return false;
+                auto lower = [](char c) -> char {
+                    if (c >= 'A' && c <= 'Z')
+                        return static_cast<char>(c - 'A' + 'a');
+                    return c;
+                };
+                while (*s && (*s == ' ' || *s == '\t'))
+                    ++s;
+                const char *t = token;
+                while (*s && *t && lower(*s) == lower(*t))
+                {
+                    ++s;
+                    ++t;
+                }
+                if (*t != 0)
+                    return false;
+                return (*s == 0) || (*s == ' ') || (*s == '\t');
+            };
+
+            auto statusName = [](QC::Status st) -> const char * {
+                switch (st)
+                {
+                case QC::Status::Success:
+                    return "Success";
+                case QC::Status::Error:
+                    return "Error";
+                case QC::Status::InvalidParam:
+                    return "InvalidParam";
+                case QC::Status::OutOfMemory:
+                    return "OutOfMemory";
+                case QC::Status::NotFound:
+                    return "NotFound";
+                case QC::Status::Timeout:
+                    return "Timeout";
+                case QC::Status::Busy:
+                    return "Busy";
+                case QC::Status::NotSupported:
+                    return "NotSupported";
+                }
+                return "?";
+            };
+
+            auto &ex = QQ::Executor::instance();
+
+            if (!a || *a == 0 || equalsIgnoreCaseToken(a, "status"))
+            {
+                char line[192];
+                QC::String::memset(line, 0, sizeof(line));
+                (void)appendString(line, sizeof(line), "airuntime: persisted=");
+                (void)appendString(line, sizeof(line), QK::AIRuntime::hasPersistentState() ? "1" : "0");
+                (void)appendString(line, sizeof(line), " memo=");
+                (void)appendString(line, sizeof(line), ex.memoizationEnabled() ? "1" : "0");
+                (void)appendString(line, sizeof(line), " allowlist=");
+                (void)appendString(line, sizeof(line), ex.memoizationAllowlistEnabled() ? "1" : "0");
+                (void)appendString(line, sizeof(line), " allowcnt=");
+                (void)appendU64Dec(line, sizeof(line), ex.memoizationAllowlistCount());
+                ctx.writeLine(line);
+                ctx.writeLine("usage: airuntime status|load|save|clear");
+                return true;
+            }
+
+            if (equalsIgnoreCaseToken(a, "load"))
+            {
+                const QC::Status st = QK::AIRuntime::loadPersistentState();
+                char line[96];
+                QC::String::memset(line, 0, sizeof(line));
+                (void)appendString(line, sizeof(line), "airuntime: load=");
+                (void)appendString(line, sizeof(line), statusName(st));
+                ctx.writeLine(line);
+                return true;
+            }
+
+            if (equalsIgnoreCaseToken(a, "save"))
+            {
+                const QC::Status st = QK::AIRuntime::savePersistentState();
+                char line[96];
+                QC::String::memset(line, 0, sizeof(line));
+                (void)appendString(line, sizeof(line), "airuntime: save=");
+                (void)appendString(line, sizeof(line), statusName(st));
+                ctx.writeLine(line);
+                return true;
+            }
+
+            if (equalsIgnoreCaseToken(a, "clear"))
+            {
+                const QC::Status st = QK::AIRuntime::clearPersistentState();
+                char line[96];
+                QC::String::memset(line, 0, sizeof(line));
+                (void)appendString(line, sizeof(line), "airuntime: clear=");
+                (void)appendString(line, sizeof(line), statusName(st));
+                ctx.writeLine(line);
+                return true;
+            }
+
+            ctx.writeLine("airuntime: unknown arg (use status|load|save|clear)");
+            return true;
+        }
+
+        static bool cmdTranscriptTest(const char *args, const QC::Cmd::Context &ctx, void *)
+        {
+            Session *s = sessionFrom();
+            const char *p = args ? skipSpaces(args) : nullptr;
+            if (!p || *p == '\0')
+            {
+                ctx.writeLine("usage: transcripttest <path> [unsafe]");
+                return true;
+            }
+
+            char fileArg[256];
+            QC::String::memset(fileArg, 0, sizeof(fileArg));
+            QC::usize fi = 0;
+            while (p[fi] && !isSpace(p[fi]) && fi + 1 < sizeof(fileArg))
+            {
+                fileArg[fi] = p[fi];
+                ++fi;
+            }
+            fileArg[fi] = '\0';
+
+            if (fi == 0)
+            {
+                ctx.writeLine("transcripttest: invalid path argument");
+                return true;
+            }
+
+            p = skipSpaces(p + fi);
+            const bool unsafe = (p && *p) ? (QC::String::strcmp(p, "unsafe") == 0) : false;
+
+            char absPath[256];
+            QC::String::memset(absPath, 0, sizeof(absPath));
+            if (!resolvePath(s, fileArg, absPath, sizeof(absPath)))
+            {
+                ctx.writeLine("transcripttest: invalid path");
+                return true;
+            }
+
+            QC::Vector<char> buf;
+            if (!readFileToNullTerminatedBuffer(absPath, buf, 1024 * 1024))
+            {
+                ctx.writeLine("transcripttest: cannot read transcript");
+                return true;
+            }
+
+            QK::CmdCenter::registerMvpCommands();
+            auto &reg = QC::Cmd::Registry::instance();
+
+            auto isBlocked = [&](const char *line) -> bool {
+                if (!line || !*line)
+                    return false;
+                auto tokenEq = [](const char *a, const char *b) -> bool {
+                    if (!a || !b)
+                        return false;
+                    while (*a && *b && !isSpace(*a) && !isSpace(*b))
+                    {
+                        char ca = *a;
+                        char cb = *b;
+                        if (ca >= 'A' && ca <= 'Z')
+                            ca = static_cast<char>(ca - 'A' + 'a');
+                        if (cb >= 'A' && cb <= 'Z')
+                            cb = static_cast<char>(cb - 'A' + 'a');
+                        if (ca != cb)
+                            return false;
+                        ++a;
+                        ++b;
+                    }
+                    const bool aEnd = (*a == '\0' || isSpace(*a));
+                    const bool bEnd = (*b == '\0' || isSpace(*b));
+                    return aEnd && bEnd;
+                };
+
+                static const char *kBlocked[] = {
+                    "shutdown", "reboot", "rm", "del", "touch", "mkdir", "sysformat", "recover"
+                };
+                for (QC::usize i = 0; i < (sizeof(kBlocked) / sizeof(kBlocked[0])); ++i)
+                {
+                    if (tokenEq(line, kBlocked[i]))
+                        return true;
+                }
+                return false;
+            };
+
+            auto lineContains = [](const char *hay, const char *needleBegin, const char *needleEnd) -> bool {
+                if (!hay || !needleBegin || !needleEnd || needleEnd <= needleBegin)
+                    return false;
+                const QC::usize nlen = static_cast<QC::usize>(needleEnd - needleBegin);
+                for (const char *h = hay; *h; ++h)
+                {
+                    QC::usize j = 0;
+                    while (j < nlen && h[j] && h[j] == needleBegin[j])
+                        ++j;
+                    if (j == nlen)
+                        return true;
+                }
+                return false;
+            };
+
+            struct MatchState
+            {
+                const QC::Vector<const char *> *begs = nullptr;
+                const QC::Vector<const char *> *ends = nullptr;
+                QC::usize nextExpected = 0;
+            };
+
+            auto matchOut = [&](const char *line, void *userData) {
+                MatchState *st = reinterpret_cast<MatchState *>(userData);
+                if (!st || !st->begs || !st->ends)
+                    return;
+                if (st->nextExpected >= st->begs->size())
+                    return;
+                const char *eb = (*(st->begs))[st->nextExpected];
+                const char *ee = (*(st->ends))[st->nextExpected];
+                if (lineContains(line, eb, ee))
+                    ++st->nextExpected;
+            };
+
+            QC::Cmd::AccessLevel role = ctx.callerAccess;
+            QC::u64 commands = 0;
+            QC::u64 passed = 0;
+            QC::u64 failed = 0;
+            QC::u64 skipped = 0;
+
+            QC::Vector<const char *> expBeg;
+            QC::Vector<const char *> expEnd;
+
+            const char *cur = buf.data();
+            while (cur && *cur)
+            {
+                const char *lineBegin = cur;
+                while (*cur && *cur != '\n' && *cur != '\r')
+                    ++cur;
+                const char *lineEnd = cur;
+                while (lineEnd > lineBegin && isSpace(*(lineEnd - 1)))
+                    --lineEnd;
+                while (*cur == '\r' || *cur == '\n')
+                    ++cur;
+
+                const char *t = lineBegin;
+                while (t < lineEnd && isSpace(*t))
+                    ++t;
+                if (!(t < lineEnd && *t == '>'))
+                    continue;
+
+                ++t;
+                while (t < lineEnd && isSpace(*t))
+                    ++t;
+
+                char cmd[256];
+                QC::String::memset(cmd, 0, sizeof(cmd));
+                QC::usize ci = 0;
+                for (const char *q = t; q < lineEnd && ci + 1 < sizeof(cmd); ++q)
+                    cmd[ci++] = *q;
+                cmd[ci] = '\0';
+
+                // Collect expected output lines until next prompt.
+                expBeg.clear();
+                expEnd.clear();
+                const char *scan = cur;
+                while (scan && *scan)
+                {
+                    const char *lb = scan;
+                    while (*scan && *scan != '\n' && *scan != '\r')
+                        ++scan;
+                    const char *le = scan;
+                    while (le > lb && isSpace(*(le - 1)))
+                        --le;
+
+                    const char *tt = lb;
+                    while (tt < le && isSpace(*tt))
+                        ++tt;
+                    if (tt < le && *tt == '>')
+                        break;
+
+                    if (tt < le)
+                    {
+                        expBeg.push_back(tt);
+                        expEnd.push_back(le);
+                    }
+
+                    while (*scan == '\r' || *scan == '\n')
+                        ++scan;
+                }
+                cur = scan;
+
+                if (cmd[0] == '\0')
+                    continue;
+
+                ++commands;
+
+                auto setRoleAndEcho = [&](QC::Cmd::AccessLevel r, const char *line) {
+                    role = r;
+                    MatchState ms{&expBeg, &expEnd, 0};
+                    matchOut(line, &ms);
+                    if (ms.nextExpected == expBeg.size())
+                        ++passed;
+                    else
+                        ++failed;
+                };
+
+                if (QC::String::strcmp(cmd, "admin") == 0)
+                {
+                    setRoleAndEcho(QC::Cmd::AccessLevel::Admin, "chmode: now Admin");
+                    continue;
+                }
+                if (QC::String::strcmp(cmd, "su") == 0)
+                {
+                    setRoleAndEcho(QC::Cmd::AccessLevel::SysAdmin, "chmode: now SysAdmin");
+                    continue;
+                }
+                if (QC::String::strcmp(cmd, "system") == 0)
+                {
+                    setRoleAndEcho(QC::Cmd::AccessLevel::System, "chmode: now System");
+                    continue;
+                }
+                if (QC::String::strcmp(cmd, "user") == 0)
+                {
+                    setRoleAndEcho(QC::Cmd::AccessLevel::User, "chmode: now User");
+                    continue;
+                }
+
+                if (!unsafe && isBlocked(cmd))
+                {
+                    ++skipped;
+                    continue;
+                }
+
+                MatchState ms{&expBeg, &expEnd, 0};
+                QC::Cmd::Context runCtx;
+                runCtx.out = +[](const char *line, void *userData) {
+                    MatchState *state = reinterpret_cast<MatchState *>(userData);
+                    if (!state)
+                        return;
+                    const QC::Vector<const char *> *begs = state->begs;
+                    const QC::Vector<const char *> *ends = state->ends;
+                    if (!begs || !ends || state->nextExpected >= begs->size())
+                        return;
+                    const char *eb = (*begs)[state->nextExpected];
+                    const char *ee = (*ends)[state->nextExpected];
+                    // Inline contains check (dup intentionally keeps this callback freestanding).
+                    const QC::usize nlen = static_cast<QC::usize>(ee - eb);
+                    for (const char *h = line; *h; ++h)
+                    {
+                        QC::usize j = 0;
+                        while (j < nlen && h[j] && h[j] == eb[j])
+                            ++j;
+                        if (j == nlen)
+                        {
+                            ++state->nextExpected;
+                            break;
+                        }
+                    }
+                };
+                runCtx.userData = &ms;
+                runCtx.callerAccess = role;
+
+                const bool handled = reg.execute(cmd, runCtx);
+                if (!handled)
+                    runCtx.writeLine("Unknown command. Type 'help'.");
+
+                if (ms.nextExpected == expBeg.size())
+                    ++passed;
+                else
+                    ++failed;
+            }
+
+            char summary[224];
+            QC::String::memset(summary, 0, sizeof(summary));
+            (void)appendString(summary, sizeof(summary), "transcripttest: commands=");
+            (void)appendU64Dec(summary, sizeof(summary), commands);
+            (void)appendString(summary, sizeof(summary), " pass=");
+            (void)appendU64Dec(summary, sizeof(summary), passed);
+            (void)appendString(summary, sizeof(summary), " fail=");
+            (void)appendU64Dec(summary, sizeof(summary), failed);
+            (void)appendString(summary, sizeof(summary), " skip=");
+            (void)appendU64Dec(summary, sizeof(summary), skipped);
+            ctx.writeLine(summary);
+
+            if (failed == 0)
+                ctx.writeLine("transcripttest: PASS");
+            else
+                ctx.writeLine("transcripttest: FAIL");
+            return true;
+        }
+
         static QQ::TaskResult memoTestFnSmall(void *, void *)
         {
             QQ::TaskResult r{};
@@ -4000,12 +6523,131 @@ namespace QK::CmdCenter
                 (void)appendString(line, sizeof(line), sigHex);
                 (void)appendString(line, sizeof(line), " in=");
                 (void)appendString(line, sizeof(line), inHex);
+                (void)appendString(line, sizeof(line), " prio=");
+                (void)appendU64Dec(line, sizeof(line), static_cast<QC::u64>(td->priority));
+                (void)appendString(line, sizeof(line), " state=");
+                (void)appendString(line, sizeof(line), stateName(td->state));
+                (void)appendString(line, sizeof(line), " build=");
+                (void)appendU64Dec(line, sizeof(line), td->buildDurationMs);
+                (void)appendString(line, sizeof(line), " qwait=");
+                (void)appendU64Dec(line, sizeof(line), td->queueDelayMs);
+                (void)appendString(line, sizeof(line), " weight=");
+                (void)appendU64Dec(line, sizeof(line), td->weightCost);
+                (void)appendString(line, sizeof(line), " exec=");
+                (void)appendU64Dec(line, sizeof(line), td->executionDurationMs);
                 ctx.writeLine(line);
                 ++printed;
             }
 
             if (printed == 0)
                 ctx.writeLine("taskls: (no tasks found)");
+
+            return true;
+        }
+
+        static bool cmdTaskFlowViz(const char *args, const QC::Cmd::Context &ctx, void *)
+        {
+            QC::u64 n = 20;
+            const char *a = args;
+            while (a && (*a == ' ' || *a == '\t'))
+                ++a;
+            if (a && *a)
+            {
+                auto parseU64 = [](const char *s, QC::u64 &out) -> bool {
+                    if (!s)
+                        return false;
+                    while (*s == ' ' || *s == '\t')
+                        ++s;
+                    if (*s < '0' || *s > '9')
+                        return false;
+                    QC::u64 v = 0;
+                    while (*s >= '0' && *s <= '9')
+                    {
+                        v = (v * 10) + (QC::u64)(*s - '0');
+                        ++s;
+                    }
+                    out = v;
+                    return true;
+                };
+                (void)parseU64(a, n);
+                if (n == 0)
+                    n = 1;
+                if (n > 100)
+                    n = 100;
+            }
+
+            auto &ex = QQ::Executor::instance();
+            const QC::usize avail = ex.recentTaskIdCount();
+            if (avail == 0)
+            {
+                ctx.writeLine("taskflowviz: (no tasks found)");
+                return true;
+            }
+
+            QC::Vector<QQ::TaskId> ids;
+            for (QC::usize i = 0; i < avail && ids.size() < n; ++i)
+            {
+                const QQ::TaskId id = ex.recentTaskIdAt(i);
+                if (id != QQ::INVALID_TASK)
+                    ids.push_back(id);
+            }
+
+            if (ids.empty())
+            {
+                ctx.writeLine("taskflowviz: (no tasks found)");
+                return true;
+            }
+
+            ctx.writeLine("taskflowviz: mermaid");
+            ctx.writeLine("graph LR");
+
+            for (QC::usize i = 0; i < ids.size(); ++i)
+            {
+                const QQ::TaskDescriptor *td = ex.taskDescriptor(ids[i]);
+                if (!td)
+                    continue;
+
+                char node[256];
+                QC::String::memset(node, 0, sizeof(node));
+                (void)appendString(node, sizeof(node), "  T");
+                (void)appendU64Dec(node, sizeof(node), static_cast<QC::u64>(ids[i]));
+                (void)appendString(node, sizeof(node), "[\"");
+                (void)appendU64Dec(node, sizeof(node), static_cast<QC::u64>(ids[i]));
+                (void)appendString(node, sizeof(node), ":");
+                (void)appendString(node, sizeof(node), td->name[0] ? td->name : "task");
+                (void)appendString(node, sizeof(node), " | p=");
+                (void)appendU64Dec(node, sizeof(node), static_cast<QC::u64>(td->priority));
+                (void)appendString(node, sizeof(node), "\"]");
+                ctx.writeLine(node);
+            }
+
+            auto inSet = [&](QQ::TaskId id) -> bool {
+                for (QC::usize i = 0; i < ids.size(); ++i)
+                    if (ids[i] == id)
+                        return true;
+                return false;
+            };
+
+            for (QC::usize i = 0; i < ids.size(); ++i)
+            {
+                const QQ::TaskDescriptor *td = ex.taskDescriptor(ids[i]);
+                if (!td)
+                    continue;
+                for (QC::usize d = 0; d < td->dependencies.size(); ++d)
+                {
+                    const QQ::TaskId depId = td->dependencies[d].taskId;
+                    if (depId == QQ::INVALID_TASK || !inSet(depId))
+                        continue;
+
+                    char edge[128];
+                    QC::String::memset(edge, 0, sizeof(edge));
+                    (void)appendString(edge, sizeof(edge), "  T");
+                    (void)appendU64Dec(edge, sizeof(edge), static_cast<QC::u64>(depId));
+                    (void)appendString(edge, sizeof(edge), " --> T");
+                    (void)appendU64Dec(edge, sizeof(edge), static_cast<QC::u64>(ids[i]));
+                    ctx.writeLine(edge);
+                }
+            }
 
             return true;
         }
@@ -4081,34 +6723,66 @@ namespace QK::CmdCenter
         auto &reg = QC::Cmd::Registry::instance();
         (void)reg.registerCommandExAccess("help", QC::Cmd::AccessLevel::Everyone, &cmdHelp, nullptr, "Show available commands (help [cmd])");
         (void)reg.registerCommandExAccess("whoami", QC::Cmd::AccessLevel::Everyone, &cmdWhoami, nullptr, "Show current access role");
-        (void)reg.registerCommandExAccess("echo", QC::Cmd::AccessLevel::User, &cmdEcho, nullptr, "Echo text (supports > and >> redirection)");
+        (void)reg.registerCommandExAccess("echo", QC::Cmd::AccessLevel::User, &cmdEcho, nullptr, "Echo text (redirection requires admin)");
         (void)reg.registerCommandExAccess("pwd", QC::Cmd::AccessLevel::User, &cmdPwd, nullptr, "Print working directory");
         (void)reg.registerCommandExAccess("cd", QC::Cmd::AccessLevel::User, &cmdCd, nullptr, "Change working directory (cd <path>)");
         (void)reg.registerCommandExAccess("ls", QC::Cmd::AccessLevel::User, &cmdLs, nullptr, "List directory contents (ls [path])");
         (void)reg.registerCommandExAccess("cat", QC::Cmd::AccessLevel::User, &cmdCat, nullptr, "Print file contents (cat <path>)");
-        (void)reg.registerCommandExAccess("touch", QC::Cmd::AccessLevel::User, &cmdTouch, nullptr, "Create empty file (touch <path>)");
-        (void)reg.registerCommandExAccess("mkdir", QC::Cmd::AccessLevel::User, &cmdMkdir, nullptr, "Create directory (mkdir <path>)");
-        (void)reg.registerCommandExAccess("rm", QC::Cmd::AccessLevel::User, &cmdRm, nullptr, "Remove file or directory (rm [-r] <path>)");
-        (void)reg.registerCommandExAccess("del", QC::Cmd::AccessLevel::User, &cmdDel, nullptr, "Delete files by pattern (del *.ext | name.* | *.*)");
+        (void)reg.registerCommandExAccess("stat", QC::Cmd::AccessLevel::User, &cmdStat, nullptr, "Show file metadata via VFS stat API (stat <path>)");
+        (void)reg.registerCommandExAccess("sync", QC::Cmd::AccessLevel::Admin, &cmdSync, nullptr, "Flush mounted filesystems (sync)");
+        (void)reg.registerCommandExAccess("mount", QC::Cmd::AccessLevel::Admin, &cmdMount, nullptr, "Mount registered volumes (mount [list|all|<volume>])");
+        (void)reg.registerCommandExAccess("umount", QC::Cmd::AccessLevel::Admin, &cmdUmount, nullptr, "Unmount volume or mount path (umount <volume|mount_path>)");
+        (void)reg.registerCommandExAccess("fstab", QC::Cmd::AccessLevel::Admin, &cmdFstab, nullptr, "Persist auto-mount policy (fstab list|apply|add|del <volume>)");
+        (void)reg.registerCommandExAccess("todoadd", QC::Cmd::AccessLevel::Admin, &cmdTodoAdd, nullptr, "Append a catch-all task note (todoadd <text>)");
+        (void)reg.registerCommandExAccess("touch", QC::Cmd::AccessLevel::Admin, &cmdTouch, nullptr, "Create empty file (touch <path>)");
+        (void)reg.registerCommandExAccess("mkdir", QC::Cmd::AccessLevel::Admin, &cmdMkdir, nullptr, "Create directory (mkdir <path>)");
+        (void)reg.registerCommandExAccess("rm", QC::Cmd::AccessLevel::Admin, &cmdRm, nullptr, "Remove file or directory (rm [-r] <path>)");
+        (void)reg.registerCommandExAccess("del", QC::Cmd::AccessLevel::Admin, &cmdDel, nullptr, "Delete files by pattern (del *.ext | name.* | *.*)");
+        (void)reg.registerCommandExAccess("source", QC::Cmd::AccessLevel::Admin, &cmdSource, nullptr, "Run script commands from file (source <file.cmd>)");
+        (void)reg.registerCommandExAccess("alias", QC::Cmd::AccessLevel::Admin, &cmdAlias, nullptr, "Manage persisted command aliases (alias [name expansion])");
+        (void)reg.registerCommandExAccess("unalias", QC::Cmd::AccessLevel::Admin, &cmdUnalias, nullptr, "Remove persisted alias (unalias <name>)");
+        (void)reg.registerCommandExAccess("aliasreload", QC::Cmd::AccessLevel::Admin, &cmdAliasReload, nullptr, "Reload command aliases from disk");
+        (void)reg.registerCommandExAccess("imgpreview", QC::Cmd::AccessLevel::User, &cmdImgPreview, nullptr, "Decode image and dump surface summary (imgpreview <path>)");
+        (void)reg.registerCommandExAccess("modfetch", QC::Cmd::AccessLevel::Admin, &cmdModFetch, nullptr, "Fetch, scan, and park module binary + dependencies from catalog (modfetch <module_id>)");
+        (void)reg.registerCommandExAccess("module", QC::Cmd::AccessLevel::Admin, &cmdModule, nullptr, "Manage loadable modules (module list|load [id] [sandbox]|unload)");
+        (void)reg.registerCommandExAccess("depgraph", QC::Cmd::AccessLevel::User, &cmdDepGraph, nullptr, "Emit module dependency graph from catalog (depgraph <module_id>)");
         (void)reg.registerCommandExAccess("hexdump", QC::Cmd::AccessLevel::User, &cmdHexdump, nullptr, "Hex dump a file (hexdump <path> [max_bytes])");
         (void)reg.registerCommandExAccess("shutdown", QC::Cmd::AccessLevel::Admin, &cmdShutdown, nullptr, "Request shutdown");
 
         // Boot/config helpers.
         (void)reg.registerCommandExAccess("tier", QC::Cmd::AccessLevel::User, &cmdTier, nullptr, "Show active config tier + staged early modules");
-        (void)reg.registerCommandExAccess("bootlog", QC::Cmd::AccessLevel::Admin, &cmdBootLog, nullptr, "Dump captured boot log output");
+        (void)reg.registerCommandExAccess("recover", QC::Cmd::AccessLevel::System, &cmdRecover, nullptr, "Guided restore from GOLDEN to PROD (/system or /PROD) (recover config|desktop|services)");
+        (void)reg.registerCommandExAccess("validate", QC::Cmd::AccessLevel::User, &cmdValidate, nullptr, "Validate key configs (validate [all|config|desktop|services])");
+        (void)reg.registerCommandExAccess("reboot", QC::Cmd::AccessLevel::System, &cmdReboot, nullptr, "Reboot immediately (reboot now)");
+        (void)reg.registerCommandExAccess("showmode", QC::Cmd::AccessLevel::User, &cmdShowMode, nullptr, "Show active startup mode (showmode)");
+        (void)reg.registerCommandExAccess("setmode", QC::Cmd::AccessLevel::Admin, &cmdSetMode, nullptr, "Persist startup mode to startup.cfg (setmode <DESKTOP|TERMINAL|SAFE>)");
+        (void)reg.registerCommandExAccess("stopx", QC::Cmd::AccessLevel::Admin, &cmdStopx, nullptr, "Stop desktop and return to console-only mode");
+        (void)reg.registerCommandExAccess("bootlog", QC::Cmd::AccessLevel::User, &cmdBootLog, nullptr, "Dump captured boot log output (bootlog [tail [lines]])");
         (void)reg.registerCommandExAccess("bootmodules", QC::Cmd::AccessLevel::Admin, &cmdBootModules, nullptr, "Dump early module trust metadata (role/status/hash/signature)");
         (void)reg.registerCommandExAccess("flowtest", QC::Cmd::AccessLevel::Admin, &cmdFlowTest, nullptr, "Smoke test Security Center flow policy (allow/delay/suspend/cancel)");
         (void)reg.registerCommandExAccess("flowcontrol", QC::Cmd::AccessLevel::SysAdmin, &cmdFlowControl, nullptr, "Control Security Center flow enforcement (status|bypass|enforce)");
         (void)reg.registerCommandExAccess("canonargtest", QC::Cmd::AccessLevel::Admin, &cmdCanonicalArgTest, nullptr, "Submit tasks with canonical args and print hashes");
         (void)reg.registerCommandExAccess("taskls", QC::Cmd::AccessLevel::User, &cmdTaskLs, nullptr, "List recent tasks (taskls [N])");
+        (void)reg.registerCommandExAccess("taskflowviz", QC::Cmd::AccessLevel::User, &cmdTaskFlowViz, nullptr, "Emit Mermaid graph for recent task dependencies (taskflowviz [N])");
         (void)reg.registerCommandExAccess("memocache", QC::Cmd::AccessLevel::Admin, &cmdMemoCache, nullptr, "Control memoization cache (status|on|off|clear)");
         (void)reg.registerCommandExAccess("memoallow", QC::Cmd::AccessLevel::SysAdmin, &cmdMemoAllow, nullptr, "Control memoization allowlist (status|on|off|clear|add|del)");
+        (void)reg.registerCommandExAccess("airuntime", QC::Cmd::AccessLevel::Admin, &cmdAiruntime, nullptr, "AI runtime persistence (status|load|save|clear)");
+        (void)reg.registerCommandExAccess("transcripttest", QC::Cmd::AccessLevel::Admin, &cmdTranscriptTest, nullptr, "Replay transcript commands through handlers (transcripttest <path> [unsafe])");
         (void)reg.registerCommandExAccess("memotest", QC::Cmd::AccessLevel::Admin, &cmdMemoTest, nullptr, "Submit cached tasks twice to demonstrate a memoization hit");
         (void)reg.registerCommandExAccess("bevdump", QC::Cmd::AccessLevel::Admin, &cmdBevDump, nullptr, "Dump boot event log (structured events)");
         (void)reg.registerCommandExAccess("scdumpownercred", QC::Cmd::AccessLevel::SysAdmin, &cmdScDumpOwnerCred, nullptr, "Dump Owner credential blob as hex for ramdisk seeding (scdumpownercred [raw|plain])");
+        (void)reg.registerCommandExAccess("ownerlogs", QC::Cmd::AccessLevel::Admin, &cmdOwnerLogs, nullptr, "Owner-gated audit view with paging/redaction (ownerlogs [N|size=N] [page=N] present)");
+        (void)reg.registerCommandExAccess("sys_audit_view", QC::Cmd::AccessLevel::SysAdmin, &cmdSysAuditView, nullptr, "Owner-gated audit view via SC dispatch (sys_audit_view [N|size=N] [page=N] present)");
+        (void)reg.registerCommandExAccess("sys_audit_export", QC::Cmd::AccessLevel::SysAdmin, &cmdSysAuditExport, nullptr, "Export audit events to file (sys_audit_export <path> present)");
+        (void)reg.registerCommandExAccess("sys_exec_request", QC::Cmd::AccessLevel::SysAdmin, &cmdSysExecRequest, nullptr, "Submit SC execution request (sys_exec_request <request_text>)");
+        (void)reg.registerCommandExAccess("sys_rotate_sst", QC::Cmd::AccessLevel::SysAdmin, &cmdSysRotateSst, nullptr, "Request SST rotation (sys_rotate_sst present)");
+        (void)reg.registerCommandExAccess("sys_trust_check", QC::Cmd::AccessLevel::SysAdmin, &cmdSysTrustCheck, nullptr, "Run trust gate check through SC dispatch");
+        (void)reg.registerCommandExAccess("sys_update_verify", QC::Cmd::AccessLevel::SysAdmin, &cmdSysUpdateVerify, nullptr, "Run update verify gate through SC dispatch");
         (void)reg.registerCommandExAccess("sys_user_enroll", QC::Cmd::AccessLevel::User, &cmdSysUserEnroll, nullptr, "Enroll Owner credentials (sys_user_enroll <user> <pass>)");
         (void)reg.registerCommandExAccess("sys_user_unlock", QC::Cmd::AccessLevel::User, &cmdSysUserUnlock, nullptr, "Unlock Owner session (sys_user_unlock <user> <pass>)");
         (void)reg.registerCommandExAccess("sys_user_lock", QC::Cmd::AccessLevel::User, &cmdSysUserLock, nullptr, "Lock Owner session (sys_user_lock)");
+        (void)reg.registerCommandExAccess("sys_vault_request", QC::Cmd::AccessLevel::SysAdmin, &cmdSysVaultRequest, nullptr, "Submit SC vault request (sys_vault_request <request_text>)");
+        (void)reg.registerCommandExAccess("db", QC::Cmd::AccessLevel::Admin, &cmdDb, nullptr, "Simple persistent key/value database (db <op> ...)");
         (void)reg.registerCommandEx("regdump", &cmdRegdump, nullptr, "Dump runtime registries snapshot (counts + windows + boot seed)");
 
         // Networking helpers (for subsystem testing).
@@ -4120,13 +6794,102 @@ namespace QK::CmdCenter
         (void)reg.registerCommandExAccess("tcpconnect", QC::Cmd::AccessLevel::User, &cmdTcpConnect, nullptr, "Test TCP connect (tcpconnect <ip|host> <port> [timeout_ms])");
         (void)reg.registerCommandExAccess("httpget", QC::Cmd::AccessLevel::User, &cmdHttpGet, nullptr, "Minimal HTTP GET over TCP (httpget <host> <path> [timeout_ms])");
         (void)reg.registerCommandExAccess("tcpdrop", QC::Cmd::AccessLevel::Admin, &cmdTcpDrop, nullptr, "Drop TCP connection by local port (tcpdrop <local_port>)");
+        (void)reg.registerCommandExAccess("ports", QC::Cmd::AccessLevel::Admin, &cmdPorts, nullptr, "Port hygiene tools (ports close-unused)");
         (void)reg.registerCommandExAccess("tcplog", QC::Cmd::AccessLevel::User, &cmdTcpLog, nullptr, "Dump recent TCP TX/RX events (tcplog)");
         (void)reg.registerCommandExAccess("netlog", QC::Cmd::AccessLevel::User, &cmdNetLog, nullptr, "Dump net state (ip + arp + tcplog)");
         (void)reg.registerCommandExAccess("tcpstate", QC::Cmd::AccessLevel::User, &cmdTcpState, nullptr, "Dump active TCP connections (tcpstate)");
         (void)reg.registerCommandExAccess("netstat", QC::Cmd::AccessLevel::User, &cmdNetStat, nullptr, "Dump net summary (ip + arp + tcpstate)");
         (void)reg.registerCommandExAccess("netstart", QC::Cmd::AccessLevel::User, &cmdNetStat, nullptr, "Dump net summary (alias of netstat)");
 
+        // Usage/schema metadata for auto-help and argument validation.
+        (void)reg.setCommandMetadata("module", "module <list|load|unload> [module_id] [sandbox]", "subcmd:string module_id?:string mode?:string", 1, 3, true);
+        (void)reg.setCommandMetadata("sys_audit_view", "sys_audit_view [N|size=N] [page=N] present", "lines_or_size?:string page?:string presence:string", 1, 3, true);
+        (void)reg.setCommandMetadata("sys_audit_export", "sys_audit_export <path> present", "path:string presence:string", 2, 2, true);
+        (void)reg.setCommandMetadata("sys_exec_request", "sys_exec_request <request_text>", "request:string", 1, 16, true);
+        (void)reg.setCommandMetadata("sys_rotate_sst", "sys_rotate_sst present", "presence:string", 1, 1, true);
+        (void)reg.setCommandMetadata("sys_trust_check", "sys_trust_check", "none", 0, 0, true);
+        (void)reg.setCommandMetadata("sys_update_verify", "sys_update_verify [payload]", "payload?:string", 0, 16, true);
+        (void)reg.setCommandMetadata("sys_vault_request", "sys_vault_request <request_text>", "request:string", 1, 16, true);
+        (void)reg.setCommandMetadata("db", "db <status|list|get|set|del|save|reload> ...", "op:string key?:string value?:string", 1, 16, true);
+        (void)reg.setCommandMetadata("ports", "ports close-unused", "op:string", 1, 1, true);
+        (void)reg.setCommandMetadata("sync", "sync", "none", 0, 0, true);
+        (void)reg.setCommandMetadata("mount", "mount [list|all|volume]", "op?:string", 0, 1, true);
+        (void)reg.setCommandMetadata("umount", "umount <volume|mount_path>", "target:string", 1, 1, true);
+        (void)reg.setCommandMetadata("fstab", "fstab <list|apply|add|del> [volume]", "op:string volume?:string", 1, 2, true);
+        (void)reg.setCommandMetadata("todoadd", "todoadd <note text>", "note:string", 1, 32, true);
+
+        // Best-effort alias map restore; empty/missing file is allowed.
+        (void)loadAliasMap(nullptr, false);
+
         registered = true;
+    }
+
+    void setIpcHook(IpcHookFn hook, void *userData)
+    {
+        g_ipcHook = hook;
+        g_ipcHookUser = userData;
+    }
+
+    bool executePacket(const CommandPacket &packet, const QC::Cmd::Context &ctx)
+    {
+        if (packet.line[0] == '\0')
+            return false;
+
+        auto startsWith = [](const char *s, const char *prefix) -> bool {
+            if (!s || !prefix)
+                return false;
+            while (*prefix)
+            {
+                if (*s++ != *prefix++)
+                    return false;
+            }
+            return true;
+        };
+
+        auto tokenEq = [](const char *a, const char *b) -> bool {
+            if (!a || !b)
+                return false;
+            while (*a && *b && !isSpace(*a) && !isSpace(*b))
+            {
+                char ca = *a;
+                char cb = *b;
+                if (ca >= 'A' && ca <= 'Z')
+                    ca = static_cast<char>(ca - 'A' + 'a');
+                if (cb >= 'A' && cb <= 'Z')
+                    cb = static_cast<char>(cb - 'A' + 'a');
+                if (ca != cb)
+                    return false;
+                ++a;
+                ++b;
+            }
+            return (*b == '\0') && (*a == '\0' || isSpace(*a));
+        };
+
+        const bool appOrigin = packet.origin && (streqIgnoreCase(packet.origin, "app") || streqIgnoreCase(packet.origin, "desktop-app"));
+        if (appOrigin)
+        {
+            const char *line = skipSpaces(packet.line);
+            if (startsWith(line, "sys_") ||
+                tokenEq(line, "shutdown") ||
+                tokenEq(line, "reboot") ||
+                tokenEq(line, "recover") ||
+                tokenEq(line, "setmode") ||
+                tokenEq(line, "ports") ||
+                tokenEq(line, "tcpdrop"))
+            {
+                QC::Cmd::Context denied = ctx;
+                denied.callerAccess = packet.callerAccess;
+                denied.writeLine("execution guard: command denied for app origin");
+                return true;
+            }
+        }
+
+        if (g_ipcHook)
+            g_ipcHook(packet, g_ipcHookUser);
+
+        QC::Cmd::Context effective = ctx;
+        effective.callerAccess = packet.callerAccess;
+        return QC::Cmd::Registry::instance().execute(packet.line, effective);
     }
 
 }

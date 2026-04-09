@@ -53,6 +53,17 @@ namespace QFS
         return next == '\0' || next == '/';
     }
 
+    static QC::u64 fnv1a64(const QC::u8 *data, QC::usize len)
+    {
+        QC::u64 h = 1469598103934665603ULL;
+        for (QC::usize i = 0; i < len; ++i)
+        {
+            h ^= static_cast<QC::u64>(data[i]);
+            h *= 1099511628211ULL;
+        }
+        return h;
+    }
+
     VFS &VFS::instance()
     {
         static VFS instance;
@@ -243,18 +254,111 @@ namespace QFS
 
     QC::Status VFS::stat(const char *path, FileInfo *info)
     {
+        if (!path || !info)
+            return QC::Status::InvalidParam;
+
         char relativePath[256];
         FileSystem *fs = resolvePath(path, relativePath, sizeof(relativePath));
 
         if (!fs)
             return QC::Status::NotFound;
-        return fs->stat(relativePath, info);
+
+        const QC::Status st = fs->stat(relativePath, info);
+        if (st != QC::Status::Success)
+            return st;
+
+        return applyRoleMetadata(path, info);
+    }
+
+    QC::Status VFS::setRoleFlag(const char *path, RoleFlag role)
+    {
+        if (!path || path[0] == '\0')
+            return QC::Status::InvalidParam;
+
+        for (QC::usize i = 0; i < m_roleMeta.size(); ++i)
+        {
+            if (QC::String::strcmp(m_roleMeta[i].path, path) == 0)
+            {
+                m_roleMeta[i].role = role;
+                m_roleMeta[i].hash = computeRoleMetaHash(path, role);
+                return QC::Status::Success;
+            }
+        }
+
+        RoleMetaEntry entry;
+        QC::String::memset(entry.path, 0, sizeof(entry.path));
+        QC::String::strncpy(entry.path, path, sizeof(entry.path) - 1);
+        entry.role = role;
+        entry.hash = computeRoleMetaHash(path, role);
+        m_roleMeta.push_back(entry);
+        return QC::Status::Success;
     }
 
     bool VFS::exists(const char *path)
     {
         FileInfo info;
         return stat(path, &info) == QC::Status::Success;
+    }
+
+    QC::Status VFS::syncAll()
+    {
+        QC::Status worst = QC::Status::Success;
+        for (QC::usize i = 0; i < m_mounts.size(); ++i)
+        {
+            if (!m_mounts[i].fs)
+                continue;
+            const QC::Status st = m_mounts[i].fs->sync();
+            if (st != QC::Status::Success)
+                worst = st;
+        }
+        return worst;
+    }
+
+    QC::u64 VFS::computeRoleMetaHash(const char *path, RoleFlag role) const
+    {
+        if (!path)
+            return 0;
+
+        static constexpr char kRoleMetaSalt[] = "QFS-ROLE-META-v1";
+        const QC::usize pathLen = QC::String::strlen(path);
+
+        QC::u64 h = fnv1a64(reinterpret_cast<const QC::u8 *>(kRoleMetaSalt), sizeof(kRoleMetaSalt) - 1);
+        h ^= fnv1a64(reinterpret_cast<const QC::u8 *>(path), pathLen);
+
+        QC::u32 rv = static_cast<QC::u32>(role);
+        const QC::u8 rb[4] = {
+            static_cast<QC::u8>(rv & 0xFF),
+            static_cast<QC::u8>((rv >> 8) & 0xFF),
+            static_cast<QC::u8>((rv >> 16) & 0xFF),
+            static_cast<QC::u8>((rv >> 24) & 0xFF)};
+        h ^= fnv1a64(rb, sizeof(rb));
+        return h;
+    }
+
+    QC::Status VFS::applyRoleMetadata(const char *path, FileInfo *info) const
+    {
+        if (!path || !info)
+            return QC::Status::InvalidParam;
+
+        info->roleFlag = static_cast<QC::u32>(RoleFlag::Everyone);
+        info->metadataHash = computeRoleMetaHash(path, RoleFlag::Everyone);
+
+        for (QC::usize i = 0; i < m_roleMeta.size(); ++i)
+        {
+            const RoleMetaEntry &entry = m_roleMeta[i];
+            if (QC::String::strcmp(entry.path, path) != 0)
+                continue;
+
+            const QC::u64 expected = computeRoleMetaHash(entry.path, entry.role);
+            if (expected != entry.hash)
+                return QC::Status::Error;
+
+            info->roleFlag = static_cast<QC::u32>(entry.role);
+            info->metadataHash = entry.hash;
+            return QC::Status::Success;
+        }
+
+        return QC::Status::Success;
     }
 
 } // namespace QFS

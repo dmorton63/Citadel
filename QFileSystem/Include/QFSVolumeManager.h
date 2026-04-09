@@ -31,6 +31,17 @@ namespace QFS
         bool autoMount = true;
     };
 
+    struct VolumeInfo
+    {
+        char name[32] = {0};
+        char mountPath[128] = {0};
+        FileSystemKind fsKind = FileSystemKind::FAT_AUTO;
+        bool mounted = false;
+        bool autoMount = false;
+        bool mountFailed = false;
+        QC::u32 mountFailCount = 0;
+    };
+
     class VolumeManager
     {
     public:
@@ -39,9 +50,12 @@ namespace QFS
         QC::Status registerVolume(const VolumeDefinition &definition);
         QC::Status unregisterVolume(const char *name);
         QC::Status mountVolume(const char *name);
+        QC::Status unmountVolume(const char *nameOrPath);
         QC::Status mountAll();
         QC::Status mountPending();
         bool isMounted(const char *name) const;
+        QC::Status setAutoMount(const char *name, bool enabled);
+        QC::usize copyVolumeInfo(VolumeInfo *out, QC::usize cap) const;
 
     private:
         struct VolumeRecord
@@ -63,6 +77,7 @@ namespace QFS
 
         VolumeRecord *findRecord(const char *name);
         const VolumeRecord *findRecord(const char *name) const;
+        VolumeRecord *findRecordByMountPath(const char *mountPath);
         QC::Status mountRecord(VolumeRecord &record);
         FileSystem *createFileSystem(FileSystemKind kind, BlockDevice *device);
 

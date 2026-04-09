@@ -30,7 +30,7 @@
                         {
                             "id": "headerTitle",
                             "type": "label",
-                            "text": "QAIOS++ Christmas Edition",
+                            "text": "CITADEL Christmas Edition",
                             "x": 20,
                             "y": 16,
                             "color": "#FFD7A0",
@@ -122,7 +122,7 @@
                         {
                             "id": "welcomeLabel",
                             "type": "label",
-                            "text": "Merry Christmas from QAIOS++!",
+                            "text": "Merry Christmas from CITADEL!",
                             "x": 40,
                             "y": 40,
                             "color": "#FFFFFF",
@@ -159,7 +159,7 @@
                                 {
                                     "id": "cardText",
                                     "type": "label",
-                                    "text": "Kernel: QAIOS++ Experimental\nTheme: Christmas 2025\nRenderer: PainterSurface\nSpecial Mode: Snowfall Enabled",
+                                    "text": "Kernel: QAIOSPLUSV1 Experimental\nTheme: Christmas 2025\nRenderer: PainterSurface\nSpecial Mode: Snowfall Enabled",
                                     "x": 20,
                                     "y": 60,
                                     "color": "#FFD7A0",

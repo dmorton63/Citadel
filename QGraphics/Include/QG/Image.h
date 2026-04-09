@@ -29,8 +29,16 @@ namespace QG
         Tile
     };
 
+    struct ImageDecodeCorpusReport
+    {
+        QC::u32 total = 0;
+        QC::u32 passed = 0;
+        QC::u32 failed = 0;
+    };
+
     bool decodePNG(const QC::u8 *data, QC::usize size, ImageSurface &outSurface);
     bool decodePNG(const QC::Vector<QC::u8> &buffer, ImageSurface &outSurface);
+    bool runPngDecoderCorpus(ImageDecodeCorpusReport &outReport);
 
     void blitImage(IPainter *painter,
                    const ImageSurface &surface,

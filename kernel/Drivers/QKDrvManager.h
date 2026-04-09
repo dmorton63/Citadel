@@ -9,6 +9,8 @@
 namespace QKDrv
 {
 
+    using ModuleLifecycleFn = QC::Status (*)(void *user);
+
     class Manager
     {
     public:
@@ -31,6 +33,14 @@ namespace QKDrv
         // Poll all active drivers
         void poll();
 
+        // Runtime module lifecycle hooks.
+        bool registerLifecycleHooks(const char *moduleId,
+                                    ModuleLifecycleFn initFn,
+                                    ModuleLifecycleFn startFn,
+                                    ModuleLifecycleFn stopFn,
+                                    void *userData);
+        bool unregisterLifecycleHooks(const char *moduleId);
+
     private:
         Manager() = default;
         ~Manager() = default;
@@ -42,7 +52,23 @@ namespace QKDrv
         void probeNetwork();
         void probeStorage();
 
+        struct ModuleLifecycle
+        {
+            const char *moduleId = nullptr;
+            ModuleLifecycleFn initFn = nullptr;
+            ModuleLifecycleFn startFn = nullptr;
+            ModuleLifecycleFn stopFn = nullptr;
+            void *userData = nullptr;
+            bool initialized = false;
+            bool started = false;
+        };
+
+        void runModuleInitHooks();
+        void runModuleStartHooks();
+        void runModuleStopHooks();
+
         QC::Vector<DriverBase *> m_controllers;
+        QC::Vector<ModuleLifecycle> m_moduleHooks;
         MouseDriver *m_mouseDriver = nullptr;
         KeyboardDriver *m_keyboardDriver = nullptr;
         QC::u32 m_screenWidth = 0;

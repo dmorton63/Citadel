@@ -27,6 +27,8 @@ namespace QK::Runtime
             m_windows[i] = WindowRecord{};
         for (QC::usize i = 0; i < MaxResources; ++i)
             m_resources[i] = ResourceRecord{};
+        for (QC::usize i = 0; i < MaxPorts; ++i)
+            m_ports[i] = PortRecord{};
 
         m_security = SecurityState{};
     }
@@ -163,6 +165,17 @@ namespace QK::Runtime
         return n;
     }
 
+    QC::usize Registries::portCount() const
+    {
+        QC::usize n = 0;
+        for (QC::usize i = 0; i < MaxPorts; ++i)
+        {
+            if (m_ports[i].used)
+                ++n;
+        }
+        return n;
+    }
+
     QC::usize Registries::copyWindowSnapshots(WindowSnapshot *out, QC::usize cap) const
     {
         if (!out || cap == 0)
@@ -197,6 +210,8 @@ namespace QK::Runtime
         ProcessRecord rec = recordSeed;
         rec.used = true;
         rec.pid = (recordSeed.pid != 0) ? recordSeed.pid : m_nextPid++;
+        if (rec.sandboxId == 0)
+            rec.sandboxId = rec.pid;
         m_processes[slot] = rec;
         return rec.pid;
     }
@@ -416,6 +431,66 @@ namespace QK::Runtime
         {
             if (m_resources[i].used && m_resources[i].resourceId == resourceId)
                 return &m_resources[i];
+        }
+        return nullptr;
+    }
+
+    bool Registries::registerPort(PortProtocol protocol, QC::u16 port, QC::u32 ownerPid)
+    {
+        if (protocol == PortProtocol::Unknown || port == 0)
+            return false;
+
+        for (QC::usize i = 0; i < MaxPorts; ++i)
+        {
+            if (!m_ports[i].used)
+                continue;
+            if (m_ports[i].protocol == protocol && m_ports[i].port == port)
+                return false;
+        }
+
+        for (QC::usize i = 0; i < MaxPorts; ++i)
+        {
+            if (m_ports[i].used)
+                continue;
+            m_ports[i].used = true;
+            m_ports[i].protocol = protocol;
+            m_ports[i].port = port;
+            m_ports[i].ownerPid = ownerPid;
+            return true;
+        }
+
+        return false;
+    }
+
+    bool Registries::unregisterPort(PortProtocol protocol, QC::u16 port)
+    {
+        if (protocol == PortProtocol::Unknown || port == 0)
+            return false;
+
+        for (QC::usize i = 0; i < MaxPorts; ++i)
+        {
+            if (!m_ports[i].used)
+                continue;
+            if (m_ports[i].protocol == protocol && m_ports[i].port == port)
+            {
+                m_ports[i] = PortRecord{};
+                return true;
+            }
+        }
+        return false;
+    }
+
+    const PortRecord *Registries::findPort(PortProtocol protocol, QC::u16 port) const
+    {
+        if (protocol == PortProtocol::Unknown || port == 0)
+            return nullptr;
+
+        for (QC::usize i = 0; i < MaxPorts; ++i)
+        {
+            if (!m_ports[i].used)
+                continue;
+            if (m_ports[i].protocol == protocol && m_ports[i].port == port)
+                return &m_ports[i];
         }
         return nullptr;
     }

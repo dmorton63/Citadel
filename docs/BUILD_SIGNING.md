@@ -61,3 +61,7 @@ If OpenSSL or the private key is not available, production builds require you to
 - The `.cui` component/icon/role library format is intentionally **not** treated as CUIMLSS and is not included in the `*.cxs` signature loop.
 
 If you want HTML (`.html`) or browser CSS (`.css`) to be part of the trusted boot-time UI surface, the build script will need an additional explicit signing + enforcement step for those file patterns.
+
+## Deferred Enhancement: PCR Attestation
+
+PCR-based measured boot attestation is intentionally deferred for a later milestone. The current v1 trust gate uses TAS/SST-backed checks and SC integrity validation, but does not require PCR policy matching for TAS unseal yet.

@@ -53,6 +53,7 @@ namespace QD
     {
         constexpr const char *LOG_MODULE = "QDesktop";
         constexpr float BASE_THEME_FONT_SIZE = 12.0f;
+        static bool g_imageCorpusChecked = false;
 
         static QW::Controls::ControlId hashControlId(const char *text)
         {
@@ -824,6 +825,19 @@ namespace QD
     {
         if (m_initialized)
             return;
+
+        if (!g_imageCorpusChecked)
+        {
+            QG::ImageDecodeCorpusReport report;
+            const bool ok = QG::runPngDecoderCorpus(report);
+            QC_LOG_INFO(LOG_MODULE,
+                        "PNG decoder corpus: total=%u passed=%u failed=%u status=%s",
+                        report.total,
+                        report.passed,
+                        report.failed,
+                        ok ? "PASS" : "FAIL");
+            g_imageCorpusChecked = true;
+        }
 
         m_screenWidth = screenWidth;
         m_screenHeight = screenHeight;
@@ -6917,13 +6931,13 @@ namespace QD
 
         // Logo button (left)
         QW::Rect logoBounds = {8, 6, 20, 20};
-        m_logoButton = new QW::Controls::Button(m_desktopWindow, "Q", logoBounds);
+        m_logoButton = new QW::Controls::Button(m_desktopWindow, "C", logoBounds);
         m_logoButton->setRole(QW::ButtonRole::Accent);
         m_topBar->addChild(m_logoButton);
 
         // Title label (center-ish)
         QW::Rect titleBounds = {40, 8, 200, 16};
-        m_titleLabel = new QW::Controls::Label(m_desktopWindow, "QAIOS+ Desktop", titleBounds);
+        m_titleLabel = new QW::Controls::Label(m_desktopWindow, "CITADEL Desktop", titleBounds);
         m_topBar->addChild(m_titleLabel);
 
         // Clock label (right)
@@ -7209,7 +7223,7 @@ namespace QD
     {
         if (m_titleLabel)
         {
-            m_titleLabel->setText(title ? title : "QAIOS+ Desktop");
+            m_titleLabel->setText(title ? title : "CITADEL Desktop");
         }
     }
     void Desktop::addTaskbarWindow(QC::u32 windowId, const char *title)

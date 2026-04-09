@@ -19,6 +19,7 @@ namespace QKDrv
             QC::Status initialize() override;
             void shutdown() override;
             const char *name() const override { return "PS2Mouse"; }
+            const char *driverId() const override { return "QDRV_PS2_MOUSE"; }
             ControllerType controllerType() const override { return ControllerType::PS2; }
 
             // MouseDriver interface

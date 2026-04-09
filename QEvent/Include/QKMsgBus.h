@@ -32,6 +32,16 @@ namespace QK
 
             constexpr QC::u32 WinMsg = fourCC('W', 'M', 'S', 'G');
             constexpr QC::u32 SvcMsg = fourCC('S', 'V', 'C', 'M');
+
+            // Security Center channels.
+            constexpr QC::u32 ScControl = fourCC('S', 'C', 'C', 'T');
+            constexpr QC::u32 ScAudit = fourCC('S', 'C', 'A', 'U');
+            constexpr QC::u32 ScTrust = fourCC('S', 'C', 'T', 'R');
+            constexpr QC::u32 ScFlow = fourCC('S', 'C', 'F', 'L');
+            constexpr QC::u32 ScProvision = fourCC('S', 'C', 'P', 'R');
+            constexpr QC::u32 ScVault = fourCC('S', 'C', 'V', 'T');
+            constexpr QC::u32 ScPolicy = fourCC('S', 'C', 'P', 'L');
+            constexpr QC::u32 ScRecovery = fourCC('S', 'C', 'R', 'C');
         }
 
         struct Envelope

@@ -46,6 +46,17 @@ namespace QFS
         Socket
     };
 
+    // Metadata role policy tag (MVP).
+    enum class RoleFlag : QC::u32
+    {
+        Everyone = 0,
+        User = 1,
+        Admin = 2,
+        System = 3,
+        Sc = 4,
+        Protected = 5
+    };
+
     // File info
     struct FileInfo
     {
@@ -58,6 +69,8 @@ namespace QFS
         QC::u32 permissions;
         QC::u32 uid;
         QC::u32 gid;
+        QC::u32 roleFlag;
+        QC::u64 metadataHash;
     };
 
     // Mount point
@@ -92,18 +105,33 @@ namespace QFS
         QC::Status remove(const char *path);
         QC::Status rename(const char *oldPath, const char *newPath);
         QC::Status stat(const char *path, FileInfo *info);
+        QC::Status setRoleFlag(const char *path, RoleFlag role);
         bool exists(const char *path);
+
+        // Best-effort flush for all mounted filesystems.
+        QC::Status syncAll();
 
         // Path resolution
         FileSystem *resolvePath(const char *path, char *relativePath, QC::usize relativeSize);
 
     private:
+        struct RoleMetaEntry
+        {
+            char path[256];
+            RoleFlag role = RoleFlag::Everyone;
+            QC::u64 hash = 0;
+        };
+
+        QC::u64 computeRoleMetaHash(const char *path, RoleFlag role) const;
+        QC::Status applyRoleMetadata(const char *path, FileInfo *info) const;
+
         VFS();
         ~VFS();
         VFS(const VFS &) = delete;
         VFS &operator=(const VFS &) = delete;
 
         QC::Vector<MountPoint> m_mounts;
+        QC::Vector<RoleMetaEntry> m_roleMeta;
     };
 
 } // namespace QFS

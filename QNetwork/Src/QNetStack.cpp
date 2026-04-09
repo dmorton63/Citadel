@@ -92,6 +92,16 @@ namespace QNet
         transmitToNIC(data, length);
     }
 
+    QC::usize Stack::closeUnusedPorts()
+    {
+        QC::usize closed = 0;
+        if (m_tcp)
+            closed += m_tcp->dropUnusedConnections();
+        if (m_udp)
+            closed += m_udp->dropEphemeralBindings();
+        return closed;
+    }
+
     // NIC driver callback registration
     static void (*s_nicTransmitCallback)(const void *, QC::usize) = nullptr;
 

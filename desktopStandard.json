@@ -30,7 +30,7 @@
                         {
                             "id": "headerTitle",
                             "type": "label",
-                            "text": "QAIOS+ Desktop Environment",
+                            "text": "CITADEL Desktop Environment",
                             "x": 20,
                             "y": 12,
                             "color": "#FFFFFF",
@@ -113,7 +113,7 @@
                         {
                             "id": "welcomeLabel",
                             "type": "label",
-                            "text": "Welcome to QAIOS+!",
+                            "text": "Welcome to CITADEL!",
                             "x": 40,
                             "y": 40,
                             "color": "#FFFFFF",
@@ -150,7 +150,7 @@
                                 {
                                     "id": "cardText",
                                     "type": "label",
-                                    "text": "Kernel: QAIOS+ Experimental\nFilesystem: FAT32 + Ramdisk\nRenderer: PainterSurface",
+                                    "text": "Kernel: QAIOSPLUSV1 Experimental\nFilesystem: FAT32 + Ramdisk\nRenderer: PainterSurface",
                                     "x": 20,
                                     "y": 60,
                                     "color": "#CCCCCC",

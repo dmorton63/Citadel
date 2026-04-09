@@ -28,6 +28,7 @@ add_executable(citadel_kernel
     Debug/Serial/QKDebugSerial.cpp
     Debug/QKDebugPanic.cpp
     Debug/Terminal/QKDebugLimineTerminal.cpp
+    Debug/Framebuffer/QKDebugFramebufferText.cpp
 )
 
 # Add assembly with custom compile flags

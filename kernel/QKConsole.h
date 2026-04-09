@@ -5,6 +5,8 @@
 #include "QCTypes.h"
 #include "PS2/QKDrvPS2Keyboard.h"
 
+#include "QCCommandRegistry.h"
+
 namespace QK
 {
     namespace Console
@@ -23,6 +25,7 @@ namespace QK
         // Enable/disable interactive input handling (keyboard -> console).
         // This does not affect Console::write() logging.
         void setInputEnabled(bool enabled);
+        bool inputEnabled();
         void handleKeyEvent(const QKDrv::PS2::KeyEvent &event);
         bool registerCommand(const Command &cmd);
 
@@ -37,5 +40,9 @@ namespace QK
 
         void write(const char *msg);
         const char *cwd();
+
+        // Console command access role (used when executing QC::Cmd registry commands).
+        void setRole(QC::Cmd::AccessLevel role);
+        QC::Cmd::AccessLevel role();
     }
 }

@@ -80,6 +80,7 @@ namespace QKDrv
             void shutdown() override;
             void poll() override;
             const char *name() const override { return "UHCI"; }
+            const char *driverId() const override { return "QDRV_UHCI_CONTROLLER"; }
             ControllerType controllerType() const override { return ControllerType::UHCI; }
 
             // USB operations

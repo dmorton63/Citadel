@@ -17,7 +17,7 @@ namespace QK
 
         struct Config
         {
-            const char *baseDir; // default: "/system/sc"
+            const char *baseDir; // default: "/system/.sc"
 
             // Optional TPM-backed wrap-key support.
             //

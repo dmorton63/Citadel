@@ -16,6 +16,9 @@ NC='\033[0m' # No Color
 # Project directories
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BUILD_DIR="${PROJECT_DIR}/build"
+ARTIFACTS_DIR="${BUILD_DIR}/artifacts"
+KERNEL_ARTIFACT_DIR="${ARTIFACTS_DIR}/kernel"
+MODULE_BUNDLE_DIR="${ARTIFACTS_DIR}/modules"
 ISO_DIR="${PROJECT_DIR}/iso"
 LIMINE_DIR="${PROJECT_DIR}/limine"
 RAMDISK_DIR="${PROJECT_DIR}/ramdisk"
@@ -23,7 +26,11 @@ SHARED_DIR="${PROJECT_DIR}/shared"
 
 # Output files
 KERNEL_ELF="${BUILD_DIR}/kernel/citadel.elf"
+KERNEL_BIN="${BUILD_DIR}/citadel.bin"
+KERNEL_ARTIFACT_ELF="${KERNEL_ARTIFACT_DIR}/citadel.elf"
+KERNEL_ARTIFACT_BIN="${KERNEL_ARTIFACT_DIR}/citadel.bin"
 ISO_FILE="${BUILD_DIR}/citadel-limine.iso"
+MODULE_RAMDISK_IMAGE="${MODULE_BUNDLE_DIR}/ramdisk.img"
 RAMDISK_OUTPUT="${ISO_DIR}/modules/ramdisk.img"
 SERIAL_LOG="${BUILD_DIR}/serial.log"
 
@@ -220,13 +227,18 @@ if [ ! -f "${KERNEL_ELF}" ]; then
     echo -e "${RED}Kernel ELF not found at ${KERNEL_ELF}${NC}"
     exit 1
 fi
-cp "${KERNEL_ELF}" "${ISO_DIR}/boot/"
+mkdir -p "${KERNEL_ARTIFACT_DIR}" "${MODULE_BUNDLE_DIR}" "${ISO_DIR}/boot" "${ISO_DIR}/modules"
+cp "${KERNEL_ELF}" "${KERNEL_ARTIFACT_ELF}"
+if [ -f "${KERNEL_BIN}" ]; then
+    cp "${KERNEL_BIN}" "${KERNEL_ARTIFACT_BIN}"
+fi
+cp "${KERNEL_ARTIFACT_ELF}" "${ISO_DIR}/boot/"
 echo -e "${GREEN}      Copied kernel to iso/boot/${NC}"
+echo -e "${GREEN}      Kernel artifact: ${KERNEL_ARTIFACT_ELF}${NC}"
 
 if [ -d "${RAMDISK_DIR}" ]; then
     echo -e "${YELLOW}      Building ramdisk image...${NC}"
-    mkdir -p "${ISO_DIR}/modules"
-    RAMDISK_TEMP="${BUILD_DIR}/ramdisk.img"
+    RAMDISK_TEMP="${MODULE_RAMDISK_IMAGE}"
     # Size ramdisk based on source tree size. The previous fixed 4MB image can fill up
     # quickly once wallpapers/assets are added, causing silent mcopy failures.
     RAMDISK_SRC_MB=$(du -sm "${RAMDISK_DIR}" | awk '{print $1}')
@@ -688,8 +700,10 @@ if [ -d "${RAMDISK_DIR}" ]; then
         echo -e "${RED}Hint: create ${PROJECT_DIR}/boot.json (preferred) or ${PROJECT_DIR}/kernel/Boot/Config/boot.json.${NC}" >&2
         exit 1
     fi
+    cp "${RAMDISK_TEMP}" "${BUILD_DIR}/ramdisk.img"
     cp "${RAMDISK_TEMP}" "${RAMDISK_OUTPUT}"
     echo -e "${GREEN}      Ramdisk written to modules/ramdisk.img${NC}"
+    echo -e "${GREEN}      Module bundle: ${MODULE_RAMDISK_IMAGE}${NC}"
 fi
 
 # Step 5: Create ISO
@@ -757,6 +771,14 @@ echo -e "${CYAN}========================================${NC}"
 echo -e "${GREEN}Build complete!${NC}"
 echo -e "${CYAN}========================================${NC}"
 echo -e "  Kernel: ${KERNEL_ELF}"
+echo -e "  Kernel artifact: ${KERNEL_ARTIFACT_ELF}"
+if [ -f "${KERNEL_ARTIFACT_BIN}" ]; then
+    echo -e "  Kernel binary:   ${KERNEL_ARTIFACT_BIN}"
+fi
+if [ -f "${MODULE_RAMDISK_IMAGE}" ]; then
+    echo -e "  Modules:         ${MODULE_BUNDLE_DIR}"
+    echo -e "    ramdisk:       ${MODULE_RAMDISK_IMAGE}"
+fi
 echo -e "  ISO:    ${ISO_FILE}"
 echo -e "  Size:   $(du -h "${ISO_FILE}" | cut -f1)"
 echo ""

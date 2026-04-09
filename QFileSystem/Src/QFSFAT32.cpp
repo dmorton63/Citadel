@@ -809,6 +809,8 @@ namespace QFS
         info->permissions = 0644;
         info->uid = 0;
         info->gid = 0;
+        info->roleFlag = static_cast<QC::u32>(RoleFlag::Everyone);
+        info->metadataHash = 0;
 
         return QC::Status::Success;
     }
@@ -934,6 +936,12 @@ namespace QFS
         if (startCluster >= 2)
             freeClusterChain(startCluster);
 
+        return QC::Status::Success;
+    }
+
+    QC::Status FAT32::sync()
+    {
+        // FAT updates are written through today; keep an explicit barrier hook.
         return QC::Status::Success;
     }
 

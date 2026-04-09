@@ -138,8 +138,14 @@ namespace QD
             rawAccess = maxAccess;
         ctx.callerAccess = static_cast<QC::Cmd::AccessLevel>(rawAccess);
 
-        // Execute via shared registry.
-        const bool handled = QC::Cmd::Registry::instance().execute(line, ctx);
+        QK::CmdCenter::CommandPacket packet;
+        QC::String::strncpy(packet.line, line ? line : "", sizeof(packet.line) - 1);
+        packet.line[sizeof(packet.line) - 1] = '\0';
+        packet.callerAccess = ctx.callerAccess;
+        packet.origin = "desktop.terminal";
+
+        // Execute via shared parser/dispatch envelope.
+        const bool handled = QK::CmdCenter::executePacket(packet, ctx);
         if (!handled)
         {
             (void)publishWindowLine(replyWindowId, QD::CmdMsg::ErrorLine, corr, "Unknown command. Type 'help'.");

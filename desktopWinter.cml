@@ -19,7 +19,7 @@
                background="#4A6A8A"
                borderBottom="#2E3F52">
             <Label id="headerTitle"
-                   text="QAIOS++ Winter Desktop"
+                   text="CITADEL Winter Desktop"
                    x="20"
                    y="16"
                    color="#E6F0FA"
@@ -94,7 +94,7 @@
                height="100%-56"
                background="rgba(255,255,255,0.18)">
             <Label id="welcomeLabel"
-                   text="Welcome to Winter in QAIOS++"
+                   text="Welcome to Winter in CITADEL"
                    x="40"
                    y="40"
                    color="#2E3F52"
@@ -119,7 +119,7 @@
                        color="#2E3F52"
                        font="system-bold-18" />
                 <Label id="cardText"
-                       text="Kernel: QAIOS++ Experimental\nTheme: Winter 2026\nRenderer: PainterSurface\nSeasonal Mode: Frost"
+                       text="Kernel: QAIOSPLUSV1 Experimental\nTheme: Winter 2026\nRenderer: PainterSurface\nSeasonal Mode: Frost"
                        x="20"
                        y="60"
                        color="#4A6A8A"

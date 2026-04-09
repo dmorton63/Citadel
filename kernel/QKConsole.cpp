@@ -12,8 +12,14 @@
 
 #include "QKSystemVolumeCommands.h"
 
+#include "Debug/Framebuffer/QKDebugFramebufferText.h"
+
+#include "QKShutdownController.h"
+
 #include "QKBootConfigTier.h"
 #include "Boot/Config/QKBootStagedConfig.h"
+#include "Boot/Config/QKBootStartupConfig.h"
+#include "Boot/Desktop/QKBootDesktopSession.h"
 
 #include "QArchCPU.h"
 
@@ -77,6 +83,9 @@ namespace QK
             char g_savetermLastPath[256];
 
             bool g_inputEnabled = true;
+
+            bool g_warnedAdminEnable = false;
+            bool g_warnedSystemEnable = false;
 
             void appendTranscript(const char *msg)
             {
@@ -657,6 +666,12 @@ namespace QK
 
             void handleTouch(int argc, const char *const *argv)
             {
+                if (static_cast<QC::u8>(g_role) < static_cast<QC::u8>(QC::Cmd::AccessLevel::Admin))
+                {
+                    print("touch: permission denied\r\n");
+                    return;
+                }
+
                 if (argc < 2 || !argv[1] || !*argv[1])
                 {
                     print("touch: missing file operand\r\n");
@@ -898,6 +913,41 @@ namespace QK
                 addCommandInternal({"ls", handleLs, "List directory contents"});
                 addCommandInternal({"clear", handleClear, "Clear the console"});
                 addCommandInternal({"help", handleHelp, "Show available commands"});
+                addCommandInternal({"shutdown",
+                                    [](int, const char *const *) {
+                                        print("\r\nShutdown requested.\r\n");
+                                        QK::Shutdown::Controller::instance().requestShutdown(QK::Shutdown::Reason::ShellCommand);
+                                    },
+                                    "Request shutdown"});
+                addCommandInternal({"startx",
+                                    [](int, const char *const *) {
+                                        const auto mode = QK::Boot::Config::GetStartupMode();
+                                        if (mode == QK::Boot::Config::StartupMode::Desktop)
+                                        {
+                                            print("\r\nstartx: already in DESKTOP startup mode\r\n");
+                                            return;
+                                        }
+                                        if (mode != QK::Boot::Config::StartupMode::Terminal)
+                                        {
+                                            print("\r\nstartx: only supported in TERMINAL startup mode\r\n");
+                                            return;
+                                        }
+                                        if (!QK::Boot::Desktop::IsPrepared())
+                                        {
+                                            print("\r\nstartx: no framebuffer available\r\n");
+                                            return;
+                                        }
+
+                                        print("\r\nstartx: launching desktop...\r\n");
+
+                                        // Hand off keyboard to the window/event system.
+                                        QK::Console::setInputEnabled(false);
+                                        QK::Debug::FramebufferText::SetEnabled(false);
+
+                                        QK::Boot::Desktop::InitializeWindowSystem();
+                                        QK::Boot::Desktop::InitializeDesktopAndRunLoop();
+                                    },
+                                    "Start desktop session (TERMINAL startup mode only)"});
                 addCommandInternal({"pwd", handlePwd, "Print current working directory"});
                 addCommandInternal({"cd", handleCd, "Change current directory"});
                 addCommandInternal({"cat", handleCat, "Print file contents"});
@@ -937,17 +987,93 @@ namespace QK
                                     },
                                     "Set role to user"});
                 addCommandInternal({"admin",
-                                    [](int, const char *const *) {
+                                    [](int argc, const char *const *argv) {
+                                        const auto mode = QK::Boot::Config::GetStartupMode();
+                                        if (mode != QK::Boot::Config::StartupMode::Terminal)
+                                        {
+                                            print("\r\nadmin: only available in TERMINAL startup mode\r\n");
+                                            return;
+                                        }
+
+                                        if (argc < 2 || !argv[1] || !streqIgnoreCase(argv[1], "enable"))
+                                        {
+                                            g_warnedAdminEnable = true;
+                                            print("\r\nWARNING: admin mode can modify system state.\r\n");
+                                            print("Type: admin enable\r\n");
+                                            return;
+                                        }
+
+                                        if (!g_warnedAdminEnable)
+                                        {
+                                            g_warnedAdminEnable = true;
+                                            print("\r\nWARNING: admin mode can modify system state.\r\n");
+                                            print("Type: admin enable\r\n");
+                                            return;
+                                        }
+
                                         g_role = QC::Cmd::AccessLevel::Admin;
                                         print("\r\nrole=admin\r\n");
                                     },
-                                    "Set role to admin"});
+                                    "Enable admin role (TERMINAL only; run twice)"});
                 addCommandInternal({"su",
-                                    [](int, const char *const *) {
+                                    [](int argc, const char *const *argv) {
+                                        const auto mode = QK::Boot::Config::GetStartupMode();
+                                        if (mode != QK::Boot::Config::StartupMode::Recovery)
+                                        {
+                                            print("\r\nsu: only available in RECOVERY startup mode\r\n");
+                                            return;
+                                        }
+
+                                        if (argc < 2 || !argv[1] || !streqIgnoreCase(argv[1], "enable"))
+                                        {
+                                            g_warnedSystemEnable = true;
+                                            print("\r\nWARNING: rescue elevation can fully modify the system.\r\n");
+                                            print("Type: su enable\r\n");
+                                            return;
+                                        }
+
+                                        if (!g_warnedSystemEnable)
+                                        {
+                                            g_warnedSystemEnable = true;
+                                            print("\r\nWARNING: rescue elevation can fully modify the system.\r\n");
+                                            print("Type: su enable\r\n");
+                                            return;
+                                        }
+
                                         g_role = QC::Cmd::AccessLevel::SysAdmin;
                                         print("\r\nrole=su\r\n");
                                     },
-                                    "Set role to su (SysAdmin)"});
+                                    "Enable su (SysAdmin) role (RECOVERY only; run twice)"});
+
+                addCommandInternal({"system",
+                                    [](int argc, const char *const *argv) {
+                                        const auto mode = QK::Boot::Config::GetStartupMode();
+                                        if (mode != QK::Boot::Config::StartupMode::Recovery)
+                                        {
+                                            print("\r\nsystem: only available in RECOVERY startup mode\r\n");
+                                            return;
+                                        }
+
+                                        if (argc < 2 || !argv[1] || !streqIgnoreCase(argv[1], "enable"))
+                                        {
+                                            g_warnedSystemEnable = true;
+                                            print("\r\nWARNING: system role has full control.\r\n");
+                                            print("Type: system enable\r\n");
+                                            return;
+                                        }
+
+                                        if (!g_warnedSystemEnable)
+                                        {
+                                            g_warnedSystemEnable = true;
+                                            print("\r\nWARNING: system role has full control.\r\n");
+                                            print("Type: system enable\r\n");
+                                            return;
+                                        }
+
+                                        g_role = QC::Cmd::AccessLevel::System;
+                                        print("\r\nrole=system\r\n");
+                                    },
+                                    "Enable system role (RECOVERY only; run twice)"});
             }
 
             void executeCommand()
@@ -1010,14 +1136,31 @@ namespace QK
             g_savetermHasBaseline = false;
             QC::String::memset(g_savetermLastPath, 0, sizeof(g_savetermLastPath));
             g_inputEnabled = true;
-            g_role = QC::Cmd::AccessLevel::Admin;
+            g_role = QC::Cmd::AccessLevel::User;
+            g_warnedAdminEnable = false;
+            g_warnedSystemEnable = false;
             print("\r\nCITADEL console ready\r\n");
             printPrompt();
+        }
+
+        void setRole(QC::Cmd::AccessLevel role)
+        {
+            g_role = role;
+        }
+
+        QC::Cmd::AccessLevel role()
+        {
+            return g_role;
         }
 
         void setInputEnabled(bool enabled)
         {
             g_inputEnabled = enabled;
+        }
+
+        bool inputEnabled()
+        {
+            return g_inputEnabled;
         }
 
         void handleKeyEvent(const QKDrv::PS2::KeyEvent &event)
@@ -1027,6 +1170,28 @@ namespace QK
 
             if (!g_printer || !event.pressed)
                 return;
+
+            // Framebuffer scrollback controls (TERMINAL troubleshooting).
+            if (event.key == QKDrv::PS2::Key::PageUp)
+            {
+                QK::Debug::FramebufferText::PageUp();
+                return;
+            }
+            if (event.key == QKDrv::PS2::Key::PageDown)
+            {
+                QK::Debug::FramebufferText::PageDown();
+                return;
+            }
+
+            // If the user starts typing while viewing history, snap back to the tail
+            // so input doesn't occur off-screen.
+            if (QK::Debug::FramebufferText::IsViewingHistory())
+            {
+                if (event.key == QKDrv::PS2::Key::Backspace || event.key == QKDrv::PS2::Key::Enter || (event.character >= 32 && event.character < 127))
+                {
+                    QK::Debug::FramebufferText::FollowTail();
+                }
+            }
 
             if (event.key == QKDrv::PS2::Key::Backspace)
             {

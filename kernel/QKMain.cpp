@@ -7,10 +7,12 @@
 #include "QKConsole.h"
 #include "Debug/Serial/QKDebugSerial.h"
 #include "Debug/Terminal/QKDebugLimineTerminal.h"
+#include "Debug/Framebuffer/QKDebugFramebufferText.h"
 #include "Boot/Limine/QKBootLimineRequests.h"
 #include "Boot/Arch/QKBootArchInit.h"
 #include "Boot/ACPI/QKBootACPITables.h"
 #include "Boot/TPM/QKBootTPMSecureStore.h"
+#include "Boot/Config/QKBootStartupConfig.h"
 #include "Boot/Desktop/QKBootDesktopSession.h"
 #include "Boot/Memory/QKBootAddressMapping.h"
 #include "Boot/Memory/QKBootEarlyMemory.h"
@@ -18,6 +20,8 @@
 
 #include "QKMemHeap.h"
 #include "QCLogger.h"
+#include "QKSecurityCenter.h"
+#include "QKAIRuntime.h"
 
 namespace
 {
@@ -125,6 +129,19 @@ namespace
         const limine_file *kf = resp ? resp->executable_file : nullptr;
         return kf ? kf->cmdline : nullptr;
     }
+
+    static void initializeBootSecurityRuntime()
+    {
+        auto &securityCenter = QK::SecurityCenter::instance();
+        if (securityCenter.initialized())
+            return;
+
+        securityCenter.initialize(QK::Boot::Config::GetSecurityCenterMode());
+
+        // Best-effort restore of AI runtime memoization policy and allowlist.
+        // If state is missing/invalid, runtime continues with defaults.
+        (void)QK::AIRuntime::loadPersistentState();
+    }
 }
 
 // Limine requests are defined in QKBoot.asm
@@ -180,17 +197,25 @@ extern "C" void kernel_main()
     QK::Debug::Serial::Write("\r\n=== CITADEL Kernel ===\r\n");
     QK::Debug::Serial::Write("Serial initialized, kernel starting...\r\n");
 
-    // If Limine's terminal is available, mirror serial output to it as early as possible
-    // so early boot messages (including the kernel console prompt) are visible on-screen.
-    if (QK::Debug::Terminal::InitFromLimineRequest(limine_terminal_request))
+    // Prefer the in-kernel framebuffer text terminal for on-screen boot feedback.
+    // This keeps visibility independent of Limine's terminal implementation.
+    if (QK::Debug::FramebufferText::InitFromLimineRequest(limine_framebuffer_request))
     {
+        QK::Debug::Serial::SetMirror(QK::Debug::FramebufferText::Write);
+        QK::Debug::Serial::Write("Framebuffer terminal mirror enabled\r\n");
+    }
+    else if (QK::Debug::Terminal::InitFromLimineRequest(limine_terminal_request))
+    {
+        // Last-resort fallback for firmware/VM setups where framebuffer init is unavailable.
         QK::Debug::Serial::SetMirror(QK::Debug::Terminal::Write);
-        QK::Debug::Terminal::Write("Boot terminal initialized\r\n");
+        QK::Debug::Terminal::Write("Boot terminal fallback enabled\r\n");
     }
 
     // Apply logging verbosity overrides from Limine kernel cmdline as early as possible,
     // so they affect the entire boot (not just post-memory-init).
-    applyCmdlineLogConfig(getLimineKernelCmdline(limine_executable_file_request));
+    const char *cmdline = getLimineKernelCmdline(limine_executable_file_request);
+    applyCmdlineLogConfig(cmdline);
+    QK::Boot::Config::LoadFromCmdline(QK::Debug::Serial::Write, cmdline);
 
     // --- Early Boot ---
     QKBoot::setLogFn(QK::Debug::Serial::Write);
@@ -218,6 +243,7 @@ extern "C" void kernel_main()
     QK::Debug::Serial::Write("BSS (skipped - Limine does it)\r\n");
 
     QKBoot::initializeDrivers();
+    initializeBootSecurityRuntime();
 
     // Validate boot policy (boot.json) and enforce minimum hardware floors
     // before enabling interrupts and bringing up higher-level subsystems.

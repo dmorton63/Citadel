@@ -21,6 +21,7 @@ namespace QKDrv::E1000
         void poll() override;
 
         const char *name() const override { return "e1000"; }
+        const char *driverId() const override { return "QDRV_E1000_CONTROLLER"; }
         ControllerType controllerType() const override { return ControllerType::None; }
 
         bool isInitialized() const { return m_initialized; }

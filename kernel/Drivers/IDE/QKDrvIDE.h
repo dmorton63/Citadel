@@ -20,6 +20,10 @@ namespace QKDrv
         // Intended for QEMU disk images (e.g., qcow2/raw) containing a FAT16/32 partition.
         void probeAndRegisterSystemVolume();
 
+        // Probe legacy IDE for additional FAT volumes and mount them under /mnt/diskN.
+        // These are discovered beyond the fixed /system and /shared bindings.
+        void probeAndRegisterDataVolumes();
+
         // Reset internal system probe state so probeAndRegisterSystemVolume() can run again.
         // This is useful after formatting a disk at runtime.
         void resetSystemProbe();

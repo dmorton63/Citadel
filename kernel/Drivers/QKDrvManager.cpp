@@ -12,9 +12,26 @@
 #include "QArchPCI.h"
 #include "QFSVolumeManager.h"
 #include "QCLogger.h"
+#include "QCString.h"
 
 namespace QKDrv
 {
+
+    namespace
+    {
+        static bool hasDriverIdPrefix(const char *id)
+        {
+            if (!id)
+                return false;
+            constexpr const char prefix[] = "QDRV_";
+            for (QC::usize i = 0; prefix[i] != '\0'; ++i)
+            {
+                if (id[i] == '\0' || id[i] != prefix[i])
+                    return false;
+            }
+            return true;
+        }
+    }
 
     Manager &Manager::instance()
     {
@@ -25,6 +42,8 @@ namespace QKDrv
     void Manager::initialize()
     {
         QC_LOG_INFO("QKDrv", "Initializing driver manager");
+
+        runModuleInitHooks();
 
         m_mouseDriver = nullptr;
         m_keyboardDriver = nullptr;
@@ -44,7 +63,8 @@ namespace QKDrv
 
         if (m_mouseDriver)
         {
-            QC_LOG_INFO("QKDrv", "Active mouse driver: %s", m_mouseDriver->name());
+            QC_LOG_INFO("QKDrv", "Active mouse driver: %s (%s)", m_mouseDriver->name(),
+                        m_mouseDriver->driverId() ? m_mouseDriver->driverId() : "<null>");
         }
         else
         {
@@ -53,12 +73,15 @@ namespace QKDrv
 
         if (m_keyboardDriver)
         {
-            QC_LOG_INFO("QKDrv", "Active keyboard driver: %s", m_keyboardDriver->name());
+            QC_LOG_INFO("QKDrv", "Active keyboard driver: %s (%s)", m_keyboardDriver->name(),
+                        m_keyboardDriver->driverId() ? m_keyboardDriver->driverId() : "<null>");
         }
         else
         {
             QC_LOG_WARN("QKDrv", "No keyboard driver available");
         }
+
+        runModuleStartHooks();
 
         // Attempt to mount any auto-mount volumes that drivers may have registered
         QFS::VolumeManager::instance().mountPending();
@@ -69,11 +92,14 @@ namespace QKDrv
         // Prefer a persistent system volume if present.
         IDE::probeAndRegisterSystemVolume();
         IDE::probeAndRegisterSharedVolume();
+        IDE::probeAndRegisterDataVolumes();
     }
 
     void Manager::shutdown()
     {
         QC_LOG_INFO("QKDrv", "Shutting down driver manager");
+
+        runModuleStopHooks();
 
         for (QC::usize i = 0; i < m_controllers.size(); ++i)
         {
@@ -94,6 +120,8 @@ namespace QKDrv
         if (keyboard.initialize() == QC::Status::Success)
         {
             m_controllers.push_back(&keyboard);
+            if (!hasDriverIdPrefix(keyboard.driverId()))
+                QC_LOG_WARN("QKDrv", "Driver id %s must start with QDRV_", keyboard.driverId() ? keyboard.driverId() : "<null>");
             if (!m_keyboardDriver)
             {
                 m_keyboardDriver = &keyboard;
@@ -107,6 +135,8 @@ namespace QKDrv
             if (mouse.initialize() == QC::Status::Success)
             {
                 m_controllers.push_back(&mouse);
+                if (!hasDriverIdPrefix(mouse.driverId()))
+                    QC_LOG_WARN("QKDrv", "Driver id %s must start with QDRV_", mouse.driverId() ? mouse.driverId() : "<null>");
                 // Only use PS/2 mouse if no USB mouse/tablet available
                 if (!m_mouseDriver)
                 {
@@ -145,6 +175,8 @@ namespace QKDrv
                 if (status == QC::Status::Success)
                 {
                     m_controllers.push_back(xhci);
+                    if (!hasDriverIdPrefix(xhci->driverId()))
+                        QC_LOG_WARN("QKDrv", "Driver id %s must start with QDRV_", xhci->driverId() ? xhci->driverId() : "<null>");
                     xhci->setScreenSize(m_screenWidth, m_screenHeight);
 
                     // Prefer USB keyboard when available
@@ -193,6 +225,8 @@ namespace QKDrv
                 if (uhci->initialize() == QC::Status::Success)
                 {
                     m_controllers.push_back(uhci);
+                    if (!hasDriverIdPrefix(uhci->driverId()))
+                        QC_LOG_WARN("QKDrv", "Driver id %s must start with QDRV_", uhci->driverId() ? uhci->driverId() : "<null>");
                     uhci->setScreenSize(m_screenWidth, m_screenHeight);
 
                     // If this controller has a tablet, prefer it
@@ -230,6 +264,8 @@ namespace QKDrv
                 if (nic->initialize() == QC::Status::Success)
                 {
                     m_controllers.push_back(nic);
+                    if (!hasDriverIdPrefix(nic->driverId()))
+                        QC_LOG_WARN("QKDrv", "Driver id %s must start with QDRV_", nic->driverId() ? nic->driverId() : "<null>");
                     QC_LOG_INFO("QKDrv", "Using e1000 NIC");
 
                     // Wire QNetwork TX -> NIC.
@@ -260,6 +296,106 @@ namespace QKDrv
 
         // Give storage drivers a chance to surface devices asynchronously
         QFS::VolumeManager::instance().mountPending();
+    }
+
+    bool Manager::registerLifecycleHooks(const char *moduleId,
+                                         ModuleLifecycleFn initFn,
+                                         ModuleLifecycleFn startFn,
+                                         ModuleLifecycleFn stopFn,
+                                         void *userData)
+    {
+        if (!moduleId || !*moduleId)
+            return false;
+        for (QC::usize i = 0; i < m_moduleHooks.size(); ++i)
+        {
+            const char *id = m_moduleHooks[i].moduleId;
+            if (id && QC::String::strcmp(id, moduleId) == 0)
+                return false;
+        }
+
+        ModuleLifecycle hook;
+        hook.moduleId = moduleId;
+        hook.initFn = initFn;
+        hook.startFn = startFn;
+        hook.stopFn = stopFn;
+        hook.userData = userData;
+        m_moduleHooks.push_back(hook);
+        return true;
+    }
+
+    bool Manager::unregisterLifecycleHooks(const char *moduleId)
+    {
+        if (!moduleId || !*moduleId)
+            return false;
+        for (QC::usize i = 0; i < m_moduleHooks.size(); ++i)
+        {
+            const char *id = m_moduleHooks[i].moduleId;
+            if (!id || QC::String::strcmp(id, moduleId) != 0)
+                continue;
+
+            for (QC::usize j = i + 1; j < m_moduleHooks.size(); ++j)
+                m_moduleHooks[j - 1] = m_moduleHooks[j];
+            if (!m_moduleHooks.empty())
+                m_moduleHooks.pop_back();
+            return true;
+        }
+        return false;
+    }
+
+    void Manager::runModuleInitHooks()
+    {
+        for (QC::usize i = 0; i < m_moduleHooks.size(); ++i)
+        {
+            ModuleLifecycle &hook = m_moduleHooks[i];
+            if (!hook.initFn || hook.initialized)
+                continue;
+
+            const QC::Status st = hook.initFn(hook.userData);
+            if (st == QC::Status::Success)
+            {
+                hook.initialized = true;
+            }
+            else
+            {
+                QC_LOG_WARN("QKDrv", "Module %s init hook failed", hook.moduleId ? hook.moduleId : "<null>");
+            }
+        }
+    }
+
+    void Manager::runModuleStartHooks()
+    {
+        for (QC::usize i = 0; i < m_moduleHooks.size(); ++i)
+        {
+            ModuleLifecycle &hook = m_moduleHooks[i];
+            if (!hook.startFn || !hook.initialized || hook.started)
+                continue;
+
+            const QC::Status st = hook.startFn(hook.userData);
+            if (st == QC::Status::Success)
+            {
+                hook.started = true;
+            }
+            else
+            {
+                QC_LOG_WARN("QKDrv", "Module %s start hook failed", hook.moduleId ? hook.moduleId : "<null>");
+            }
+        }
+    }
+
+    void Manager::runModuleStopHooks()
+    {
+        for (QC::usize i = m_moduleHooks.size(); i > 0; --i)
+        {
+            ModuleLifecycle &hook = m_moduleHooks[i - 1];
+            if (!hook.stopFn || !hook.started)
+                continue;
+
+            const QC::Status st = hook.stopFn(hook.userData);
+            if (st != QC::Status::Success)
+                QC_LOG_WARN("QKDrv", "Module %s stop hook failed", hook.moduleId ? hook.moduleId : "<null>");
+
+            hook.started = false;
+        }
     }
 
 } // namespace QKDrv

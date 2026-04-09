@@ -57,6 +57,9 @@ namespace QNet
         // Packet handling
         void receivePacket(IPv4Address source, const void *data, QC::usize length);
 
+        // Best-effort cleanup: unbind ephemeral ports.
+        QC::usize dropEphemeralBindings();
+
     private:
         UDPBinding *findBinding(QC::u16 port);
         QC::u16 allocatePort();

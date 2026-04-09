@@ -26,8 +26,8 @@
                        y="0"
                        width="100%"
                        height="56">
-                    <Label id="headerTitle"
-                           text="QAIOS++ Spring Desktop"
+                          <Label id="headerTitle"
+                              text="CITADEL Spring Desktop"
                            x="20"
                            y="16" />
                     <Label id="clockLabel"
@@ -89,7 +89,7 @@
                            width="538"
                            height="200">
                            <TitleLabel id="welcomeLabel"
-                               text="Welcome to Spring in QAIOS++!"
+                               text="Welcome to Spring in CITADEL!"
                                x="61"
                                y="7" />
                            <BodyLabel id="infoLabel"
@@ -101,7 +101,7 @@
                                x="178"
                                y="91" />
                            <BodyLabel id="cardText"
-                               text="Kernel: QAIOS++ Experimental"
+                               text="Kernel: QAIOSPLUSV1 Experimental"
                                x="163"
                                y="134" />
                           </CardPanel>
@@ -142,10 +142,10 @@
         </Desktop>
 
         <!-- HELP WINDOW -->
-        <help-window title="Spring Desktop Help">
+        <help-window title="CITADEL Spring Desktop Help">
             <![CDATA[
-                <h1>Welcome to the Spring Desktop</h1>
-                <p>This is the help panel for the QAIOS++ Spring desktop environment.</p>
+            <h1>Welcome to the CITADEL Spring Desktop</h1>
+            <p>This is the help panel for the CITADEL Spring desktop environment.</p>
                 <ul>
                     <li><b>Start Menu:</b> Access applications and system tools.</li>
                     <li><b>Sidebar:</b> Quick launch for common apps.</li>

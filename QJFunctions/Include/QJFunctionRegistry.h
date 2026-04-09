@@ -16,6 +16,7 @@ namespace QC
 
             bool registerFunction(Function &&fn, const char *jsonPath);
             const Function *find(const char *name, QC::u32 version) const;
+            const Function *findByStableIdentity(const char *stableIdentity) const;
 
             QC::usize count() const { return m_entries.size(); }
 

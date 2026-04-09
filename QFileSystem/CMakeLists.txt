@@ -5,6 +5,8 @@ add_library(QFileSystem STATIC
     Src/QFSFAT32.cpp
     Src/QFSFAT16.cpp
     Src/QFSFATProbe.cpp
+    Src/QFSRoleTier.cpp
+    Src/QFSStat.cpp
     Src/QFSCache.cpp
     Src/QFSPath.cpp
     Src/QFSVolumeManager.cpp

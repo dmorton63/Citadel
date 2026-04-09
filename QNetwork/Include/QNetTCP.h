@@ -163,6 +163,9 @@ namespace QNet
         // Intended for command tools to clean up kept test connections.
         bool dropByLocalPort(QC::u16 localPort);
 
+        // Drop non-established TCP sockets (listen/half-open/closed states).
+        QC::usize dropUnusedConnections();
+
         // Connection management
         TCPConnection *connect(IPv4Address remoteAddr, QC::u16 remotePort);
         TCPConnection *listen(QC::u16 port);

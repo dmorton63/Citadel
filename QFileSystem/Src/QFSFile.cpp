@@ -89,14 +89,16 @@ namespace QFS
 
     QC::Status File::flush()
     {
-        // TODO: Implement flush
-        return QC::Status::Success;
+        if (!m_fs)
+            return QC::Status::InvalidParam;
+        return m_fs->sync();
     }
 
     QC::Status File::sync()
     {
-        // TODO: Implement sync
-        return QC::Status::Success;
+        if (!m_fs)
+            return QC::Status::InvalidParam;
+        return m_fs->sync();
     }
 
 } // namespace QFS

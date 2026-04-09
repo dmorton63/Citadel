@@ -1336,6 +1336,8 @@ namespace QFS
         info->permissions = 0644;
         info->uid = 0;
         info->gid = 0;
+        info->roleFlag = static_cast<QC::u32>(RoleFlag::Everyone);
+        info->metadataHash = 0;
         return QC::Status::Success;
     }
 
@@ -1347,6 +1349,12 @@ namespace QFS
     QC::Status FAT16::remove(const char *)
     {
         return QC::Status::NotSupported;
+    }
+
+    QC::Status FAT16::sync()
+    {
+        // FAT updates are written through today; keep an explicit barrier hook.
+        return QC::Status::Success;
     }
 
     void FAT16::parseName(const char *fatName, char *outName)

@@ -23,10 +23,23 @@ namespace QC
             return nullptr;
         }
 
+        const Function *Registry::findByStableIdentity(const char *stableIdentity) const
+        {
+            if (!stableIdentity)
+                return nullptr;
+            for (QC::usize i = 0; i < m_entries.size(); ++i)
+            {
+                const Entry &e = m_entries[i];
+                if (QC::String::strcmp(e.fn.stableIdentity.c_str(), stableIdentity) == 0)
+                    return &e.fn;
+            }
+            return nullptr;
+        }
+
         bool Registry::registerFunction(Function &&fn, const char *jsonPath)
         {
-            // Reject duplicates (exact name+version)
-            if (find(fn.name.c_str(), fn.version))
+            // Reject duplicates by stable identity first, then by legacy name+version.
+            if (findByStableIdentity(fn.stableIdentity.c_str()) || find(fn.name.c_str(), fn.version))
                 return false;
 
             Entry e;

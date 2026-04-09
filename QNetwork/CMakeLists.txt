@@ -10,5 +10,5 @@ add_library(QNetwork STATIC
 )
 
 target_include_directories(QNetwork PUBLIC Include)
-target_link_libraries(QNetwork PUBLIC QCommon QKMemory)
+target_link_libraries(QNetwork PUBLIC QCommon QKMemory QEvent)
 target_compile_options(QNetwork PRIVATE ${KERNEL_COMPILE_FLAGS})

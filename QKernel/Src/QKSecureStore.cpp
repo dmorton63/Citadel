@@ -904,7 +904,7 @@ namespace QK
     namespace SecureStore
     {
 
-        static Config g_defaultCfg = Config{.baseDir = "/system/sc"};
+        static Config g_defaultCfg = Config{.baseDir = "/system/.sc"};
 
         Config defaultConfig()
         {
@@ -920,7 +920,7 @@ namespace QK
         {
             g_defaultCfg = cfg;
             if (!g_defaultCfg.baseDir)
-                g_defaultCfg.baseDir = "/system/sc";
+                g_defaultCfg.baseDir = "/system/.sc";
         }
 
         QC::Status ensureBaseDir(const Config &cfg)
@@ -968,7 +968,17 @@ namespace QK
             QFS::VFS &vfs = QFS::VFS::instance();
             QFS::File *file = vfs.open(path, QFS::OpenMode::Read);
             if (!file)
-                return QC::Status::NotFound;
+            {
+                // Compatibility path: attempt legacy non-hidden SC storage location.
+                if (cfg.baseDir && QC::String::strcmp(cfg.baseDir, "/system/.sc") == 0)
+                {
+                    char legacyPath[256];
+                    if (buildPath(legacyPath, sizeof(legacyPath), "/system/sc", key) == QC::Status::Success)
+                        file = vfs.open(legacyPath, QFS::OpenMode::Read);
+                }
+                if (!file)
+                    return QC::Status::NotFound;
+            }
 
             st = readAll(file, out);
             vfs.close(file);
@@ -1567,7 +1577,17 @@ namespace QK
             if (buildPath(path, sizeof(path), cfg.baseDir, key) != QC::Status::Success)
                 return false;
 
-            return QFS::VFS::instance().exists(path);
+            if (QFS::VFS::instance().exists(path))
+                return true;
+
+            if (cfg.baseDir && QC::String::strcmp(cfg.baseDir, "/system/.sc") == 0)
+            {
+                char legacyPath[256];
+                if (buildPath(legacyPath, sizeof(legacyPath), "/system/sc", key) == QC::Status::Success)
+                    return QFS::VFS::instance().exists(legacyPath);
+            }
+
+            return false;
         }
 
         QC::Status seal_secret(const void *secret,

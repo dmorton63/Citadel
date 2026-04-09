@@ -1,5 +1,6 @@
 add_library(QQuantum
 	Src/QQExecutor.cpp
+	Src/QQScheduler.cpp
 )
 
 target_include_directories(QQuantum PUBLIC Include)

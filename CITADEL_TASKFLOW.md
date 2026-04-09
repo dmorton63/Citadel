@@ -146,3 +146,43 @@ This creates a **reactive execution environment** where flows adapt to each othe
 - TPM‑accelerated trust when available  
 
 ---
+
+## **8. Runtime Diagrams (MVP Wiring)**
+
+### **8.1 Task_Flow State Machine**
+
+```mermaid
+stateDiagram-v2
+	[*] --> Pending
+	Pending --> Blocked: dependencies unresolved
+	Blocked --> Queued: dependencies resolved
+	Pending --> Queued: admitted by scheduler
+	Queued --> Running: selected for execution
+	Running --> Completed: success
+	Running --> Failed: error
+	Pending --> Suspended: policy isolate-suspend
+	Queued --> Suspended: policy isolate-suspend
+	Suspended --> Pending: resume
+	Pending --> Cancelled: policy isolate-cancel/user cancel
+	Queued --> Cancelled: policy isolate-cancel/user cancel
+	Blocked --> Cancelled: cancel
+```
+
+### **8.2 SC Event Bus Channels**
+
+```mermaid
+flowchart LR
+	KSC[QK SecurityCenter bridge]
+	SC[QSC SecurityCenter]
+	EX[QQ Executor]
+	BUS[QK Msg Bus]
+
+	KSC -->|flow policy| EX
+	KSC -->|ScControl| BUS
+	KSC -->|ScFlow| BUS
+	KSC -->|ScTrust| BUS
+	KSC -->|ScAudit| BUS
+	SC -->|metrics snapshot| KSC
+```
+
+---

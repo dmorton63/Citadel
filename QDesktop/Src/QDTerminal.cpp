@@ -508,7 +508,7 @@ namespace QD
         m_content->addChild(m_outputScroll);
 
         // Initial lines
-        (void)m_output->addItem("QAIOS+ Terminal");
+        (void)m_output->addItem("CITADEL Terminal");
         (void)m_output->addItem("Type 'help'");
         scrollToTail();
 

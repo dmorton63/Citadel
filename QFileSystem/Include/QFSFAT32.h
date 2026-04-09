@@ -96,6 +96,9 @@ namespace QFS
         virtual QC::Status stat(const char *path, FileInfo *info) = 0;
         virtual QC::Status createDir(const char *path) = 0;
         virtual QC::Status remove(const char *path) = 0;
+
+        // Best-effort persistence barrier for writeback media paths.
+        virtual QC::Status sync() { return QC::Status::Success; }
     };
 
     class FAT32 : public FileSystem
@@ -121,6 +124,7 @@ namespace QFS
         QC::Status stat(const char *path, FileInfo *info) override;
         QC::Status createDir(const char *path) override;
         QC::Status remove(const char *path) override;
+        QC::Status sync() override;
 
     private:
         struct FATFileHandle

@@ -6,6 +6,7 @@
 #include "QNetIP.h"
 #include "QCMemUtil.h"
 #include "QKMemHeap.h"
+#include "QKRuntimeRegistries.h"
 
 namespace QNet
 {
@@ -147,6 +148,7 @@ namespace QNet
         {
             if (m_connections[i])
             {
+                (void)QK::Runtime::Registries::instance().unregisterPort(QK::Runtime::PortProtocol::TCP, m_connections[i]->localPort);
                 if (m_connections[i]->sendBuffer)
                     QK::Memory::Heap::instance().free(m_connections[i]->sendBuffer);
                 if (m_connections[i]->recvBuffer)
@@ -343,8 +345,31 @@ namespace QNet
         return false;
     }
 
+    QC::usize TCP::dropUnusedConnections()
+    {
+        QC::usize dropped = 0;
+        for (QC::usize i = 0; i < MAX_CONNECTIONS; ++i)
+        {
+            TCPConnection *conn = m_connections[i];
+            if (!conn)
+                continue;
+
+            if (conn->state == TCPState::Established || conn->state == TCPState::CloseWait)
+                continue;
+
+            drop(conn);
+            ++dropped;
+        }
+        return dropped;
+    }
+
     TCPConnection *TCP::connect(IPv4Address remoteAddr, QC::u16 remotePort)
     {
+        static constexpr QC::u32 kInternalNetworkOwnerPid = 1;
+        auto &regs = QK::Runtime::Registries::instance();
+        if (!regs.findProcess(kInternalNetworkOwnerPid))
+            return nullptr;
+
         // Find free slot
         QC::usize slot = MAX_CONNECTIONS;
         for (QC::usize i = 0; i < MAX_CONNECTIONS; i++)
@@ -420,6 +445,16 @@ namespace QNet
         conn->txInFlightRtoMs = 0;
         conn->txInFlightRetries = 0;
 
+        if (!regs.registerPort(QK::Runtime::PortProtocol::TCP, conn->localPort, kInternalNetworkOwnerPid))
+        {
+            if (conn->sendBuffer)
+                QK::Memory::Heap::instance().free(conn->sendBuffer);
+            if (conn->recvBuffer)
+                QK::Memory::Heap::instance().free(conn->recvBuffer);
+            QK::Memory::Heap::instance().free(conn);
+            return nullptr;
+        }
+
         m_connections[slot] = conn;
 
         // Send SYN
@@ -431,6 +466,13 @@ namespace QNet
 
     TCPConnection *TCP::listen(QC::u16 port)
     {
+        static constexpr QC::u32 kInternalNetworkOwnerPid = 1;
+        auto &regs = QK::Runtime::Registries::instance();
+        if (!regs.findProcess(kInternalNetworkOwnerPid))
+            return nullptr;
+        if (regs.findPort(QK::Runtime::PortProtocol::TCP, port))
+            return nullptr;
+
         // Find free slot
         QC::usize slot = MAX_CONNECTIONS;
         for (QC::usize i = 0; i < MAX_CONNECTIONS; i++)
@@ -484,6 +526,16 @@ namespace QNet
         conn->txInFlightRtoMs = 0;
         conn->txInFlightRetries = 0;
 
+        if (!regs.registerPort(QK::Runtime::PortProtocol::TCP, conn->localPort, kInternalNetworkOwnerPid))
+        {
+            if (conn->sendBuffer)
+                QK::Memory::Heap::instance().free(conn->sendBuffer);
+            if (conn->recvBuffer)
+                QK::Memory::Heap::instance().free(conn->recvBuffer);
+            QK::Memory::Heap::instance().free(conn);
+            return nullptr;
+        }
+
         m_connections[slot] = conn;
 
         return conn;
@@ -517,6 +569,19 @@ namespace QNet
         {
             if (m_connections[i] == conn)
             {
+                bool stillUsed = false;
+                for (QC::usize j = 0; j < MAX_CONNECTIONS; ++j)
+                {
+                    if (j == i || !m_connections[j])
+                        continue;
+                    if (m_connections[j]->localPort == conn->localPort)
+                    {
+                        stillUsed = true;
+                        break;
+                    }
+                }
+                if (!stillUsed)
+                    (void)QK::Runtime::Registries::instance().unregisterPort(QK::Runtime::PortProtocol::TCP, conn->localPort);
                 if (conn->sendBuffer)
                     QK::Memory::Heap::instance().free(conn->sendBuffer);
                 if (conn->recvBuffer)
