@@ -144,13 +144,26 @@ namespace QK::Runtime
         TCP = 2,
     };
 
+    enum class PortState : QC::u8
+    {
+        Closed = 0,
+        Opening,
+        Open,
+        Closing,
+    };
+
     struct PortRecord
     {
         bool used = false;
         PortProtocol protocol = PortProtocol::Unknown;
         QC::u16 port = 0;
         QC::u32 ownerPid = 0;
+        QC::u8 capabilityToken[16] = {0};
+        PortState state = PortState::Closed;
+        QC::u64 timestampOpenedMs = 0;
     };
+
+    using PortTableEntry = PortRecord;
 
     // Kernel-owned runtime registry hub.
     //
@@ -188,6 +201,10 @@ namespace QK::Runtime
         // Returns number of snapshots copied.
         QC::usize copyWindowSnapshots(WindowSnapshot *out, QC::usize cap) const;
 
+        // Copies up to cap active port records into out.
+        // Returns number of records copied.
+        QC::usize copyPortRecords(PortRecord *out, QC::usize cap) const;
+
         // Process registry (MVP)
         QC::u32 createProcess(const ProcessRecord &recordSeed);
         bool updateProcess(QC::u32 pid, const ProcessRecord &record);
@@ -216,7 +233,15 @@ namespace QK::Runtime
 
         // Port ownership registry (MVP)
         bool registerPort(PortProtocol protocol, QC::u16 port, QC::u32 ownerPid);
+        bool registerPortWithToken(PortProtocol protocol,
+                       QC::u16 port,
+                       QC::u32 ownerPid,
+                       const QC::u8 capabilityToken[16],
+                       QC::u64 openedAtMs,
+                       PortState initialState = PortState::Open);
         bool unregisterPort(PortProtocol protocol, QC::u16 port);
+        bool transitionPortState(PortProtocol protocol, QC::u16 port, PortState newState);
+        static bool isValidPortStateTransition(PortState from, PortState to);
         const PortRecord *findPort(PortProtocol protocol, QC::u16 port) const;
 
     private:

@@ -25,6 +25,7 @@ namespace QW
     {
         // Off by default: set to 1 when you want to visually validate camera/projection math.
         static constexpr bool QAIOS_DEBUG_CAMERA_OVERLAY = false;
+        static constexpr bool QAIOS_MOUSE_INFO_LOGS = false;
     }
 
     Compositor::Compositor(Framebuffer *fb)
@@ -75,6 +76,25 @@ namespace QW
             QK::Memory::Heap::instance().free(m_cursorBackground);
             m_cursorBackground = nullptr;
         }
+    }
+
+    void Compositor::resetStats()
+    {
+        m_lastComposeTime = 0;
+        m_frameCount = 0;
+        m_dirtyCollapseCount = 0;
+        m_stats = CompositorStats{};
+        if (m_presentBackend)
+            m_presentBackend->resetAccelerationStats();
+    }
+
+    const PresentAccelerationStats &Compositor::accelerationStats() const
+    {
+        if (m_presentBackend)
+            return m_presentBackend->accelerationStats();
+
+        static PresentAccelerationStats s_empty;
+        return s_empty;
     }
 
     void Compositor::initialize()
@@ -320,42 +340,58 @@ namespace QW
         const QC::u64 composeStartMs = QDrv::Timer::instance().milliseconds();
 
         const bool hasHwCursor = (m_presentBackend && m_presentBackend->hasHardwareCursor());
+        m_stats.hardwareCursorActive = hasHwCursor;
+        m_stats.dirtyRegionCount = m_dirtyRegions.size();
+
+        // Merge overlapping regions before deciding how tightly we can clip composition.
+        if (!m_dirtyRegions.empty())
+        {
+            mergeDirtyRegions();
+            m_stats.lastMergedDirtyRegionCount = m_dirtyRegions.size();
+
+            static constexpr QC::usize kMaxDirtyRegionsBeforeFullscreen = 24;
+            static constexpr QC::u32 kMaxDirtyCoveragePercent = 60;
+
+            QC::u64 totalDirtyArea = 0;
+            for (QC::usize i = 0; i < m_dirtyRegions.size(); ++i)
+            {
+                totalDirtyArea += static_cast<QC::u64>(m_dirtyRegions[i].rect.width) *
+                                  static_cast<QC::u64>(m_dirtyRegions[i].rect.height);
+            }
+
+            const QC::u64 screenArea = static_cast<QC::u64>(m_framebuffer->width()) *
+                                       static_cast<QC::u64>(m_framebuffer->height());
+            m_stats.lastDirtyArea = totalDirtyArea;
+            m_stats.lastDirtyCoveragePercent = (screenArea != 0)
+                                                  ? static_cast<QC::u32>((totalDirtyArea * 100u) / screenArea)
+                                                  : 0;
+            const bool tooManyRegions = m_dirtyRegions.size() > kMaxDirtyRegionsBeforeFullscreen;
+            const bool tooMuchCoverage = (screenArea != 0) &&
+                                         (totalDirtyArea * 100u >= screenArea * kMaxDirtyCoveragePercent);
+
+            if (tooManyRegions || tooMuchCoverage)
+            {
+                ++m_dirtyCollapseCount;
+                m_stats.dirtyCollapseCount = m_dirtyCollapseCount;
+                if ((m_dirtyCollapseCount % 60u) == 1u)
+                {
+                    QC_LOG_INFO("QWCompositor",
+                                "Collapsing dirty work to fullscreen (regions=%lu area=%llu screen=%llu)",
+                                static_cast<unsigned long>(m_dirtyRegions.size()),
+                                static_cast<unsigned long long>(totalDirtyArea),
+                                static_cast<unsigned long long>(screenArea));
+                }
+
+                m_dirtyRegions.clear();
+                m_dirtyRegions.push_back(DirtyRegion{Rect{0, 0, m_framebuffer->width(), m_framebuffer->height()}, false});
+                m_stats.lastMergedDirtyRegionCount = m_dirtyRegions.size();
+                m_stats.lastDirtyArea = screenArea;
+                m_stats.lastDirtyCoveragePercent = 100;
+            }
+        }
 
         // When using a hardware cursor, we can safely redraw only dirty regions.
         // (Software cursor needs full redraw unless we track/restore background.)
-        bool useDirtyClip = false;
-        Rect dirtyClip{0, 0, 0, 0};
-        if (hasHwCursor && !m_dirtyRegions.empty())
-        {
-            QC::i32 x1 = m_dirtyRegions[0].rect.x;
-            QC::i32 y1 = m_dirtyRegions[0].rect.y;
-            QC::i32 x2 = m_dirtyRegions[0].rect.x + static_cast<QC::i32>(m_dirtyRegions[0].rect.width);
-            QC::i32 y2 = m_dirtyRegions[0].rect.y + static_cast<QC::i32>(m_dirtyRegions[0].rect.height);
-
-            for (QC::usize i = 1; i < m_dirtyRegions.size(); ++i)
-            {
-                const Rect r = m_dirtyRegions[i].rect;
-                const QC::i32 rx2 = r.x + static_cast<QC::i32>(r.width);
-                const QC::i32 ry2 = r.y + static_cast<QC::i32>(r.height);
-                if (r.x < x1)
-                    x1 = r.x;
-                if (r.y < y1)
-                    y1 = r.y;
-                if (rx2 > x2)
-                    x2 = rx2;
-                if (ry2 > y2)
-                    y2 = ry2;
-            }
-
-            if (x2 > x1 && y2 > y1)
-            {
-                dirtyClip = Rect{x1, y1,
-                                 static_cast<QC::u32>(x2 - x1),
-                                 static_cast<QC::u32>(y2 - y1)};
-                m_renderer->setClipRect(dirtyClip);
-                useDirtyClip = true;
-            }
-        }
 
         // If nothing is dirty and we have a hardware cursor, skip recompositing/presenting.
         // Cursor movement is handled via cursor registers, so we don't need framebuffer updates.
@@ -367,43 +403,58 @@ namespace QW
 
         // Keep a simple compose duration metric for performance tracking.
 
-        // Draw desktop background
-        drawDesktop();
-
-        if (QAIOS_DEBUG_CAMERA_OVERLAY)
-        {
-            // Minimal integration demo: use the UI ortho camera to transform a simple box.
-            // This is intentionally simple and self-contained.
-            QG::UICameraOrthoRH cam;
-            cam.width = m_framebuffer->width();
-            cam.height = m_framebuffer->height();
-
-            // A 64x64 box in pixel space.
-            const QC::Vec3f p0{24.0f, 24.0f, 0.0f};
-            const QC::Vec3f p1{24.0f + 64.0f, 24.0f, 0.0f};
-            const QC::Vec3f p2{24.0f + 64.0f, 24.0f + 64.0f, 0.0f};
-            const QC::Vec3f p3{24.0f, 24.0f + 64.0f, 0.0f};
-
-            // Transform through view-proj and back to pixel space (since our renderer is pixel-based).
-            // For now, this just exercises the math path; the visual is a simple box.
-            (void)QC::transformPoint(cam.viewProj(), p0);
-            (void)QC::transformPoint(cam.viewProj(), p1);
-            (void)QC::transformPoint(cam.viewProj(), p2);
-            (void)QC::transformPoint(cam.viewProj(), p3);
-
-            // Draw directly in pixel space.
-            m_renderer->drawRect(Rect{24, 24, 64, 64}, Color(255, 0, 255, 255));
-        }
-
-        // Compose all windows from bottom to top
         auto &wm = WindowManager::instance();
-        for (QC::usize i = 0; i < wm.windowCount(); ++i)
+        const auto composeScene = [&]()
         {
-            Window *window = wm.windowAtIndex(i);
-            if (window && window->isVisible())
+            // Draw desktop background
+            drawDesktop();
+
+            if (QAIOS_DEBUG_CAMERA_OVERLAY)
             {
-                composeWindow(window);
+                // Minimal integration demo: use the UI ortho camera to transform a simple box.
+                // This is intentionally simple and self-contained.
+                QG::UICameraOrthoRH cam;
+                cam.width = m_framebuffer->width();
+                cam.height = m_framebuffer->height();
+
+                // A 64x64 box in pixel space.
+                const QC::Vec3f p0{24.0f, 24.0f, 0.0f};
+                const QC::Vec3f p1{24.0f + 64.0f, 24.0f, 0.0f};
+                const QC::Vec3f p2{24.0f + 64.0f, 24.0f + 64.0f, 0.0f};
+                const QC::Vec3f p3{24.0f, 24.0f + 64.0f, 0.0f};
+
+                (void)QC::transformPoint(cam.viewProj(), p0);
+                (void)QC::transformPoint(cam.viewProj(), p1);
+                (void)QC::transformPoint(cam.viewProj(), p2);
+                (void)QC::transformPoint(cam.viewProj(), p3);
             }
+
+            // Compose all windows from bottom to top
+            for (QC::usize i = 0; i < wm.windowCount(); ++i)
+            {
+                Window *window = wm.windowAtIndex(i);
+                if (window && window->isVisible())
+                {
+                    composeWindow(window);
+                }
+            }
+        };
+
+        if (hasHwCursor && !m_dirtyRegions.empty())
+        {
+            for (QC::usize i = 0; i < m_dirtyRegions.size(); ++i)
+            {
+                const Rect &dirty = m_dirtyRegions[i].rect;
+                if (dirty.isEmpty())
+                    continue;
+                m_renderer->setClipRect(dirty);
+                composeScene();
+            }
+            m_renderer->clearClipRect();
+        }
+        else
+        {
+            composeScene();
         }
 
         // Draw cursor
@@ -425,17 +476,22 @@ namespace QW
             static constexpr QC::usize kMaxDirtyRects = 64;
             QC::Rect dirtyRects[kMaxDirtyRects];
             QC::usize dirtyCount = m_dirtyRegions.size();
+            m_stats.lastPresentedDirtyRectCount = dirtyCount;
+            m_stats.lastPresentWasFullFrame = false;
+            m_stats.lastPresentUsedBatching = false;
 
             if (dirtyCount == 0)
             {
                 // No changes recorded; keep legacy behavior for the software cursor path.
                 // (With hardware cursor, we'd have returned above.)
                 m_presentBackend->present();
+                m_stats.lastPresentWasFullFrame = true;
             }
             else if (dirtyCount > kMaxDirtyRects)
             {
                 // Too many rects; cheaper to do a full present.
                 m_presentBackend->present();
+                m_stats.lastPresentWasFullFrame = true;
             }
             else
             {
@@ -445,15 +501,20 @@ namespace QW
                 }
 
                 m_presentBackend->present(dirtyRects, dirtyCount);
+                m_stats.lastPresentUsedBatching = (dirtyCount > 1);
             }
         }
         else
         {
             m_framebuffer->swap();
+            m_stats.lastPresentedDirtyRectCount = 0;
+            m_stats.lastPresentWasFullFrame = true;
+            m_stats.lastPresentUsedBatching = false;
         }
 
         const QC::u64 composeEndMs = QDrv::Timer::instance().milliseconds();
         m_lastComposeTime = (composeEndMs >= composeStartMs) ? (composeEndMs - composeStartMs) : 0;
+        m_stats.lastComposeTimeMs = m_lastComposeTime;
 
         // Low-noise latency instrumentation: measure time from last input dispatch to this present.
         // This helps distinguish "event backlog" vs "render/present" lag.
@@ -467,7 +528,7 @@ namespace QW
                 const QC::u64 sinceInputMs = (composeEndMs >= inputMs) ? (composeEndMs - inputMs) : 0;
 
                 // Only log when latency is noticeable.
-                if (sinceInputMs >= 100)
+                if (QAIOS_MOUSE_INFO_LOGS && sinceInputMs >= 100)
                 {
                     const QC::u64 presentMs = (composeEndMs >= presentStartMs) ? (composeEndMs - presentStartMs) : 0;
                     QC_LOG_INFO("QWLatency",
@@ -484,12 +545,9 @@ namespace QW
         }
 
         m_frameCount++;
+        m_stats.frameCount = m_frameCount;
         clearDirtyRegions();
-
-        if (useDirtyClip)
-        {
-            m_renderer->clearClipRect();
-        }
+        m_stats.dirtyRegionCount = 0;
     }
 
     void Compositor::syncHardwareCursorPosition()
@@ -518,6 +576,35 @@ namespace QW
         m_presentBackend->setCursorPosition(
             static_cast<QC::u16>(cx),
             static_cast<QC::u16>(cy));
+    }
+
+    bool Compositor::supportsRectCopy() const
+    {
+        return m_framebuffer && m_presentBackend && m_presentBackend->supportsRectCopy();
+    }
+
+    bool Compositor::copyRectInBackBuffer(const Rect &src, const Rect &dst)
+    {
+        if (!m_framebuffer)
+            return false;
+        if (src.width == 0 || src.height == 0 || dst.width != src.width || dst.height != src.height)
+            return false;
+
+        return m_framebuffer->copyBackBufferRect(src, dst);
+    }
+
+    bool Compositor::rectCopy(const Rect &src, const Rect &dst)
+    {
+        if (!supportsRectCopy())
+            return false;
+        if (src.width == 0 || src.height == 0 || dst.width != src.width || dst.height != src.height)
+            return false;
+
+        if (!copyRectInBackBuffer(src, dst))
+            return false;
+
+        m_presentBackend->rectCopy(src, dst);
+        return true;
     }
 
     void Compositor::composeWindow(Window *window)
@@ -612,8 +699,38 @@ namespace QW
 
     void Compositor::drawTitleBar(Window *window)
     {
-        (void)window;
-        // TODO: Draw title bar with title text and buttons
+            if (!window || !m_renderer)
+                return;
+
+            Rect bounds = window->bounds();
+            constexpr QC::u32 kTitleBarHeight = 24;
+        
+            // Title bar area
+            Rect titleBar{bounds.x, bounds.y, bounds.width, kTitleBarHeight};
+        
+            // Get focus state
+            auto &wm = WindowManager::instance();
+            const bool isFocused = (window == wm.focusedWindow());
+        
+            // Draw title bar background (darker if not focused)
+            Color titleBgColor = isFocused ? 
+                Color::fromRGB(70, 130, 180) :
+                Color::fromRGB(100, 100, 100);
+            m_renderer->fillRect(titleBar, titleBgColor);
+        
+            // Draw title bar border
+            Color titleBorderColor = isFocused ?
+                Color::fromRGB(100, 160, 210) :
+                Color::fromRGB(130, 130, 130);
+            m_renderer->drawRect(titleBar, titleBorderColor);
+        
+            // Draw title text (simple for now: just window title)
+            const char *title = window->title();
+            if (title && *title)
+            {
+                m_renderer->drawString(bounds.x + 4, bounds.y + 6, title,
+                                     Color::fromRGB(255, 255, 255));
+            }
     }
 
     void Compositor::drawBorder(Window *window)
@@ -622,14 +739,47 @@ namespace QW
             return;
 
         Rect bounds = window->bounds();
-        Color borderColor = Color::fromRGB(100, 100, 100);
-        m_renderer->drawRect(bounds, borderColor);
+        
+            // Get focus state for border color
+            auto &wm = WindowManager::instance();
+            const bool isFocused = (window == wm.focusedWindow());
+        
+            Color borderColor = isFocused ?
+                Color::fromRGB(100, 160, 210) :
+                Color::fromRGB(100, 100, 100);
+        
+            // Draw outline only (not filled)
+            m_renderer->drawRect(bounds, borderColor);
     }
 
     void Compositor::drawShadow(Window *window)
     {
-        (void)window;
-        // TODO: Draw window shadow with transparency
+            if (!window || !m_renderer)
+                return;
+
+            Rect bounds = window->bounds();
+            constexpr QC::i32 kShadowOffset = 3;
+            constexpr QC::i32 kShadowWidth = 4;
+        
+            Color shadowColor = Color::fromRGB(0, 0, 0);
+        
+            // Shadow on right edge
+            Rect rightShadow{
+                bounds.x + static_cast<QC::i32>(bounds.width),
+                bounds.y + kShadowOffset,
+                static_cast<QC::u32>(kShadowWidth),
+                bounds.height
+            };
+            m_renderer->fillRect(rightShadow, shadowColor);
+        
+            // Shadow on bottom edge
+            Rect bottomShadow{
+                bounds.x + kShadowOffset,
+                bounds.y + static_cast<QC::i32>(bounds.height),
+                bounds.width,
+                static_cast<QC::u32>(kShadowWidth)
+            };
+            m_renderer->fillRect(bottomShadow, shadowColor);
     }
 
     void Compositor::setWallpaper(const QC::u32 *pixels, QC::u32 width, QC::u32 height)
@@ -660,8 +810,33 @@ namespace QW
 
         if (m_wallpaper)
         {
-            m_renderer->blit(0, 0, m_wallpaper, m_wallpaperWidth, m_wallpaperHeight,
-                             m_wallpaperWidth * sizeof(QC::u32));
+                // If wallpaper doesn't match screen size, tile it;
+                // otherwise blit as-is (wallpaper should be pre-scaled by caller).
+                if (m_framebuffer)
+                {
+                    const QC::u32 screenWidth = m_framebuffer->width();
+                    const QC::u32 screenHeight = m_framebuffer->height();
+                
+                    if (m_wallpaperWidth == screenWidth && m_wallpaperHeight == screenHeight)
+                    {
+                        // Exact match: blit directly
+                        m_renderer->blit(0, 0, m_wallpaper, m_wallpaperWidth, m_wallpaperHeight,
+                                       m_wallpaperWidth * sizeof(QC::u32));
+                    }
+                    else
+                    {
+                        // Tile the wallpaper to fill the screen
+                        for (QC::u32 y = 0; y < screenHeight; y += m_wallpaperHeight)
+                        {
+                            for (QC::u32 x = 0; x < screenWidth; x += m_wallpaperWidth)
+                            {
+                                m_renderer->blit(static_cast<QC::i32>(x), static_cast<QC::i32>(y),
+                                               m_wallpaper, m_wallpaperWidth, m_wallpaperHeight,
+                                               m_wallpaperWidth * sizeof(QC::u32));
+                            }
+                        }
+                    }
+                }
         }
         else
         {
@@ -748,7 +923,69 @@ namespace QW
 
     void Compositor::mergeDirtyRegions()
     {
-        // TODO: Merge overlapping dirty regions for efficiency
+        if (m_dirtyRegions.size() < 2)
+            return;
+
+        auto intersectsOrAdjacent = [](const Rect &a, const Rect &b) -> bool
+        {
+            const QC::i32 ax1 = a.x;
+            const QC::i32 ay1 = a.y;
+            const QC::i32 ax2 = a.x + static_cast<QC::i32>(a.width);
+            const QC::i32 ay2 = a.y + static_cast<QC::i32>(a.height);
+
+            const QC::i32 bx1 = b.x;
+            const QC::i32 by1 = b.y;
+            const QC::i32 bx2 = b.x + static_cast<QC::i32>(b.width);
+            const QC::i32 by2 = b.y + static_cast<QC::i32>(b.height);
+
+            // Merge only when rects overlap or touch edges.
+            return !(ax2 < bx1 || bx2 < ax1 || ay2 < by1 || by2 < ay1);
+        };
+
+        QC::Vector<DirtyRegion> merged;
+        for (QC::usize i = 0; i < m_dirtyRegions.size(); ++i)
+        {
+            if (m_dirtyRegions[i].merged)
+                continue;
+
+            Rect current = m_dirtyRegions[i].rect;
+            bool changed = true;
+
+            while (changed)
+            {
+                changed = false;
+                for (QC::usize j = 0; j < m_dirtyRegions.size(); ++j)
+                {
+                    if (i == j || m_dirtyRegions[j].merged)
+                        continue;
+
+                    const Rect &other = m_dirtyRegions[j].rect;
+                    if (!intersectsOrAdjacent(current, other))
+                        continue;
+
+                    const QC::i32 x1 = (current.x < other.x) ? current.x : other.x;
+                    const QC::i32 y1 = (current.y < other.y) ? current.y : other.y;
+                    const QC::i32 x2 = (current.x + static_cast<QC::i32>(current.width) >
+                                        other.x + static_cast<QC::i32>(other.width))
+                                           ? (current.x + static_cast<QC::i32>(current.width))
+                                           : (other.x + static_cast<QC::i32>(other.width));
+                    const QC::i32 y2 = (current.y + static_cast<QC::i32>(current.height) >
+                                        other.y + static_cast<QC::i32>(other.height))
+                                           ? (current.y + static_cast<QC::i32>(current.height))
+                                           : (other.y + static_cast<QC::i32>(other.height));
+
+                    current = Rect{x1, y1,
+                                   static_cast<QC::u32>(x2 - x1),
+                                   static_cast<QC::u32>(y2 - y1)};
+                    m_dirtyRegions[j].merged = true;
+                    changed = true;
+                }
+            }
+
+            merged.push_back(DirtyRegion{current, false});
+        }
+
+        m_dirtyRegions = static_cast<QC::Vector<DirtyRegion> &&>(merged);
     }
 
 } // namespace QW

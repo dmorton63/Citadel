@@ -5,12 +5,66 @@
 #include "QCMemUtil.h"
 #include "QCString.h"
 #include "QWWindow.h"
+#include "QWStyleRenderer.h"
 #include "QGPainter.h"
 
 namespace QW
 {
     namespace Controls
     {
+        namespace
+        {
+            struct ListViewResolvedColors
+            {
+                Color text;
+                Color selectedText;
+                Color selection;
+                Color header;
+                Color background;
+                Color border;
+            };
+
+            ListViewResolvedColors resolveColors(const PaintContext &context,
+                                                 bool hasTextOverride,
+                                                 Color textOverride,
+                                                 bool hasSelectionOverride,
+                                                 Color selectionOverride,
+                                                 bool hasHeaderOverride,
+                                                 Color headerOverride,
+                                                 bool hasBackgroundOverride,
+                                                 Color backgroundOverride)
+            {
+                ListViewResolvedColors colors{};
+
+                if (const StyleSnapshot *snapshot = context.styleRenderer ? context.styleRenderer->styleSnapshot() : nullptr)
+                {
+                    colors.text = hasTextOverride ? textOverride : snapshot->palette.controlText;
+                    colors.selectedText = QC::Color::white();
+                    colors.selection = hasSelectionOverride ? selectionOverride : snapshot->palette.accent;
+                    colors.header = hasHeaderOverride ? headerOverride : snapshot->palette.panelBackground.darker(0.06f);
+                    colors.background = hasBackgroundOverride ? backgroundOverride : snapshot->palette.windowBackground;
+                    colors.border = snapshot->palette.windowBorderInactive;
+                    return colors;
+                }
+
+                colors.text = Color::controlText();
+                colors.selectedText = Color::white();
+                colors.selection = Color::activeCaption();
+                colors.header = Color::windowBackground().darker(0.06f);
+                colors.background = Color::windowBackground();
+                colors.border = Color::buttonShadow();
+
+                if (hasTextOverride)
+                    colors.text = textOverride;
+                if (hasSelectionOverride)
+                    colors.selection = selectionOverride;
+                if (hasHeaderOverride)
+                    colors.header = headerOverride;
+                if (hasBackgroundOverride)
+                    colors.background = backgroundOverride;
+                return colors;
+            }
+        }
 
         ListView::ListView()
             : ControlBase(),
@@ -18,9 +72,13 @@ namespace QW
               m_scrollOffset(0),
               m_itemHeight(20),
               m_showHeader(true),
-              m_textColor(Color(0, 0, 0, 255)),
-              m_selColor(Color(0, 120, 215, 255)),
-              m_headerColor(Color(230, 230, 230, 255)),
+              m_textColor(Color::controlText()),
+              m_selColor(Color::activeCaption()),
+              m_headerColor(Color::windowBackground().darker(0.06f)),
+              m_hasTextColorOverride(false),
+              m_hasSelectionColorOverride(false),
+              m_hasHeaderColorOverride(false),
+              m_hasBackgroundColorOverride(false),
               m_selChangeHandler(nullptr),
               m_selChangeUserData(nullptr),
               m_dblClickHandler(nullptr),
@@ -29,7 +87,7 @@ namespace QW
               m_scrollChangeUserData(nullptr),
               m_hoverIndex(-1)
         {
-            m_bgColor = Color(255, 255, 255, 255);
+                        m_bgColor = Color::windowBackground();
         }
 
         ListView::ListView(Window *window, Rect bounds)
@@ -38,9 +96,13 @@ namespace QW
               m_scrollOffset(0),
               m_itemHeight(20),
               m_showHeader(true),
-              m_textColor(Color(0, 0, 0, 255)),
-              m_selColor(Color(0, 120, 215, 255)),
-              m_headerColor(Color(230, 230, 230, 255)),
+              m_textColor(Color::controlText()),
+              m_selColor(Color::activeCaption()),
+              m_headerColor(Color::windowBackground().darker(0.06f)),
+              m_hasTextColorOverride(false),
+              m_hasSelectionColorOverride(false),
+              m_hasHeaderColorOverride(false),
+              m_hasBackgroundColorOverride(false),
               m_selChangeHandler(nullptr),
               m_selChangeUserData(nullptr),
               m_dblClickHandler(nullptr),
@@ -49,7 +111,7 @@ namespace QW
               m_scrollChangeUserData(nullptr),
               m_hoverIndex(-1)
         {
-            m_bgColor = Color(255, 255, 255, 255);
+                        m_bgColor = Color::windowBackground();
         }
 
         ListView::~ListView()
@@ -296,6 +358,34 @@ namespace QW
             }
         }
 
+        void ListView::setTextColor(Color color)
+        {
+            m_textColor = color;
+            m_hasTextColorOverride = true;
+            invalidate();
+        }
+
+        void ListView::setSelectionColor(Color color)
+        {
+            m_selColor = color;
+            m_hasSelectionColorOverride = true;
+            invalidate();
+        }
+
+        void ListView::setHeaderColor(Color color)
+        {
+            m_headerColor = color;
+            m_hasHeaderColorOverride = true;
+            invalidate();
+        }
+
+        void ListView::setBackgroundColor(Color color)
+        {
+            m_bgColor = color;
+            m_hasBackgroundColorOverride = true;
+            invalidate();
+        }
+
         void ListView::setScrollOffsetChangeHandler(ScrollOffsetChangeHandler handler, void *userData)
         {
             m_scrollChangeHandler = handler;
@@ -324,6 +414,15 @@ namespace QW
 
             const QC::Size glyphSize = painter->measureText("M");
             const QC::i32 lineHeight = (glyphSize.height > 0) ? glyphSize.height : 16;
+            const ListViewResolvedColors colors = resolveColors(context,
+                                                                m_hasTextColorOverride,
+                                                                m_textColor,
+                                                                m_hasSelectionColorOverride,
+                                                                m_selColor,
+                                                                m_hasHeaderColorOverride,
+                                                                m_headerColor,
+                                                                m_hasBackgroundColorOverride,
+                                                                m_bgColor);
 
             auto rowTextY = [&](QC::i32 rowY, QC::u32 rowH) -> QC::i32
             {
@@ -333,15 +432,15 @@ namespace QW
                 return y;
             };
 
-            painter->fillRect(abs, m_bgColor);
-            painter->drawRect(abs, Color(128, 128, 128, 255));
+            painter->fillRect(abs, colors.background);
+            painter->drawRect(abs, colors.border);
 
             QC::i32 currentY = abs.y;
 
             if (m_showHeader && m_columns.size() > 0)
             {
                 Rect headerRect = {abs.x, currentY, abs.width, m_itemHeight};
-                painter->fillRect(headerRect, m_headerColor);
+                painter->fillRect(headerRect, colors.header);
 
                 QC::i32 colX = abs.x;
                 for (QC::usize i = 0; i < m_columns.size(); ++i)
@@ -349,7 +448,7 @@ namespace QW
                     painter->drawText(colX + 4,
                                       rowTextY(currentY, m_itemHeight),
                                       m_columns[i].header,
-                                      m_textColor);
+                                      colors.text);
                     colX += static_cast<QC::i32>(m_columns[i].width);
                 }
                 currentY += static_cast<QC::i32>(m_itemHeight);
@@ -365,18 +464,18 @@ namespace QW
 
                 if (item.selected)
                 {
-                    painter->fillRect(itemRect, m_selColor);
+                    painter->fillRect(itemRect, colors.selection);
                     painter->drawText(abs.x + 4,
                                       rowTextY(currentY, m_itemHeight),
                                       item.text,
-                                      Color(255, 255, 255, 255));
+                                      colors.selectedText);
                 }
                 else
                 {
                     painter->drawText(abs.x + 4,
                                       rowTextY(currentY, m_itemHeight),
                                       item.text,
-                                      m_textColor);
+                                      colors.text);
                 }
 
                 currentY += static_cast<QC::i32>(m_itemHeight);

@@ -16,6 +16,25 @@ namespace QG
 namespace QW
 {
 
+    enum class ButtonContentMode : QC::u8
+    {
+        Auto = 0,
+        Text,
+        Icon,
+        TextAndIcon
+    };
+
+    enum class ButtonVariant : QC::u8
+    {
+        Standard = 0,
+        Borderless,
+        Icon,
+        Pill,
+        Toolbar,
+        Ghost,
+        Compact
+    };
+
     enum class ButtonRole : QC::u8
     {
         Default = 0,
@@ -181,9 +200,12 @@ namespace QW
         QC::Rect bounds;
         const char *text = nullptr;
         const QG::ImageSurface *icon = nullptr;
+        ButtonContentMode contentMode = ButtonContentMode::Auto;
+        ButtonVariant variant = ButtonVariant::Standard;
         bool defaultButton = false;
         bool borderless = false;
         ButtonRole role = ButtonRole::Default;
+        QC::u32 cornerRadius = 0; // 0 = use style/role default
     };
 
     const char *buttonRoleToString(ButtonRole role);

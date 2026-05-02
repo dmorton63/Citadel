@@ -46,6 +46,13 @@ Label {
     color: #C8E6C9;
 }
 
+#btnCMMS {
+    background: #5A9D5A;
+    border: #2E5F2E;
+    border-width: 1;
+    color: #E8F5E9;
+}
+
 /* Main content */
 #mainContent {
     background: rgba(255,255,255,0.25);

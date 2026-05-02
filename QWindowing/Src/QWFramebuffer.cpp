@@ -37,6 +37,31 @@ namespace QW
             // Ensure streaming stores are globally visible.
             QC::write_barrier();
         }
+
+        inline void copyRowsToFrontbuffer(void *dst, const void *src,
+                                          QC::u32 rowBytes, QC::u32 rowCount,
+                                          QC::u32 dstPitch, QC::u32 srcPitch,
+                                          bool frontbufferIsMMIO)
+        {
+            auto *dstBytes = static_cast<QC::u8 *>(dst);
+            auto *srcBytes = static_cast<const QC::u8 *>(src);
+
+            for (QC::u32 row = 0; row < rowCount; ++row)
+            {
+                void *rowDst = dstBytes + static_cast<QC::usize>(row) * dstPitch;
+                const void *rowSrc = srcBytes + static_cast<QC::usize>(row) * srcPitch;
+                if (frontbufferIsMMIO)
+                    memcpy(rowDst, rowSrc, rowBytes);
+                else
+                    memcpy_stream64(rowDst, rowSrc, rowBytes);
+            }
+
+            if (!frontbufferIsMMIO)
+            {
+                // Cacheable framebuffer mappings need explicit writeback so scanout sees changes.
+                QC::wbinvd();
+            }
+        }
     }
 
     Framebuffer::Framebuffer()
@@ -162,23 +187,99 @@ namespace QW
         if (!m_doubleBuffered || !m_buffer || !m_backBuffer)
             return;
 
-        const QC::usize bytes = m_pitch * m_height;
+        copyRowsToFrontbuffer(m_buffer,
+                              m_backBuffer,
+                              m_pitch,
+                              m_height,
+                              m_pitch,
+                              m_pitch,
+                              m_frontbufferIsMMIO);
+    }
 
-        // Copy back buffer to front buffer.
-        // If the frontbuffer is a cacheable mapping (HHDM), use non-temporal stores so VRAM
-        // sees the update without requiring an expensive full-cache flush.
-        if (m_frontbufferIsMMIO)
-            memcpy(m_buffer, m_backBuffer, bytes);
-        else
+    void Framebuffer::swapRect(const Rect &rect)
+    {
+        if (!m_doubleBuffered || !m_buffer || !m_backBuffer)
+            return;
+
+        QC::i32 x0 = rect.x;
+        QC::i32 y0 = rect.y;
+        QC::i32 x1 = rect.x + static_cast<QC::i32>(rect.width);
+        QC::i32 y1 = rect.y + static_cast<QC::i32>(rect.height);
+
+        if (x1 <= 0 || y1 <= 0)
+            return;
+        if (x0 >= static_cast<QC::i32>(m_width) || y0 >= static_cast<QC::i32>(m_height))
+            return;
+
+        if (x0 < 0)
+            x0 = 0;
+        if (y0 < 0)
+            y0 = 0;
+        if (x1 > static_cast<QC::i32>(m_width))
+            x1 = static_cast<QC::i32>(m_width);
+        if (y1 > static_cast<QC::i32>(m_height))
+            y1 = static_cast<QC::i32>(m_height);
+
+        const QC::u32 copyWidth = static_cast<QC::u32>(x1 - x0);
+        const QC::u32 copyHeight = static_cast<QC::u32>(y1 - y0);
+        if (copyWidth == 0 || copyHeight == 0)
+            return;
+
+        const QC::u32 bytesPerPixel = (m_bpp == 24) ? 3u : ((m_bpp == 16) ? 2u : 4u);
+        const QC::u32 rowBytes = copyWidth * bytesPerPixel;
+
+        auto *dstBase = static_cast<QC::u8 *>(m_buffer) + static_cast<QC::usize>(y0) * m_pitch + static_cast<QC::usize>(x0) * bytesPerPixel;
+        auto *srcBase = static_cast<QC::u8 *>(m_backBuffer) + static_cast<QC::usize>(y0) * m_pitch + static_cast<QC::usize>(x0) * bytesPerPixel;
+
+        copyRowsToFrontbuffer(dstBase,
+                              srcBase,
+                              rowBytes,
+                              copyHeight,
+                              m_pitch,
+                              m_pitch,
+                              m_frontbufferIsMMIO);
+    }
+
+    bool Framebuffer::copyBackBufferRect(const Rect &src, const Rect &dst)
+    {
+        if (!m_doubleBuffered || !m_backBuffer)
+            return false;
+
+        if (src.width == 0 || src.height == 0 || dst.width != src.width || dst.height != src.height)
+            return false;
+
+        if (src.x < 0 || src.y < 0 || dst.x < 0 || dst.y < 0)
+            return false;
+
+        const QC::i32 srcRight = src.x + static_cast<QC::i32>(src.width);
+        const QC::i32 srcBottom = src.y + static_cast<QC::i32>(src.height);
+        const QC::i32 dstRight = dst.x + static_cast<QC::i32>(dst.width);
+        const QC::i32 dstBottom = dst.y + static_cast<QC::i32>(dst.height);
+        if (srcRight > static_cast<QC::i32>(m_width) ||
+            srcBottom > static_cast<QC::i32>(m_height) ||
+            dstRight > static_cast<QC::i32>(m_width) ||
+            dstBottom > static_cast<QC::i32>(m_height))
         {
-            memcpy_stream64(m_buffer, m_backBuffer, bytes);
-
-            // Debug/reliability: some emulated SVGA framebuffers behave poorly when mapped as
-            // cacheable RAM via HHDM. Even with non-temporal stores + sfence, scanout can appear
-            // stale/black. A full cache writeback is expensive, but it makes the write visibility
-            // question unambiguous.
-            QC::wbinvd();
+            return false;
         }
+
+        const QC::u32 bytesPerPixel = (m_bpp == 24) ? 3u : ((m_bpp == 16) ? 2u : 4u);
+        const QC::u32 rowBytes = src.width * bytesPerPixel;
+
+        auto *bufferBytes = static_cast<QC::u8 *>(m_backBuffer);
+        const bool copyBottomUp = (dst.y > src.y) && (dst.y < srcBottom);
+
+        for (QC::u32 row = 0; row < src.height; ++row)
+        {
+            const QC::u32 rowIndex = copyBottomUp ? (src.height - 1u - row) : row;
+            void *dstRow = bufferBytes + static_cast<QC::usize>(dst.y + static_cast<QC::i32>(rowIndex)) * m_pitch +
+                           static_cast<QC::usize>(dst.x) * bytesPerPixel;
+            const void *srcRow = bufferBytes + static_cast<QC::usize>(src.y + static_cast<QC::i32>(rowIndex)) * m_pitch +
+                                 static_cast<QC::usize>(src.x) * bytesPerPixel;
+            memmove(dstRow, srcRow, rowBytes);
+        }
+
+        return true;
     }
 
     void Framebuffer::setPixel(QC::u32 x, QC::u32 y, QC::u32 color)

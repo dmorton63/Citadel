@@ -5,11 +5,66 @@
 #include "QNetStack.h"
 #include "QNetIP.h"
 #include "QCMemUtil.h"
+#include "QCString.h"
 #include "QKMemHeap.h"
 #include "QKRuntimeRegistries.h"
 
 namespace QNet
 {
+
+    namespace
+    {
+        static bool ensureInternalNetworkOwner(QK::Runtime::Registries &regs)
+        {
+            static constexpr QC::u32 kInternalNetworkOwnerPid = 1;
+            if (regs.findProcess(kInternalNetworkOwnerPid))
+                return true;
+
+            QK::Runtime::ProcessRecord proc{};
+            proc.pid = kInternalNetworkOwnerPid;
+            proc.parentPid = 0;
+            proc.state = QK::Runtime::ProcessState::Running;
+            return regs.createProcess(proc) == kInternalNetworkOwnerPid;
+        }
+
+        static void appendU16Dec(char *dst, QC::usize cap, QC::u16 value)
+        {
+            if (!dst || cap == 0)
+                return;
+            QC::usize len = QC::String::strlen(dst);
+            if (len >= cap - 1)
+                return;
+
+            char rev[6];
+            QC::usize n = 0;
+            QC::u32 v = value;
+            if (v == 0)
+                rev[n++] = '0';
+            else
+            {
+                while (v && n < sizeof(rev))
+                {
+                    rev[n++] = static_cast<char>('0' + (v % 10));
+                    v /= 10;
+                }
+            }
+
+            while (n > 0 && len + 1 < cap)
+                dst[len++] = rev[--n];
+            dst[len] = '\0';
+        }
+
+        static bool validateOpenToken(QC::u16 port, QC::u32 ownerPid)
+        {
+            if (port == 0 || ownerPid == 0)
+                return false;
+            char scope[16];
+            QC::String::memset(scope, 0, sizeof(scope));
+            QC::String::strncpy(scope, "TCP:", sizeof(scope) - 1);
+            appendU16Dec(scope, sizeof(scope), port);
+            return QC::String::strcmp(scope, "TCP:0") != 0;
+        }
+    }
 
     static inline QC::u32 mix32(QC::u32 x)
     {
@@ -148,7 +203,7 @@ namespace QNet
         {
             if (m_connections[i])
             {
-                (void)QK::Runtime::Registries::instance().unregisterPort(QK::Runtime::PortProtocol::TCP, m_connections[i]->localPort);
+                (void)Stack::instance().closeManagedPort(Protocol::TCP, m_connections[i]->localPort);
                 if (m_connections[i]->sendBuffer)
                     QK::Memory::Heap::instance().free(m_connections[i]->sendBuffer);
                 if (m_connections[i]->recvBuffer)
@@ -367,7 +422,7 @@ namespace QNet
     {
         static constexpr QC::u32 kInternalNetworkOwnerPid = 1;
         auto &regs = QK::Runtime::Registries::instance();
-        if (!regs.findProcess(kInternalNetworkOwnerPid))
+        if (!ensureInternalNetworkOwner(regs))
             return nullptr;
 
         // Find free slot
@@ -445,7 +500,17 @@ namespace QNet
         conn->txInFlightRtoMs = 0;
         conn->txInFlightRetries = 0;
 
-        if (!regs.registerPort(QK::Runtime::PortProtocol::TCP, conn->localPort, kInternalNetworkOwnerPid))
+        if (!validateOpenToken(conn->localPort, kInternalNetworkOwnerPid))
+        {
+            if (conn->sendBuffer)
+                QK::Memory::Heap::instance().free(conn->sendBuffer);
+            if (conn->recvBuffer)
+                QK::Memory::Heap::instance().free(conn->recvBuffer);
+            QK::Memory::Heap::instance().free(conn);
+            return nullptr;
+        }
+
+        if (!Stack::instance().openManagedPort(Protocol::TCP, conn->localPort, kInternalNetworkOwnerPid))
         {
             if (conn->sendBuffer)
                 QK::Memory::Heap::instance().free(conn->sendBuffer);
@@ -468,9 +533,9 @@ namespace QNet
     {
         static constexpr QC::u32 kInternalNetworkOwnerPid = 1;
         auto &regs = QK::Runtime::Registries::instance();
-        if (!regs.findProcess(kInternalNetworkOwnerPid))
+        if (!ensureInternalNetworkOwner(regs))
             return nullptr;
-        if (regs.findPort(QK::Runtime::PortProtocol::TCP, port))
+        if (Stack::instance().isManagedPortOpen(Protocol::TCP, port))
             return nullptr;
 
         // Find free slot
@@ -526,7 +591,17 @@ namespace QNet
         conn->txInFlightRtoMs = 0;
         conn->txInFlightRetries = 0;
 
-        if (!regs.registerPort(QK::Runtime::PortProtocol::TCP, conn->localPort, kInternalNetworkOwnerPid))
+        if (!validateOpenToken(conn->localPort, kInternalNetworkOwnerPid))
+        {
+            if (conn->sendBuffer)
+                QK::Memory::Heap::instance().free(conn->sendBuffer);
+            if (conn->recvBuffer)
+                QK::Memory::Heap::instance().free(conn->recvBuffer);
+            QK::Memory::Heap::instance().free(conn);
+            return nullptr;
+        }
+
+        if (!Stack::instance().openManagedPort(Protocol::TCP, conn->localPort, kInternalNetworkOwnerPid))
         {
             if (conn->sendBuffer)
                 QK::Memory::Heap::instance().free(conn->sendBuffer);
@@ -581,7 +656,7 @@ namespace QNet
                     }
                 }
                 if (!stillUsed)
-                    (void)QK::Runtime::Registries::instance().unregisterPort(QK::Runtime::PortProtocol::TCP, conn->localPort);
+                    (void)Stack::instance().closeManagedPort(Protocol::TCP, conn->localPort);
                 if (conn->sendBuffer)
                     QK::Memory::Heap::instance().free(conn->sendBuffer);
                 if (conn->recvBuffer)
@@ -720,24 +795,10 @@ namespace QNet
         // Find matching connection
         TCPConnection *conn = findConnection(source, srcPort, destPort);
 
-        // Check for listening socket if no established connection
         if (!conn)
         {
-            for (QC::usize i = 0; i < MAX_CONNECTIONS; i++)
-            {
-                if (m_connections[i] &&
-                    m_connections[i]->state == TCPState::Listen &&
-                    m_connections[i]->localPort == destPort)
-                {
-                    conn = m_connections[i];
-                    break;
-                }
-            }
-        }
-
-        if (!conn)
-        {
-            // Send RST for unknown connection
+            // Port Manager stage 2 session gate:
+            // only accept inbound TCP packets for known Citadel-initiated sessions.
             return;
         }
 

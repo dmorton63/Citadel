@@ -61,13 +61,29 @@ namespace QNet
         QC::usize dropEphemeralBindings();
 
     private:
+        struct Session
+        {
+            bool used = false;
+            IPv4Address remoteAddr{};
+            QC::u16 remotePort = 0;
+            QC::u16 localPort = 0;
+            QC::u64 lastTxMs = 0;
+        };
+
+        void noteOutboundSession(IPv4Address remoteAddr, QC::u16 remotePort, QC::u16 localPort, QC::u64 nowMs);
+        bool hasRecentSession(IPv4Address remoteAddr, QC::u16 remotePort, QC::u16 localPort, QC::u64 nowMs);
+        void pruneSessions(QC::u64 nowMs);
+
         UDPBinding *findBinding(QC::u16 port);
         QC::u16 allocatePort();
         QC::u16 calculateChecksum(IPv4Address srcAddr, IPv4Address destAddr,
                                   const void *packet, QC::usize length);
 
         static constexpr QC::usize MAX_BINDINGS = 256;
+        static constexpr QC::usize MAX_SESSIONS = 256;
+        static constexpr QC::u64 SESSION_TIMEOUT_MS = 30000;
         UDPBinding *m_bindings[MAX_BINDINGS];
+        Session m_sessions[MAX_SESSIONS];
         QC::u16 m_nextPort;
     };
 

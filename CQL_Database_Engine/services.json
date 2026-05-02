@@ -1,0 +1,55 @@
+{
+  "services": [
+    {
+      "name": "QCSQL",
+      "displayName": "Quantum CQL Database Service",
+      "description": "SQL database service providing CREATE, INSERT, SELECT, UPDATE, DELETE, and JOIN operations",
+      "version": "1.0.0-Citadel",
+      "author": "CQL Development Team",
+      "type": "database",
+      "autoStart": true,
+      "priority": 10,
+      "dependencies": [
+        "FileSystem",
+        "MemoryManager"
+      ],
+      "capabilities": [
+        "SQL parsing and execution",
+        "Multi-table JOIN operations",
+        "Transaction support",
+        "WHERE clause filtering",
+        "Index management"
+      ],
+      "messageProtocol": {
+        "namespace": "QCQL::Svc",
+        "messageTypes": {
+          "CreateDatabase": 1,
+          "OpenDatabase": 2,
+          "CloseDatabase": 3,
+          "ExecuteSQL": 10,
+          "GetVersion": 20,
+          "GetStatus": 21,
+          "GetDatabaseInfo": 22
+        }
+      },
+      "configuration": {
+        "maxDatabases": 16,
+        "maxConnections": 64,
+        "maxQueryLength": 4096,
+        "enableDebugLogging": true,
+        "defaultStoragePath": "/data/databases/"
+      },
+      "registrationFunction": "RegisterQCSQLService",
+      "headerFile": "QCSQLService.h",
+      "implementationFile": "QCSQLService.cpp",
+      "status": "stub",
+      "notes": [
+        "Phase 1: Platform Abstraction Layer (CitadelPAL.h) - STUB",
+        "Phase 2: Core Engine Port (SQLParser, Database, QueryExecutor) - TODO",
+        "Phase 3: Service Integration (QCSQLService) - STUB",
+        "Current implementation returns placeholder responses",
+        "Ready for integration testing with Citadel service infrastructure"
+      ]
+    }
+  ]
+}

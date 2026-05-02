@@ -8,6 +8,15 @@ namespace QK
     class SecurityCenter
     {
     public:
+        enum class ProvisioningState : QC::u8
+        {
+            Unprovisioned = 0,
+            Provisioned,
+            Operational,
+            Recovery,
+            SafeMode
+        };
+
         enum class DispatchOp : QC::u8
         {
             TrustCheck = 0,
@@ -93,6 +102,24 @@ namespace QK
             QC::u64 boundaryTimeoutMs = 250;
         };
 
+        enum class NetworkPortProtocol : QC::u8
+        {
+            Unknown = 0,
+            UDP = 1,
+            TCP = 2,
+        };
+
+        struct NetworkCapabilityToken
+        {
+            QC::u8 id[16] = {0};
+            char type[24] = {0};
+            char scope[16] = {0};
+            QC::u32 issuedToPid = 0;
+            bool hasExpiration = false;
+            QC::u8 reserved[3] = {0};
+            QC::u64 expiresAtMs = 0;
+        };
+
         enum class UnlockState : QC::u8
         {
             Locked = 0,
@@ -123,6 +150,17 @@ namespace QK
 
         // Kernel-side SC dispatch bridge for SYS_* style operations.
         QC::Status dispatch(const DispatchRequest &req, DispatchResult *outResult = nullptr);
+
+        // Port Manager Phase 1A scaffolding:
+        // validates a Network.OpenPort token and its scope against requested protocol/port.
+        bool parseNetworkOpenPortScope(const char *scope,
+                           NetworkPortProtocol &outProtocol,
+                           QC::u16 &outPort) const;
+        bool validateNetworkOpenPortToken(const NetworkCapabilityToken &token,
+                          NetworkPortProtocol requestedProtocol,
+                          QC::u16 requestedPort,
+                          QC::u32 requesterPid,
+                          QC::u64 nowMs = 0) const;
 
         bool initialized() const { return m_initialized; }
         Mode mode() const { return m_mode; }
@@ -195,8 +233,10 @@ namespace QK
         void emitProvisioningCompletedAuditEvent(QC::u64 code = 0x50525631ULL) const;
 
         bool singleOwnerScope() const { return true; }
+        ProvisioningState provisioningState() const { return m_provisioningState; }
 
         static const char *modeName(Mode mode);
+        static const char *provisioningStateName(ProvisioningState state);
 
     private:
         SecurityCenter();
@@ -208,6 +248,7 @@ namespace QK
         QC::Status handleVaultRequest(const DispatchRequest &req, DispatchResult *outResult);
         QC::Status handleAuditView(DispatchResult *outResult);
         QC::Status handleAuditExport(DispatchResult *outResult);
+        void refreshOperationalState();
 
         bool m_initialized;
         Mode m_mode;
@@ -236,6 +277,7 @@ namespace QK
         QC::u32 m_auditExportWindowCount = 0;
         bool m_protectedStorageInitialized = false;
         bool m_sstRetiring = false;
+        ProvisioningState m_provisioningState = ProvisioningState::Unprovisioned;
     };
 
 } // namespace QK

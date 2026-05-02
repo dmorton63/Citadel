@@ -5,6 +5,7 @@
 
 #include "QCTypes.h"
 #include "QCVector.h"
+#include "QWPresentBackend.h"
 #include "QWWindowManager.h"
 
 namespace QW
@@ -31,6 +32,21 @@ namespace QW
         bool merged;
     };
 
+    struct CompositorStats
+    {
+        QC::u64 lastComposeTimeMs = 0;
+        QC::u32 frameCount = 0;
+        QC::usize dirtyRegionCount = 0;
+        QC::usize lastMergedDirtyRegionCount = 0;
+        QC::usize lastPresentedDirtyRectCount = 0;
+        QC::u64 lastDirtyArea = 0;
+        QC::u32 lastDirtyCoveragePercent = 0;
+        QC::u32 dirtyCollapseCount = 0;
+        bool lastPresentWasFullFrame = false;
+        bool lastPresentUsedBatching = false;
+        bool hardwareCursorActive = false;
+    };
+
     class Compositor
     {
     public:
@@ -42,6 +58,9 @@ namespace QW
         // Composition
         void compose();
         void composeWindow(Window *window);
+        bool supportsRectCopy() const;
+        bool copyRectInBackBuffer(const Rect &src, const Rect &dst);
+        bool rectCopy(const Rect &src, const Rect &dst);
 
         // Dirty regions
         void invalidate(const Rect &rect);
@@ -73,6 +92,9 @@ namespace QW
         // Performance
         QC::u64 lastComposeTime() const { return m_lastComposeTime; }
         QC::u32 frameCount() const { return m_frameCount; }
+        const CompositorStats &stats() const { return m_stats; }
+        const PresentAccelerationStats &accelerationStats() const;
+        void resetStats();
 
     private:
         void mergeDirtyRegions();
@@ -102,6 +124,8 @@ namespace QW
         // Stats
         QC::u64 m_lastComposeTime;
         QC::u32 m_frameCount;
+        QC::u32 m_dirtyCollapseCount = 0;
+        CompositorStats m_stats;
     };
 
 } // namespace QW

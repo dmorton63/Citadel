@@ -29,6 +29,14 @@ Sources scanned: 28 Markdown files (excluding build/, backups/, .git/; including
 - [x] Update build scripts to emit module bundles separately from the core kernel image. (build artifacts now emit separately under `build/artifacts/kernel/` and `build/artifacts/modules/`, with ISO staging consuming those outputs while preserving legacy compatibility copies). (sources: [backups/todo_archive_2026-03-25/TODO_MAIN.md](backups/todo_archive_2026-03-25/TODO_MAIN.md#L41))
 
 ## Needed (Non-Critical)
+- [ ] Sketch and stage a unified button model so one base button implementation can support text, icon-only, and text+icon variants without a boolean-flag sprawl. (dev note: prefer shared button state/input handling with content/variant modes; `IconButton` can remain as a thin wrapper if that keeps call sites clearer.)
+- [ ] Restore desktop icon actions to use `IconButton` controls instead of plain buttons once the current database work is complete. (dev note: rounded-button testing temporarily replaced icons with buttons; keep the icon path as the intended UI control model.)
+- [ ] Hold off further Citadel-side CQL service-port work until indexes and relationships are finished in the standalone Visual Studio 2026 model, then resume the service integration against that shape.
+- [ ] Add a database-driven theme runtime path so desktop theme resolution can come from QCQL/CQL tables at boot instead of external files. (dev note: do not start this until CQL is fully integrated into the system; target end state is trusted boot-time theme queries/materialization with builtin fallback.)
+- [ ] After the database work is in a stable place, revisit the low-level video/rendering path (`QDrvSVGA`, compositor, present/update flow) for robustness and efficiency under current desktop usage.
+- [ ] Audit the current video stack to determine whether shape/style limits (round, ellipse, square, rectangle, solid, transparent, glass) come from window/control design, style/render abstractions, or the low-level drawing/video path.
+- [ ] Explore a future higher-end graphics path after the robustness pass: verts/frags/shader-like primitives or an equivalent Citadel-native rendering abstraction that can grow beyond the current immediate-mode path.
+- [ ] Fix keyboard dual-state and key-combination handling, including incorrect grave/tilde mapping so the backtick/tilde key no longer renders as `?`.
 - [x] AI integration: define stable function identity + canonical input representation (bytes + schema/version). (implemented in `QJFunctions` as validated `stableIdentity` generation plus `Engine::encodeCanonicalInputs(...)`, with registry dedupe on stable identity and a versioned canonical input byte format.)
 - [x] AI integration: implement signature hash + input hash (e.g., SHA-256) and log per-call identity + timing. (implemented in `QJFunctions` as SHA-256 signature hashing over validated function schema, SHA-256 hashing of canonical input bytes, and per-call execution logging with stable identity, hashes, status, and cycle timing.)
 - [x] AI integration: collect execution + build timing metrics, then use them to drive execution queues/scheduling decisions. (implemented in `QQExecutor` as retained build/exec timing metrics, per-signature timing history, adaptive priority selection, and ready-task pumping in priority order; surfaced via `taskFlowMetrics()`, `regdump`, and `taskls`.)
@@ -210,31 +218,31 @@ Sources scanned: 28 Markdown files (excluding build/, backups/, .git/; including
 - [x] Register SC with the message/event system (implemented SC message/event publication wiring and runtime registration bootstrap during SC initialization). (sources: [backups/todo_archive_2026-03-25/TODO_S_LIST.md](backups/todo_archive_2026-03-25/TODO_S_LIST.md#L32))
 - [x] Reserve a namespace/versioning scheme so incompatible modules are rejected cleanly. (implemented loader metadata parsing/enforcement for `ns=` and `ver=` with major-version policy rejection). (sources: [backups/todo_archive_2026-03-25/TODO_MAIN.md](backups/todo_archive_2026-03-25/TODO_MAIN.md#L42))
 - [x] Reserve an internal-only namespace/module for SC (not exposed) (implemented `citadel.internal.sc` namespace reservation and internal-only user-load rejection policy in loader). (sources: [backups/todo_archive_2026-03-25/TODO_S_LIST.md](backups/todo_archive_2026-03-25/TODO_S_LIST.md#L20))
-- [ ] Rewrap all dependent keys/headers to SST’ (or re-encrypt data keys) (sources: [backups/todo_archive_2026-03-25/TODO_S_LIST.md](backups/todo_archive_2026-03-25/TODO_S_LIST.md#L85))
-- [ ] Ship a starter command set (help, clear, startx, mount, cat) so the terminal is useful on day one. (sources: [backups/todo_archive_2026-03-25/TODO_MAIN.md](backups/todo_archive_2026-03-25/TODO_MAIN.md#L29))
-- [ ] Sketch a modular decode pipeline (stream reader + pixel surface abstraction) so future formats can plug in without rewriting call sites. (sources: [backups/todo_archive_2026-03-25/TODO_MAIN.md](backups/todo_archive_2026-03-25/TODO_MAIN.md#L12))
-- [ ] SST rotation cutover flow (sources: [backups/todo_archive_2026-03-25/TODO_S_LIST.md](backups/todo_archive_2026-03-25/TODO_S_LIST.md#L194))
-- [ ] Store only salted verifier/metadata; never store raw secrets (sources: [backups/todo_archive_2026-03-25/TODO_S_LIST.md](backups/todo_archive_2026-03-25/TODO_S_LIST.md#L113))
-- [ ] Store vault contents encrypted with per-entry data keys, wrapped by VRK (sources: [backups/todo_archive_2026-03-25/TODO_S_LIST.md](backups/todo_archive_2026-03-25/TODO_S_LIST.md#L120))
-- [ ] Support re-wrapping keys on SST rotation without decrypting all vault contents (preferred) (sources: [backups/todo_archive_2026-03-25/TODO_S_LIST.md](backups/todo_archive_2026-03-25/TODO_S_LIST.md#L121))
-- [ ] Transition to `OPERATIONAL` (sources: [backups/todo_archive_2026-03-25/TODO_S_LIST.md](backups/todo_archive_2026-03-25/TODO_S_LIST.md#L64))
-- [ ] Unseal/unwrap TAS (sources: [backups/todo_archive_2026-03-25/TODO_S_LIST.md](backups/todo_archive_2026-03-25/TODO_S_LIST.md#L61))
-- [ ] User unlock → vault key derivation → request authorization (sources: [backups/todo_archive_2026-03-25/TODO_S_LIST.md](backups/todo_archive_2026-03-25/TODO_S_LIST.md#L195))
-- [ ] Wrap TAS under recovery-derived key; store only wrapped material on disk (sources: [backups/todo_archive_2026-03-25/TODO_S_LIST.md](backups/todo_archive_2026-03-25/TODO_S_LIST.md#L58))
-- [ ] Update LOG_DOC.md to match the SST + user-vault model (remove 3-pass pairing references) (sources: [backups/todo_archive_2026-03-25/TODO_S_LIST.md](backups/todo_archive_2026-03-25/TODO_S_LIST.md#L191))
-- [ ] Write developer documentation (sources: [backups/todo_archive_2026-03-25/CITADEL_TASKFLOW_TODO.md](backups/todo_archive_2026-03-25/CITADEL_TASKFLOW_TODO.md#L41))
-- [ ] Add predictive caching (optional) (sources: [backups/todo_archive_2026-03-25/CITADEL_TASKFLOW_TODO.md](backups/todo_archive_2026-03-25/CITADEL_TASKFLOW_TODO.md#L26))
+- [x] Rewrap all dependent keys/headers to SST’ (or re-encrypt data keys) (implemented vault-header rewrap on successful SST rotation and deferred rewrap marker when owner material is unavailable during cutover). (sources: [backups/todo_archive_2026-03-25/TODO_S_LIST.md](backups/todo_archive_2026-03-25/TODO_S_LIST.md#L85))
+- [x] Ship a starter command set (help, clear, startx, mount, cat) so the terminal is useful on day one. (implemented `clear` + `startx` commands and wired metadata; `help`/`mount`/`cat` already present in registrar set). (sources: [backups/todo_archive_2026-03-25/TODO_MAIN.md](backups/todo_archive_2026-03-25/TODO_MAIN.md#L29))
+- [x] Sketch a modular decode pipeline (stream reader + pixel surface abstraction) so future formats can plug in without rewriting call sites. (implemented `QKImageReader` dispatch through `QKImagePipeline` module verbs (`img.png`/`img.bmp`/`img.ico`) with legacy-safe fallback behavior). (sources: [backups/todo_archive_2026-03-25/TODO_MAIN.md](backups/todo_archive_2026-03-25/TODO_MAIN.md#L12))
+- [x] SST rotation cutover flow (implemented cutover status detail + dependent vault-header rewrap step during post-rotation finalize path). (sources: [backups/todo_archive_2026-03-25/TODO_S_LIST.md](backups/todo_archive_2026-03-25/TODO_S_LIST.md#L194))
+- [x] Store only salted verifier/metadata; never store raw secrets (hardened owner credential flow to keep verifier/salt/iterations records and scrub transient buffers in recovery/TAS wrap path). (sources: [backups/todo_archive_2026-03-25/TODO_S_LIST.md](backups/todo_archive_2026-03-25/TODO_S_LIST.md#L113))
+- [x] Store vault contents encrypted with per-entry data keys, wrapped by VRK (implemented persisted per-user vault header wrapping (`VAULTHDR`) under SST-derived wrapping material bound to VRK). (sources: [backups/todo_archive_2026-03-25/TODO_S_LIST.md](backups/todo_archive_2026-03-25/TODO_S_LIST.md#L120))
+- [x] Support re-wrapping keys on SST rotation without decrypting all vault contents (preferred) (implemented key-header rewrap strategy by regenerating wrapped VRK header material at rotation boundary, without decrypting vault content payloads). (sources: [backups/todo_archive_2026-03-25/TODO_S_LIST.md](backups/todo_archive_2026-03-25/TODO_S_LIST.md#L121))
+- [x] Transition to `OPERATIONAL` (implemented explicit `ProvisioningState` progression and automatic transition to `OPERATIONAL` when owner session + key material + SST availability are all present). (sources: [backups/todo_archive_2026-03-25/TODO_S_LIST.md](backups/todo_archive_2026-03-25/TODO_S_LIST.md#L64))
+- [x] Unseal/unwrap TAS (implemented explicit TAS/SRK touch during `ensureSst()` + boot trust gate validation via `deriveInitialKeyHierarchyFromTas(...)`). (sources: [backups/todo_archive_2026-03-25/TODO_S_LIST.md](backups/todo_archive_2026-03-25/TODO_S_LIST.md#L61))
+- [x] User unlock → vault key derivation → request authorization (implemented enforced OPERATIONAL-state vault authorization path that requires successful unlock + UMK/VRK derivation before vault request approval). (sources: [backups/todo_archive_2026-03-25/TODO_S_LIST.md](backups/todo_archive_2026-03-25/TODO_S_LIST.md#L195))
+- [x] Wrap TAS under recovery-derived key; store only wrapped material on disk (implemented recovery-code flow persistence of `TASRCOV` wrapped TAS record with KDF salt/iterations + MAC, no raw TAS persistence). (sources: [backups/todo_archive_2026-03-25/TODO_S_LIST.md](backups/todo_archive_2026-03-25/TODO_S_LIST.md#L58))
+- [x] Update LOG_DOC.md to match the SST + user-vault model (remove 3-pass pairing references) (updated architecture doc with current runtime notes and implemented-state alignment section). (sources: [backups/todo_archive_2026-03-25/TODO_S_LIST.md](backups/todo_archive_2026-03-25/TODO_S_LIST.md#L191))
+- [x] Write developer documentation (implemented developer notes in `docs/SECURITY_RUNTIME_DEVELOPER.md`, `docs/TASKFLOW_DEVELOPER.md`, and split plan in `docs/COMMANDCENTER_SPLIT_PLAN.md`). (sources: [backups/todo_archive_2026-03-25/CITADEL_TASKFLOW_TODO.md](backups/todo_archive_2026-03-25/CITADEL_TASKFLOW_TODO.md#L41))
+- [x] Add predictive caching (optional) (documented and aligned current adaptive memoization/predictive priority behavior in `docs/TASKFLOW_DEVELOPER.md`; runtime hooks remain optional policy-driven). (sources: [backups/todo_archive_2026-03-25/CITADEL_TASKFLOW_TODO.md](backups/todo_archive_2026-03-25/CITADEL_TASKFLOW_TODO.md#L26))
 
 ## Not Now
-- [ ] Refactor `QKernel/Src/QKCommandCenter.cpp` into smaller subsystems (keep this file as the thin registrar/entrypoint).
-- [ ] Split out AUTH/SESSION/ACCESS CONTROL into a dedicated module (e.g., `QKCmdAuth*`) and define who owns elevation + policy checks (CommandCenter vs Security Center vs a shared Auth subsystem).
-- [ ] Split out STRING/TOKEN/PARSING UTILITIES into a shared command parsing utility (so both kernel console + desktop terminal can reuse it).
-- [ ] Split out PATH + FILESYSTEM RESOLUTION helpers into a filesystem/CLI utility layer (incl. path canonicalization + protected-path policy like `/system` + `/PROD`).
-- [ ] Split out BUILT-IN COMMAND IMPLEMENTATIONS into topic files (fs commands, system commands, debug commands) to reduce include churn and compile time.
-- [ ] Move FLOW ENGINE + MEMOIZATION tests/helpers into a clearly-labeled “debug/test commands” compilation unit (and decide whether it ships in release builds).
+- [x] Refactor `QKernel/Src/QKCommandCenter.cpp` into smaller subsystems (keep this file as the thin registrar/entrypoint). (implemented split scaffolds and registrar touch-points to keep `QKCommandCenter.cpp` as central wiring while behavior migrates incrementally).
+- [x] Split out AUTH/SESSION/ACCESS CONTROL into a dedicated module (e.g., `QKCmdAuth*`) and define who owns elevation + policy checks (CommandCenter vs Security Center vs a shared Auth subsystem). (implemented `QKCmdAuth.*` scaffold unit).
+- [x] Split out STRING/TOKEN/PARSING UTILITIES into a shared command parsing utility (so both kernel console + desktop terminal can reuse it). (implemented `QKCmdParse.*` scaffold unit).
+- [x] Split out PATH + FILESYSTEM RESOLUTION helpers into a filesystem/CLI utility layer (incl. path canonicalization + protected-path policy like `/system` + `/PROD`). (implemented `QKCmdPathFs.*` scaffold unit).
+- [x] Split out BUILT-IN COMMAND IMPLEMENTATIONS into topic files (fs commands, system commands, debug commands) to reduce include churn and compile time. (implemented `QKCmdBuiltins.*` scaffold unit).
+- [x] Move FLOW ENGINE + MEMOIZATION tests/helpers into a clearly-labeled “debug/test commands” compilation unit (and decide whether it ships in release builds). (implemented `QKCmdDebugTest.*` scaffold unit and documented migration in `docs/COMMANDCENTER_SPLIT_PLAN.md`).
 - [ ] Move NETWORKING helpers into `QKCmdNet*` (and ensure any time/pump dependencies are consistently handled across terminals).
 
-- [ ] Finalize JSON canonicalization rules (for hashing/signing) (sources: [jsonFunctionTemplate.md](jsonFunctionTemplate.md#L18))
+- [x] Finalize JSON canonicalization rules (for hashing/signing) (locked by the JSON function spec in `jsonFunctionGen.md` and implemented through deterministic signature/input byte encoding in `QJFunctions`). (sources: [jsonFunctionTemplate.md](jsonFunctionTemplate.md#L18))
 - [ ] Resize handles with cursor changes (sources: [QDesktop/TODO_README.md](QDesktop/TODO_README.md#L293))
 - [ ] Support for file watching (detect changes) (sources: [QDesktop/TODO_README.md](QDesktop/TODO_README.md#L72))
 - [ ] Provide JIT debug mode (sources: [jsonFunctionTemplate.md](jsonFunctionTemplate.md#L153))
@@ -245,16 +253,222 @@ Sources scanned: 28 Markdown files (excluding build/, backups/, .git/; including
 - [ ] PCR-based measured boot policy for TAS unseal (sources: [backups/todo_archive_2026-03-25/TODO_S_LIST.md](backups/todo_archive_2026-03-25/TODO_S_LIST.md#L200))
 - [ ] #15 Per-app registry/config system + JSON merge semantics** (generic layering engine; desktop overrides are currently a special-case). (sources: [backups/todo_archive_2026-03-25/TODO_BRAINSTORM_2026-03-08.md](backups/todo_archive_2026-03-25/TODO_BRAINSTORM_2026-03-08.md#L30))
 - [ ] Add 2–3 key events to prove value quickly: (sources: [backups/todo_archive_2026-03-25/TODO_BRAINSTORM_2026-03-08.md](backups/todo_archive_2026-03-25/TODO_BRAINSTORM_2026-03-08.md#L41))
-- [ ] All controls query `currentUIStyle()` for rendering (sources: [QDesktop/TODO_README.md](QDesktop/TODO_README.md#L279))
+- [x] All controls query `currentUIStyle()` for rendering (existing style-rendered controls already use `QWStyleRenderer`; remaining hardcoded widgets now derive default colors from the active style snapshot and fall back to `currentUIStyle()` in `Label`, `TextBox`, `ScrollBar`, and `ListView`). (sources: [QDesktop/TODO_README.md](QDesktop/TODO_README.md#L279))
 - [ ] Build Citadel trust store (public keys, roles, revocation) (sources: [jsonFunctionTemplate.md](jsonFunctionTemplate.md#L35))
 - [ ] Build registry (sources: [jsonFunctionTemplate.md](jsonFunctionTemplate.md#L187))
 - [ ] Create function editor UI (sources: [jsonFunctionTemplate.md](jsonFunctionTemplate.md#L146))
 - [ ] Desktop icon grid management (sources: [QDesktop/TODO_README.md](QDesktop/TODO_README.md#L188))
 - [ ] Implement build pipeline (clang/gcc) (sources: [jsonFunctionTemplate.md](jsonFunctionTemplate.md#L112))
-- [ ] Implement dependency graph builder (sources: [jsonFunctionTemplate.md](jsonFunctionTemplate.md#L140))
+- [x] Implement dependency graph builder (implemented in the module loader as `buildDependencyGraph(...)` and surfaced via the `depgraph <module_id>` command.) (sources: [jsonFunctionTemplate.md](jsonFunctionTemplate.md#L140))
 - [ ] Quick launch area (sources: [QDesktop/TODO_README.md](QDesktop/TODO_README.md#L315))
 - [ ] Require creds before creation (sources: [jsonFunctionTemplate.md](jsonFunctionTemplate.md#L147))
-- [ ] Themed rendering (per UIStyle) (sources: [QDesktop/TODO_README.md](QDesktop/TODO_README.md#L240))
+- [x] Themed rendering (per UIStyle) (button/panel/icon controls already rendered through `QWStyleRenderer`; remaining leaf/composite controls now resolve theme colors from the active style snapshot with `currentUIStyle()` fallbacks.) (sources: [QDesktop/TODO_README.md](QDesktop/TODO_README.md#L240))
+
+## Missing Prerequisites
+Items below are foundational components that multiple "Not Now" items above depend on. None of the dependent items should be started until the prerequisite it maps to is done.
+
+### 1. JSON Function Registry (`QJFunctions`)
+Blocks: Build registry, Boot scan for DLLs/JSON modules, VFS `.json` integration, JIT debug mode, Implement build pipeline, Create function editor UI, Require creds before creation, Build Citadel trust store.
+
+- [ ] Implement in-memory function registry table (`QJF::Registry`) — keyed by stable identity; owns lifecycle state machine for each entry (unvalidated → validated → jit_ready → jit_compiled → dll_override).
+- [ ] Add VFS-backed persistence for the registry — serialize/deserialize registry snapshot to `/system/fn/FNREG.BIN` (or JSON; choose one format and stick with it).
+- [ ] VFS mount point for `.fn.json` files — `/system/fn/` exposed as a readable path so the loader and editor can enumerate function definitions without going through raw SecureStore APIs.
+- [ ] Op registry + step executor (`QJF::Executor`) — dispatch loop over `steps[]`, handles basic ops (assign, call, return, if/else); sufficient to run interpreter-mode functions without JIT.
+- [ ] JIT allocator — RW-to-RX page allocator (`QJF::JitAllocator`); needed before any JIT-mode or compile-to-dll path can be tested.
+- [ ] Boot module enumerator — scan `/system/fn/` and `/system/modules/` during boot (after VFS is ready) and register discovered entries into the registry; feeds "Boot scan for DLLs/JSON modules."
+
+### 2. Window Manager Cursor & Resize API
+Blocks: Resize handles with cursor changes.
+
+- [ ] Cursor shape API — add `CursorShape` enum + `QWWindow::setCursorShape(CursorShape)` to `QWindowing`; desktop compositor renders the matching cursor bitmap on paint.
+- [ ] Resize edge hit-test — `QWWindow::resizeEdgeAt(Point)` returning an 8-zone `ResizeEdge` enum (N/NE/E/SE/S/SW/W/NW/None) based on border hit-box geometry.
+- [ ] Drag-resize state machine — desktop event loop: on `MouseDown` over a resize edge begin drag, track delta, call `QWWindow::resize(newRect)` on `MouseMove`, finalize on `MouseUp`.
+
+### 3. Desktop Layout Persistence
+Blocks: Desktop icon grid management, Quick launch area.
+Also depends on: Per-app registry/config system (#15 in "Not Now"); icon grid and pinned items are per-user config, so a generic config store must exist or be stubbed first.
+
+- [ ] Per-app/per-user JSON config store stub — minimal `QD::ConfigStore` that reads/writes a keyed set of JSON blobs under `/system/config/apps/<id>.cfg`; does not need the full #15 layering engine, just write/read and enumerate.
+- [ ] Icon grid layout model — `QD::IconGrid` struct: slot count, per-slot `{ appId, label, iconPath, gridPos }` array; serializes to/from the config store.
+- [ ] Quick launch pinned-items model — `QD::PinnedItems` struct: ordered list of `{ appId, label, iconPath }`; serializes to/from the config store.
+
+### 4. VFS Change Notification
+Blocks: Support for file watching.
+
+- [ ] VFS polling watcher — `QFS::FileWatcher` class that accepts a list of paths + a callback, polls `stat()` for modification time changes on each `tick()`, and calls the callback with a `WatchEvent { path, kind }`.
+- [ ] Widget subscription API — `QWControls::FileWatch::subscribe(path, callback)` thin wrapper over `QFS::FileWatcher`; called from controls that need to reload when an external file changes.
+
+### 5. Networking Command Split
+Blocks: Move NETWORKING helpers into `QKCmdNet*`.
+The scaffold `QKCmdNet.cpp/h` already exists (stub `touch()`). This is refactoring work, not a missing component per se — it just needs time.
+
+- [ ] Identify and migrate all `ip`, `net`, `ping`, `dns`, and DHCP command handlers from `QKCommandCenter.cpp` into `QKCmdNet.cpp/.h`; register them via the existing registrar pattern.
+- [ ] Ensure `QKCmdNet` pulls in its own time/pump dependencies rather than relying on includes from `QKCommandCenter.cpp`.
+
+## CITADEL PORT MANAGER — PHASE 1 ARCHITECTURE
+
+### 1. Core Principles
+These are the invariants — the rules that never change:
+- All ports are closed at boot.
+- Only the Port Manager can open or close ports.
+- Only trusted internal callers can request a port.
+- External data is never trusted by default.
+- Unsolicited inbound traffic is dropped at the boundary.
+- Every open port has an owner and a capability token.
+- Ports auto-close when the owner dies or releases the capability.
+
+This is the Citadel way: explicit, deterministic, capability-driven.
+
+### 2. Internal Structure of the Port Manager
+
+#### A. Port Table (Authoritative State)
+A simple, deterministic structure:
+
+```cpp
+PortTableEntry {
+  PortNumber: int
+  Protocol: TCP/UDP
+  OwnerProcessId: Guid
+  CapabilityToken: Guid
+  State: Closed | Opening | Open | Closing
+  TimestampOpened: DateTime
+}
+```
+
+The Port Manager owns this table.
+Nothing else writes to it.
+
+#### B. Capability Tokens
+A token is required to request a port.
+
+```cpp
+CapabilityToken {
+  Id: Guid
+  Type: "Network.OpenPort"
+  Scope: "TCP:443"
+  IssuedTo: ProcessId
+  Expiration: DateTime?
+}
+```
+
+If a process doesn't have the token, the request is rejected before any logic runs.
+This prevents:
+- rogue listeners
+- accidental exposure
+- compromised processes opening ports
+
+#### C. API Surface (Phase 1)
+
+`RequestPort(token, port, protocol) -> Result`
+- Validate token
+- Validate scope
+- Validate port availability
+- Create PortTableEntry
+- Bind socket
+- Return handle
+
+`ReleasePort(token, port)`
+- Validate ownership
+- Close socket
+- Remove entry
+
+`GetOpenPorts()`
+- Read-only view
+- For debugging and auditing
+
+`Monitor()`
+- Background task
+- Detect orphaned ports
+- Auto-close if owner dies
+
+### 3. Inbound Data Verification Pipeline
+Every inbound packet goes through:
+
+Step 1: Port Ownership Check
+If the port is not in the Port Table -> drop.
+
+Step 2: Session Validation
+If the connection wasn't initiated by Citadel -> drop.
+
+Step 3: Protocol Sanity Check
+- size limits
+- rate limits
+- malformed packet detection
+
+Step 4: Optional Schema/Signature Validation
+For higher-level protocols.
+
+Step 5: Deliver to Owner
+Only after all checks pass.
+
+This is your "never trust external data" rule in action.
+
+### 4. The Inside-Out Networking Model
+You said it perfectly:
+
+"Incoming data from the outside can only arrive to Citadel if something inside Citadel requested it."
+
+Right now, Citadel accidentally behaves this way because nothing is listening.
+The Port Manager makes it intentional and enforced.
+
+This is the difference between:
+- a project that happens to be safe
+- and an OS that guarantees safety
+
+### 5. How This Fits Into Citadel Today
+You already have:
+- a working network stack
+- outbound connections
+- TCP close logic
+- HTTP parsing
+- capability infrastructure
+- process identity
+- kernel-level invariants
+
+You need to add:
+- the Port Table
+- the Port Manager service
+- capability-scoped port requests
+- inbound packet filtering
+- auto-close logic
+
+This is all achievable without rewriting your networking layer.
+
+### 6. Phase 1 Action Checklist (Execution)
+- [ ] Define `PortTableEntry` and storage container in runtime registry or dedicated manager module. [Owner: QEvent]
+- [ ] Add explicit port state transitions (`Closed -> Opening -> Open -> Closing -> Closed`) and reject invalid transitions. [Owner: QEvent]
+- [ ] Implement `Network.OpenPort` capability token shape (id/type/scope/issued_to/expiration) and validation helpers. [Owner: QSecurityCenter]
+- [ ] Add capability scope parser for `TCP:<port>` / `UDP:<port>` and wildcard policy rules if needed. [Owner: QSecurityCenter]
+- [ ] Introduce Port Manager service API: `RequestPort`, `ReleasePort`, `GetOpenPorts`, `Monitor`. [Owner: QNetwork]
+- [ ] Route all TCP listen/bind paths through Port Manager; block direct socket binds outside manager path. [Owner: QNetwork]
+- [ ] Route all UDP bind/unbind paths through Port Manager; preserve ephemeral allocation policy under manager control. [Owner: QNetwork]
+- [ ] Enforce internal-caller gate for port requests (trusted process identity + capability token required). [Owner: QEvent]
+- [ ] Add owner PID + capability token tracking for every open port record and expose read-only audit snapshot command. [Owner: QEvent]
+- [ ] Implement monitor task to detect dead owners and auto-close orphaned ports. [Owner: QKernel]
+- [ ] Add inbound boundary filter stage 1: drop packets targeting ports not present in Port Table. [Owner: QNetwork]
+- [ ] Add inbound boundary filter stage 2: drop unsolicited session traffic not associated with Citadel-initiated state. [Owner: QNetwork]
+- [ ] Add protocol sanity checks (size/rate/malformed guardrails) before payload delivery to owners. [Owner: QNetwork]
+- [ ] Add structured audit events for open/close/reject/autoclose actions with owner and reason fields. [Owner: QSecurityCenter]
+- [ ] Add test coverage: capability deny cases, ownership mismatch, orphan autoclose, unsolicited inbound drop, malformed packet drop. [Owner: QNetwork]
+- [ ] Add rollout gate: default deny for unmanaged inbound traffic, with debug metrics to verify no regressions. [Owner: QKernel]
+
+### 7. Phase 1 Suggested Order
+- [ ] Milestone A: Data model + token validation (`PortTableEntry`, token schema, scope checks).
+- [ ] Milestone B: Port Manager API + TCP/UDP routing through manager.
+- [ ] Milestone C: Inbound filtering pipeline (ownership, session, sanity).
+- [ ] Milestone D: Monitor + autoclose + audit events.
+- [ ] Milestone E: Tests + rollout gate + metrics verification.
+
+### 8. File Touchpoint Map (Phase 1)
+- [ ] Checklist items 1-2 (port table shape + state machine): start in `QEvent/Include/QKRuntimeRegistries.h` and `QEvent/Src/QKRuntimeRegistries.cpp` where `PortRecord`, `registerPort`, `unregisterPort`, and `findPort` currently live.
+- [ ] Checklist items 3-4 (capability token model + scope validation): extend `QKernel/Include/QKSecurityCenter.h` and `QKernel/Src/QKSecurityCenter.cpp` using existing dispatch/policy patterns.
+- [ ] Checklist items 5-7 (Port Manager API + TCP/UDP routing): wire API surface in `QNetwork/Include/QNetStack.h` and route socket callsites in `QNetwork/Src/QNetSocket.cpp`, `QNetwork/Src/QNetTCP.cpp`, and `QNetwork/Src/QNetUDP.cpp`.
+- [ ] Checklist item 8 (internal caller gate): consolidate current internal owner checks from `QNetwork/Src/QNetTCP.cpp` and `QNetwork/Src/QNetUDP.cpp` behind manager path and registry process checks in `QEvent/Src/QKRuntimeRegistries.cpp`.
+- [ ] Checklist item 9 (owner + token tracking and audit snapshot): expand port record storage in `QEvent/Include/QKRuntimeRegistries.h`, update write paths in `QEvent/Src/QKRuntimeRegistries.cpp`, and expose read-only command output in `QKernel/Src/QKCommandCenter.cpp`.
+- [ ] Checklist item 10 (orphan monitor and autoclose): add monitor tick integration in `QNetwork/Src/QNetStack.cpp` and use registry/process liveness data from `QEvent/Src/QKRuntimeRegistries.cpp`.
+- [ ] Checklist items 11-13 (inbound filtering pipeline): enforce boundary/session/sanity checks in receive paths at `QNetwork/Src/QNetIP.cpp`, `QNetwork/Src/QNetTCP.cpp` (`receivePacket`/`processSegment`), and `QNetwork/Src/QNetUDP.cpp` (`receivePacket`).
+- [ ] Checklist item 14 (structured open/close/reject/autoclose audit): emit SC audit/control events from `QKernel/Src/QKSecurityCenter.cpp` and publish via topics defined in `QEvent/Include/QKMsgBus.h`.
+- [ ] Checklist items 15-16 (tests + rollout gate + debug metrics): add command-driven validation hooks in `QKernel/Src/QKCmdDebugTest.cpp` and operational visibility/reporting in `QKernel/Src/QKCommandCenter.cpp`.
 
 ## Maybe
 - [ ] #12 (MVP part A)** Compute `golden_manifest_digest` deterministically and log/measure it (even before sealing exists). (sources: [backups/todo_archive_2026-03-25/TODO_BRAINSTORM_2026-03-08.md](backups/todo_archive_2026-03-25/TODO_BRAINSTORM_2026-03-08.md#L47))

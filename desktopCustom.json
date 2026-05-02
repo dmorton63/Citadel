@@ -1,0 +1,84 @@
+{
+  "desktop": {
+    "background": {
+      "type": "image",
+      "path": "asset:backgrounds.desktopPrimary",
+      "mode": "stretch"
+    },
+    "theme": {
+      "id": "custom",
+      "assets": {
+        "icons": {
+          "settings": "/system/icons/SETTINGS.PNG",
+          "terminal": "/system/icons/TERMINAL.PNG",
+          "folder": "/system/icons/FOLDER.PNG",
+          "start": "/system/icons/START.PNG",
+          "shutdown": "/system/icons/svg/power.svg"
+        },
+        "backgrounds": {
+          "desktopPrimary": "/system/wall/WINTER.PNG",
+          "desktopSecondary": "/system/wall/SPRING.PNG",
+          "lockScreen": "/system/wall/SUMMER.PNG"
+        },
+        "textures": {
+          "glassNoise": "/system/textures/glass_noise.png",
+          "panelOverlay": "/system/textures/panel_overlay.png"
+        },
+        "illustrations": {
+          "boot": "/system/illustrations/boot.svg",
+          "setup": "/system/illustrations/setup.svg",
+          "recovery": "/system/illustrations/recovery.svg"
+        }
+      },
+      "definition": {
+        "name": "Citadel Custom Aurora",
+        "colors": {
+          "windowBackground": "#1B2230",
+          "titleBarGradientStart": "#324B6A",
+          "titleBarGradientEnd": "#202A3A",
+          "buttonNormal": "#33FFFFFF",
+          "buttonHover": "#45FFFFFF",
+          "buttonPressed": "#22FFFFFF",
+          "buttonGlow": "#804EA0FF",
+          "textPrimary": "#F4F8FF",
+          "textSecondary": "#C8D8F0",
+          "border": "#2E3B50",
+          "shadow": "#80000000",
+          "accentPrimary": "#4EA0FF",
+          "accentSecondary": "#8CC8FF"
+        },
+        "font": {
+          "family": "System",
+          "size": 12
+        },
+        "effects": {
+          "border": {
+            "width": 1,
+            "radius": 6,
+            "color": "#2E3B50"
+          },
+          "shadow": {
+            "offsetX": 0,
+            "offsetY": 2,
+            "blur": 8,
+            "color": "#80000000"
+          },
+          "glow": {
+            "radius": 6,
+            "intensity": 128,
+            "color": "#804EA0FF"
+          },
+          "transparency": {
+            "windowOpacity": 255,
+            "panelOpacity": 245
+          }
+        },
+        "animations": {
+          "hoverDurationMs": 140,
+          "pressDurationMs": 50,
+          "windowOpenDurationMs": 190
+        }
+      }
+    }
+  }
+}

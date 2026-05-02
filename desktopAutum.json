@@ -1,18 +1,84 @@
 {
   "desktop": {
+    "theme": {
+      "id": "autumn",
+      "definition": {
+        "name": "Citadel Autumn",
+        "colors": {
+          "windowBackground": "#2A1E14",
+          "titleBarGradientStart": "#AA7031",
+          "titleBarGradientEnd": "#AB4F0D",
+          "buttonNormal": "#32C96A1D",
+          "buttonHover": "#64FFB980",
+          "buttonPressed": "#64FD2626",
+          "buttonGlow": "#80D9822B",
+          "textPrimary": "#FFFFFF",
+          "textSecondary": "#FFE8CC",
+          "border": "#3C2A1D",
+          "shadow": "#80000000",
+          "accentPrimary": "#D9822B",
+          "accentSecondary": "#FFBE78"
+        },
+        "font": {
+          "family": "System",
+          "size": 12
+        },
+        "effects": {
+          "border": {
+            "width": 1,
+            "radius": 17,
+            "color": "#3C2A1D"
+          },
+          "shadow": {
+            "offsetX": 0,
+            "offsetY": 2,
+            "blur": 30,
+            "color": "#80000000"
+          },
+          "glow": {
+            "radius": 6,
+            "intensity": 138,
+            "color": "#80D9822B"
+          },
+          "transparency": {
+            "windowOpacity": 255,
+            "panelOpacity": 100
+          }
+        },
+        "animations": {
+          "hoverDurationMs": 120,
+          "pressDurationMs": 50,
+          "windowOpenDurationMs": 180
+        }
+      },
+      "assets": {
+        "icons": {
+          "settings": "/system/icons/SETTINGS.PNG",
+          "terminal": "/system/icons/TERMINAL.PNG",
+          "folder": "/system/icons/FOLDER.PNG",
+          "start": "/system/icons/START.PNG",
+          "shutdown": "/system/icons/svg/power.svg"
+        },
+        "backgrounds": {
+          "desktopPrimary": "/system/wall/AUTUMN.PNG",
+          "desktopSecondary": "/system/wall/AUTUMN.PNG",
+          "lockScreen": "/system/wall/AUTUMN.PNG"
+        },
+        "textures": {
+          "glassNoise": "/system/textures/glass_noise.png",
+          "panelOverlay": "/system/textures/panel_overlay.png"
+        },
+        "illustrations": {
+          "boot": "/system/illustrations/boot.svg",
+          "setup": "/system/illustrations/setup.svg",
+          "recovery": "/system/illustrations/recovery.svg"
+        }
+      }
+    },
     "background": {
       "type": "image",
       "path": "/system/wall/AUTUMN.PNG",
       "mode": "stretch"
-    },
-    "theme": {
-      "accent": "#D9822B",
-      "accentLight": "#FFBE78",
-      "accentDark": "#8A4F12",
-      "text": "#FFFFFF",
-      "textSecondary": "#FFE8CC",
-      "panel": "#2A1E14",
-      "panelBorder": "#3C2A1D"
     }
   }
 }

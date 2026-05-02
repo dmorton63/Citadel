@@ -28,8 +28,9 @@ namespace QD
         constexpr QC::i32 WIZARD_WIDTH = 640;
         constexpr QC::i32 WIZARD_HEIGHT = 420;
 
-        constexpr const char *OWNER_MARKER_PATH = "/system/owner.enrolled";
-        constexpr const char *OWNER_INFO_PATH = "/system/owner.info";
+        // FAT-backed /system volumes can enforce 8.3 names.
+        constexpr const char *OWNER_MARKER_PATH = "/system/OWNER.ENR";
+        constexpr const char *OWNER_INFO_PATH = "/system/OWNER.INF";
 
         static inline bool isEmpty(const char *s)
         {
@@ -180,12 +181,14 @@ namespace QD
 
         QW::Rect createBounds = {startX, baseY, static_cast<QC::u32>(buttonWidth), static_cast<QC::u32>(buttonHeight)};
         m_createButton = new QW::Controls::Button(m_window, "Create Owner", createBounds);
+        m_createButton->setContentMode(QW::ButtonContentMode::Text);
         m_createButton->setRole(QW::ButtonRole::Accent);
         m_createButton->setClickHandler(&SetupWizard::onCreateClick, this);
         m_root->addChild(m_createButton);
 
         QW::Rect cancelBounds = {startX + buttonWidth + spacing, baseY, static_cast<QC::u32>(buttonWidth), static_cast<QC::u32>(buttonHeight)};
         m_cancelButton = new QW::Controls::Button(m_window, "Cancel", cancelBounds);
+        m_cancelButton->setContentMode(QW::ButtonContentMode::Text);
         m_cancelButton->setRole(QW::ButtonRole::Default);
         m_cancelButton->setClickHandler(&SetupWizard::onCancelClick, this);
         m_root->addChild(m_cancelButton);
@@ -263,9 +266,14 @@ namespace QD
         const QC::Status st = QK::SecurityCenter::instance().ownerEnroll(username, pin);
         if (st != QC::Status::Success)
         {
-            // Most common cause during bring-up: /system isn't writable yet (e.g., system volume unformatted).
-            self->setStatus("Enrollment failed. If using --system-vol, format it first so /system/sc is writable.");
-            return;
+            const bool allowBypassCompat = bypass && (st == QC::Status::NotSupported || st == QC::Status::InvalidParam);
+            const bool alreadyEnrolled = (st == QC::Status::Busy);
+            if (!allowBypassCompat && !alreadyEnrolled)
+            {
+                // Most common cause during bring-up: /system isn't writable yet (e.g., system volume unformatted).
+                self->setStatus("Enrollment failed. If using --system-vol, format it first so /system/sc is writable.");
+                return;
+            }
         }
 
         if (!self->tryWriteOwnerMarker(username))
@@ -275,7 +283,7 @@ namespace QD
             return;
         }
 
-        self->setStatus(bypass ? "Owner created (SC bypass). " : "Owner created. ");
+        self->setStatus(bypass ? "Owner created (SC bypass compatibility)." : "Owner created.");
         self->close();
     }
 

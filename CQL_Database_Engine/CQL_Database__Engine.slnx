@@ -1,0 +1,7 @@
+<Solution>
+  <Configurations>
+    <Platform Name="x64" />
+    <Platform Name="x86" />
+  </Configurations>
+  <Project Path="CQL_Database__Engine.vcxproj" Id="7c7486f7-c850-4c0c-8a6f-4b45aa92da11" />
+</Solution>

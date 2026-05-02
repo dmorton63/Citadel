@@ -4,6 +4,23 @@
 
 namespace QK::Runtime
 {
+    namespace
+    {
+        static void copyCapabilityToken(QC::u8 dst[16], const QC::u8 src[16])
+        {
+            if (!dst)
+                return;
+            if (!src)
+            {
+                for (QC::usize i = 0; i < 16; ++i)
+                    dst[i] = 0;
+                return;
+            }
+            for (QC::usize i = 0; i < 16; ++i)
+                dst[i] = src[i];
+        }
+    }
+
     Registries &Registries::instance()
     {
         static Registries r;
@@ -187,6 +204,21 @@ namespace QK::Runtime
             if (!m_windows[i].used)
                 continue;
             out[outCount++] = m_windows[i].snap;
+        }
+        return outCount;
+    }
+
+    QC::usize Registries::copyPortRecords(PortRecord *out, QC::usize cap) const
+    {
+        if (!out || cap == 0)
+            return 0;
+
+        QC::usize outCount = 0;
+        for (QC::usize i = 0; i < MaxPorts && outCount < cap; ++i)
+        {
+            if (!m_ports[i].used)
+                continue;
+            out[outCount++] = m_ports[i];
         }
         return outCount;
     }
@@ -437,7 +469,20 @@ namespace QK::Runtime
 
     bool Registries::registerPort(PortProtocol protocol, QC::u16 port, QC::u32 ownerPid)
     {
+        return registerPortWithToken(protocol, port, ownerPid, nullptr, 0, PortState::Open);
+    }
+
+    bool Registries::registerPortWithToken(PortProtocol protocol,
+                                           QC::u16 port,
+                                           QC::u32 ownerPid,
+                                           const QC::u8 capabilityToken[16],
+                                           QC::u64 openedAtMs,
+                                           PortState initialState)
+    {
         if (protocol == PortProtocol::Unknown || port == 0)
+            return false;
+
+        if (initialState == PortState::Closed)
             return false;
 
         for (QC::usize i = 0; i < MaxPorts; ++i)
@@ -456,6 +501,9 @@ namespace QK::Runtime
             m_ports[i].protocol = protocol;
             m_ports[i].port = port;
             m_ports[i].ownerPid = ownerPid;
+            copyCapabilityToken(m_ports[i].capabilityToken, capabilityToken);
+            m_ports[i].state = initialState;
+            m_ports[i].timestampOpenedMs = openedAtMs;
             return true;
         }
 
@@ -478,6 +526,46 @@ namespace QK::Runtime
             }
         }
         return false;
+    }
+
+    bool Registries::transitionPortState(PortProtocol protocol, QC::u16 port, PortState newState)
+    {
+        if (protocol == PortProtocol::Unknown || port == 0)
+            return false;
+
+        for (QC::usize i = 0; i < MaxPorts; ++i)
+        {
+            if (!m_ports[i].used)
+                continue;
+            if (m_ports[i].protocol == protocol && m_ports[i].port == port)
+            {
+                if (!isValidPortStateTransition(m_ports[i].state, newState))
+                    return false;
+                m_ports[i].state = newState;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    bool Registries::isValidPortStateTransition(PortState from, PortState to)
+    {
+        if (from == to)
+            return true;
+
+        switch (from)
+        {
+        case PortState::Closed:
+            return to == PortState::Opening;
+        case PortState::Opening:
+            return to == PortState::Open || to == PortState::Closed;
+        case PortState::Open:
+            return to == PortState::Closing;
+        case PortState::Closing:
+            return to == PortState::Closed || to == PortState::Open;
+        default:
+            return false;
+        }
     }
 
     const PortRecord *Registries::findPort(PortProtocol protocol, QC::u16 port) const

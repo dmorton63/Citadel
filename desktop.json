@@ -137,14 +137,16 @@
                             "icon": "/system/icons/terminal.png"
                         },
                         {
-                            "id": "btnNotes",
+                            "id": "btnCMMS",
                             "type": "button",
-                            "text": "Notes",
+                            "text": "CMMS",
+                            "action": "cmms",
                             "x": 20,
                             "y": 180,
                             "width": 160,
                             "height": 32,
-                            "role": "sidebar"
+                            "role": "sidebar",
+                            "icon": "/system/icons/settings.png"
                         }
                     ]
                 },

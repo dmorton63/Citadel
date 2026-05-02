@@ -57,10 +57,10 @@ namespace QW
 
             // Appearance
             Color textColor() const { return m_textColor; }
-            void setTextColor(Color color) { m_textColor = color; }
+            void setTextColor(Color color);
 
             Color backgroundColor() const { return m_bgColor; }
-            void setBackgroundColor(Color color) { m_bgColor = color; }
+            void setBackgroundColor(Color color);
 
             bool transparent() const { return m_transparent; }
             void setTransparent(bool transparent) { m_transparent = transparent; }
@@ -109,6 +109,8 @@ namespace QW
 
             Color m_textColor;
             Color m_bgColor;
+            bool m_hasTextColorOverride;
+            bool m_hasBackgroundColorOverride;
 
             LabelClickHandler m_clickHandler;
             void *m_clickUserData;

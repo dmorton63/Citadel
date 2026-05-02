@@ -1,6 +1,8 @@
 add_library(QJFunctions STATIC
     Src/QJFunction.cpp
     Src/QJFunctionRegistry.cpp
+    Src/QJFExecutor.cpp
+    Src/QJFJitAllocator.cpp
 )
 
 target_include_directories(QJFunctions PUBLIC Include)

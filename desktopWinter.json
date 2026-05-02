@@ -6,13 +6,56 @@
       "mode": "stretch"
     },
     "theme": {
-      "accent": "#7AA0C8",
-      "accentLight": "#BFD6F0",
-      "accentDark": "#4A6A8A",
-      "text": "#FFFFFF",
-      "textSecondary": "#E6F0FA",
-      "panel": "#1C242C",
-      "panelBorder": "#2E3A45"
+      "id": "winter",
+      "definition": {
+        "name": "Citadel Winter",
+        "colors": {
+          "windowBackground":      "#1C242C",
+          "border":                "#2E3A45",
+          "accentPrimary":         "#7AA0C8",
+          "accentSecondary":       "#BFD6F0",
+          "titleBarGradientStart": "#4A6A8A",
+          "titleBarGradientEnd":   "#2E3A45",
+          "textPrimary":           "#FFFFFF",
+          "textSecondary":         "#E6F0FA",
+          "buttonNormal":          "#33FFFFFF",
+          "buttonHover":           "#45FFFFFF",
+          "buttonPressed":         "#22FFFFFF",
+          "buttonGlow":            "#807AA0C8",
+          "shadow":                "#80000000"
+        },
+        "font": { "family": "System", "size": 12 },
+        "effects": {
+          "border":   { "width": 1, "radius": 5, "color": "#2E3A45" },
+          "shadow":   { "offsetX": 0, "offsetY": 2, "blur": 6, "color": "#80000000" },
+          "glow":     { "radius": 5, "intensity": 128, "color": "#807AA0C8" },
+          "transparency": { "windowOpacity": 255, "panelOpacity": 100 }
+        },
+        "animations": { "hoverDurationMs": 120, "pressDurationMs": 50, "windowOpenDurationMs": 180 }
+      },
+      "assets": {
+        "icons": {
+          "settings": "/system/icons/SETTINGS.PNG",
+          "terminal": "/system/icons/TERMINAL.PNG",
+          "folder":   "/system/icons/FOLDER.PNG",
+          "start":    "/system/icons/START.PNG",
+          "shutdown": "/system/icons/svg/power.svg"
+        },
+        "backgrounds": {
+          "desktopPrimary":   "/system/wall/WINTER.PNG",
+          "desktopSecondary": "/system/wall/WINTER.PNG",
+          "lockScreen":       "/system/wall/WINTER.PNG"
+        },
+        "textures": {
+          "glassNoise":   "/system/textures/glass_noise.png",
+          "panelOverlay": "/system/textures/panel_overlay.png"
+        },
+        "illustrations": {
+          "boot":     "/system/illustrations/boot.svg",
+          "setup":    "/system/illustrations/setup.svg",
+          "recovery": "/system/illustrations/recovery.svg"
+        }
+      }
     }
   }
 }

@@ -1755,14 +1755,51 @@ namespace QK::Boot::Tpm
             g_TpmSecureStore.Ctx = Ctx;
             g_TpmSecureStore.bReady = true;
 
-            auto ScCfg = QK::SecureStore::defaultConfig();
-            ScCfg.tpmUser = &g_TpmSecureStore;
-            ScCfg.tpmSealWrapKey = &SecureStoreTpmSealWrapKey;
-            ScCfg.tpmUnsealWrapKey = &SecureStoreTpmUnsealWrapKey;
-            ScCfg.tpmSealSecret = &SecureStoreTpmSealSecret;
-            ScCfg.tpmUnsealSecret = &SecureStoreTpmUnsealSecret;
-            QK::SecureStore::setDefaultConfig(ScCfg);
-            LogStr(Log, "SecureStore: TPM wrap-key enabled\r\n");
+            // Verify wrap-key seal/unseal support before enabling TPM mode in SecureStore.
+            // Some TPM/runtime combinations advertise presence but fail these operations.
+            bool enableSecureStoreTpm = false;
+            {
+                QC::u8 probeKey[32];
+                QC::u8 probeUnsealed[32];
+                QC::String::memset(probeKey, 0, sizeof(probeKey));
+                QC::String::memset(probeUnsealed, 0, sizeof(probeUnsealed));
+
+                const QC::Status randSt = QK::Entropy::fillRandom(probeKey, sizeof(probeKey));
+                if (randSt == QC::Status::Success || randSt == QC::Status::Busy)
+                {
+                    QC::Vector<QC::u8> probeBlob;
+                    const QC::Status sealSt = SecureStoreTpmSealWrapKey(&g_TpmSecureStore, probeKey, sizeof(probeKey), probeBlob);
+                    if (sealSt == QC::Status::Success)
+                    {
+                        const QC::Status unsealSt = SecureStoreTpmUnsealWrapKey(&g_TpmSecureStore, probeBlob, probeUnsealed, sizeof(probeUnsealed));
+                        if (unsealSt == QC::Status::Success && QC::String::memcmp(probeKey, probeUnsealed, sizeof(probeKey)) == 0)
+                            enableSecureStoreTpm = true;
+                    }
+
+                    if (probeBlob.size() > 0)
+                        QC::String::memset(probeBlob.data(), 0, probeBlob.size());
+                    probeBlob.clear();
+                }
+
+                QC::String::memset(probeKey, 0, sizeof(probeKey));
+                QC::String::memset(probeUnsealed, 0, sizeof(probeUnsealed));
+            }
+
+            if (enableSecureStoreTpm)
+            {
+                auto ScCfg = QK::SecureStore::defaultConfig();
+                ScCfg.tpmUser = &g_TpmSecureStore;
+                ScCfg.tpmSealWrapKey = &SecureStoreTpmSealWrapKey;
+                ScCfg.tpmUnsealWrapKey = &SecureStoreTpmUnsealWrapKey;
+                ScCfg.tpmSealSecret = &SecureStoreTpmSealSecret;
+                ScCfg.tpmUnsealSecret = &SecureStoreTpmUnsealSecret;
+                QK::SecureStore::setDefaultConfig(ScCfg);
+                LogStr(Log, "SecureStore: TPM wrap-key enabled\r\n");
+            }
+            else
+            {
+                LogStr(Log, "SecureStore: TPM wrap-key unsupported; falling back to non-TPM mode\r\n");
+            }
         }
     }
 

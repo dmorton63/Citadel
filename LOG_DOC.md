@@ -236,3 +236,14 @@ CITADEL’s security model is built on:
 - invisible enforcement
 - fortress‑grade containment
 The Security Center is the unseen guardian of the OS.
+
+##
+10. Implementation Alignment Notes (Current)
+
+The current kernel implementation aligns with this SST + user-vault model as follows:
+
+- Lifecycle state tracks `UNPROVISIONED -> PROVISIONED -> OPERATIONAL` and falls back to `RECOVERY` / `SAFE_MODE` on trust/provisioning failures.
+- Boot trust gate explicitly verifies TAS/SRK-derived key hierarchy before allowing normal operation.
+- SST rotation includes a cutover finalize path that re-wraps dependent vault header material when owner key material is available.
+- If owner material is unavailable during cutover, a pending rewrap marker is persisted and applied after owner unlock.
+- Recovery setup now stores recovery-wrapped TAS material on disk (`TASRCOV`) rather than any raw TAS value.

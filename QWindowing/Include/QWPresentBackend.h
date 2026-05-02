@@ -10,6 +10,20 @@ namespace QW
 {
     class Framebuffer;
 
+    struct PresentAccelerationStats
+    {
+        bool qgfxActive = false;
+        bool qgfxScanoutUploadsActive = false;
+        bool qgfxRectCopyActive = false;
+        QC::u32 qgfxPresentCalls = 0;
+        QC::u32 qgfxPresentSuccesses = 0;
+        QC::u32 qgfxScanoutUploadCalls = 0;
+        QC::u32 qgfxScanoutUploadRects = 0;
+        QC::u32 qgfxScanoutUploadFallbacks = 0;
+        QC::u32 qgfxRectCopyBatches = 0;
+        QC::u32 qgfxRectCopyOps = 0;
+    };
+
     class PresentBackend
     {
     public:
@@ -25,6 +39,12 @@ namespace QW
         // Optional acceleration hooks (future use)
         virtual bool supportsRectCopy() const { return false; }
         virtual void rectCopy(const QC::Rect & /*src*/, const QC::Rect & /*dst*/) {}
+        virtual const PresentAccelerationStats &accelerationStats() const
+        {
+            static PresentAccelerationStats s_empty;
+            return s_empty;
+        }
+        virtual void resetAccelerationStats() {}
 
         // Optional cursor hooks
         virtual bool hasHardwareCursor() const { return false; }

@@ -32,6 +32,16 @@ namespace QW
             const QG::ImageSurface *icon() const { return m_icon; }
             void setIcon(const QG::ImageSurface *icon);
 
+            const char *tooltipText() const { return m_tooltip; }
+            void setTooltipText(const char *text);
+
+            ButtonContentMode contentMode() const { return m_contentMode; }
+            void setContentMode(ButtonContentMode mode);
+
+            ButtonVariant variant() const { return m_variant; }
+            void setVariant(ButtonVariant variant);
+
+            // Compatibility shim for older call sites; prefer setVariant().
             bool borderless() const { return m_borderless; }
             void setBorderless(bool borderless);
 
@@ -51,8 +61,22 @@ namespace QW
                 invalidate();
             }
 
+            // Per-button corner radius override (0 = use style/role default).
+            // Prefer ButtonVariant::Pill when the goal is a capsule/circle silhouette.
+            QC::u32 cornerRadius() const { return m_cornerRadius; }
+            void setCornerRadius(QC::u32 radius)
+            {
+                if (m_cornerRadius == radius)
+                    return;
+                m_cornerRadius = radius;
+                invalidate();
+            }
+
             // Rendering (delegated to StyleRenderer)
             void paint(const PaintContext &ctx) override;
+
+            // Geometry
+            bool hitTest(int x, int y) const override;
 
             // Event handling
             bool onMouseMove(int x, int y, int dx, int dy) override;
@@ -60,10 +84,16 @@ namespace QW
             bool onMouseUp(int x, int y, QK::Event::MouseButton button) override;
 
         private:
+            Rect contentHitRect(const Rect &absBounds) const;
+
             char m_text[256];
+            char m_tooltip[256];
             const QG::ImageSurface *m_icon = nullptr;
+            ButtonContentMode m_contentMode = ButtonContentMode::Auto;
+            ButtonVariant m_variant = ButtonVariant::Standard;
             bool m_borderless = false;
             float m_textScaleOverride = 0.0f;
+            QC::u32 m_cornerRadius = 0;
             bool m_pressed = false;
             bool m_hovered = false;
             int m_pressX = 0;

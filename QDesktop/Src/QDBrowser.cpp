@@ -179,6 +179,8 @@ namespace QD
             titleBar->addChild(title);
 
             auto *closeButton = new QW::Controls::Button(m_window, "X", {static_cast<QC::i32>(w - kPad - 20), 2, 20, 20});
+            closeButton->setContentMode(QW::ButtonContentMode::Text);
+            closeButton->setVariant(QW::ButtonVariant::Compact);
             closeButton->setRole(QW::ButtonRole::Destructive);
             closeButton->setClickHandler([](QW::Controls::Button *, void *ud) {
                 auto *self = static_cast<Browser *>(ud);

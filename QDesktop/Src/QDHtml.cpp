@@ -3184,6 +3184,7 @@ namespace QD::Html
                 const CssStyleProps p = computeStyleProps("button", idAttr, classAttr, styleAttr[0] ? &inlineBtn : nullptr);
 
                 auto *btn = new QW::Controls::Button(window, inner ? inner : "Button", {0, 0, 0, 0});
+                btn->setContentMode(QW::ButtonContentMode::Text);
                 float scale = baseScale * bodyScaleMult;
                 if (p.hasFontSizePx && baseLineH > 0)
                     scale = baseScale * (static_cast<float>(p.fontSizePx) / static_cast<float>(baseLineH));

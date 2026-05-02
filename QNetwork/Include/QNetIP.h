@@ -50,6 +50,18 @@ namespace QNet
     class IP
     {
     public:
+        struct IngressGuardStats
+        {
+            QC::u64 tcpAccepted = 0;
+            QC::u64 udpAccepted = 0;
+            QC::u64 tcpBoundaryDrops = 0;
+            QC::u64 udpBoundaryDrops = 0;
+            QC::u64 tcpMalformedDrops = 0;
+            QC::u64 udpMalformedDrops = 0;
+            QC::u64 tcpRateDrops = 0;
+            QC::u64 udpRateDrops = 0;
+        };
+
         IP();
         ~IP();
 
@@ -92,12 +104,29 @@ namespace QNet
         // Checksum
         static QC::u16 checksum(const void *data, QC::usize length);
 
+        IngressGuardStats ingressGuardStats() const { return m_guardStats; }
+        void resetIngressGuardStats();
+
     private:
+        struct IngressRateSlot
+        {
+            bool used = false;
+            QC::u16 port = 0;
+            QC::u8 protocol = 0;
+            QC::u16 tokens = 0;
+            QC::u64 lastTick = 0;
+        };
+
         IPv4Address m_address;
         IPv4Address m_subnetMask;
         IPv4Address m_gateway;
         IPv4Address m_dnsServer;
         QC::u16 m_identification;
+
+        static constexpr QC::usize IngressRateSlots = 64;
+        IngressRateSlot m_ingressRate[IngressRateSlots];
+        QC::u64 m_ingressTick = 0;
+        IngressGuardStats m_guardStats{};
 
         static constexpr QC::usize ICMP_ECHO_REPLY_MAX = 8;
         IcmpEchoReply m_icmpEchoReplies[ICMP_ECHO_REPLY_MAX];
@@ -105,6 +134,7 @@ namespace QNet
         QC::usize m_icmpEchoTail = 0;
 
         void handleICMP(IPv4Address source, const void *data, QC::usize length);
+        bool allowInboundRate(QC::u8 protocol, QC::u16 dstPort);
     };
 
 } // namespace QNet

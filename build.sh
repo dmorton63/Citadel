@@ -51,6 +51,7 @@ RUN_FOR_SECONDS=0
 HEADLESS=false
 AUTO_GRAB=true
 SYSTEM_VOL=false
+RESET_SYSTEM_VOL=false
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -105,6 +106,10 @@ while [[ $# -gt 0 ]]; do
             SYSTEM_VOL=true
             shift
             ;;
+        --reset-system-vol)
+            RESET_SYSTEM_VOL=true
+            shift
+            ;;
         -j*)
             JOBS="${1#-j}"
             shift
@@ -124,6 +129,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --tablet        Use absolute USB tablet in QEMU (default)"
             echo "  --relmouse      Use relative USB mouse in QEMU"
             echo "  --system-vol    Attach persistent system volume disk (build/system.qcow2)"
+            echo "  --reset-system-vol Delete build/system.qcow2 before build/run"
             echo "  --prod          Build production mode (fail-closed boot signature enforcement; use --tpm when running)"
             echo "  -j<N>           Use N parallel jobs (default: $(nproc))"
             echo "  -h, --help      Show this help"
@@ -135,6 +141,15 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+if [ "$RESET_SYSTEM_VOL" = true ]; then
+    if [ -f "${BUILD_DIR}/system.qcow2" ]; then
+        echo -e "${YELLOW}Resetting persistent system volume: ${BUILD_DIR}/system.qcow2${NC}"
+        rm -f "${BUILD_DIR}/system.qcow2"
+    else
+        echo -e "${YELLOW}No persistent system volume found to reset.${NC}"
+    fi
+fi
 
 # Helper: sign a file with the BootGate RSA private key without ever prompting.
 # If the key is encrypted, set CITADEL_BOOTGATE_PASSPHRASE to allow signing.
@@ -259,6 +274,29 @@ if [ -d "${RAMDISK_DIR}" ]; then
             echo -e "${RED}mcopy failed while populating ramdisk image (size=${RAMDISK_MB}MB).${NC}"
             echo -e "${RED}Tip: check for 'Disk full' or filename collisions under ${RAMDISK_DIR}.${NC}"
             exit 1
+        fi
+    fi
+
+    # Keep a non-shadowed copy of desktop assets at the ramdisk root.
+    # When a persistent /system volume is mounted, it hides the bundled /system tree,
+    # so runtime fallbacks use /WALL and /ICONS to reach the boot-packaged assets.
+    if [ -d "${RAMDISK_DIR}/system/wall" ]; then
+        mdir -i "${RAMDISK_TEMP}" ::/WALL >/dev/null 2>&1 || mmd -i "${RAMDISK_TEMP}" ::/WALL >/dev/null 2>&1 || true
+        if compgen -G "${RAMDISK_DIR}/system/wall/*" >/dev/null; then
+            if ! mcopy -s -o -i "${RAMDISK_TEMP}" ${RAMDISK_DIR}/system/wall/* ::/WALL >/dev/null 2>&1; then
+                echo -e "${RED}Failed to create /WALL asset aliases in ramdisk image.${NC}"
+                exit 1
+            fi
+        fi
+    fi
+
+    if [ -d "${RAMDISK_DIR}/system/icons" ]; then
+        mdir -i "${RAMDISK_TEMP}" ::/ICONS >/dev/null 2>&1 || mmd -i "${RAMDISK_TEMP}" ::/ICONS >/dev/null 2>&1 || true
+        if compgen -G "${RAMDISK_DIR}/system/icons/*" >/dev/null; then
+            if ! mcopy -s -o -i "${RAMDISK_TEMP}" ${RAMDISK_DIR}/system/icons/* ::/ICONS >/dev/null 2>&1; then
+                echo -e "${RED}Failed to create /ICONS asset aliases in ramdisk image.${NC}"
+                exit 1
+            fi
         fi
     fi
 

@@ -22,6 +22,8 @@
 #include "QKSecureStore.h"
 #include "QKStorageProbe.h"
 #include "QKSecurityCenter.h"
+#include "QFSVFS.h"
+#include "QFSFile.h"
 
 #include "QNetDHCP.h"
 #include "QNetStack.h"
@@ -38,6 +40,9 @@
 namespace
 {
     static QK::Boot::Desktop::FLogFn g_Log = nullptr;
+    static constexpr const char *kOwnerMarkerPath = "/system/OWNER.ENR";
+    static constexpr const char *kOwnerMarkerPathLegacy = "/system/owner.enrolled";
+    static constexpr const char *kOwnerInfoPath = "/system/OWNER.INF";
 
     static void secureZero(void *ptr, QC::usize len)
     {
@@ -46,13 +51,89 @@ namespace
             *p++ = 0;
     }
 
+    static bool TryWriteBypassOwnerMarker(const char *username)
+    {
+        QFS::VFS &vfs = QFS::VFS::instance();
+        if (!vfs.exists("/system"))
+            (void)vfs.createDir("/system");
+
+        {
+            QFS::File *f = vfs.open(kOwnerMarkerPath, QFS::OpenMode::Write | QFS::OpenMode::Create | QFS::OpenMode::Truncate);
+            if (!f)
+                return false;
+            const char *marker = "owner_enrolled=1\n";
+            (void)f->write(marker, QC::String::strlen(marker));
+            vfs.close(f);
+        }
+
+        {
+            QFS::File *f = vfs.open(kOwnerInfoPath, QFS::OpenMode::Write | QFS::OpenMode::Create | QFS::OpenMode::Truncate);
+            if (!f)
+                return false;
+            const char *prefix = "username=";
+            (void)f->write(prefix, QC::String::strlen(prefix));
+            if (username)
+                (void)f->write(username, QC::String::strlen(username));
+            const char *newline = "\n";
+            (void)f->write(newline, 1);
+            vfs.close(f);
+        }
+
+        return true;
+    }
+
     static bool PromptSecretLine(const char *prompt, char *out, QC::usize outCap)
     {
         if (!out || outCap == 0)
             return false;
         out[0] = '\0';
         QK::Console::write(prompt);
-        return QK::Console::readLineBlocking(out, outCap, false);
+
+        // Keep waiting for input without re-printing the prompt; this avoids
+        // serial spam if the underlying read reports transient false.
+        for (;;)
+        {
+            if (QK::Console::readLineBlocking(out, outCap, false))
+                return true;
+        }
+    }
+
+    static bool PromptLine(const char *prompt, char *out, QC::usize outCap)
+    {
+        if (!out || outCap == 0)
+            return false;
+        out[0] = '\0';
+        QK::Console::write(prompt);
+        for (;;)
+        {
+            if (QK::Console::readLineBlocking(out, outCap, true))
+                return true;
+        }
+    }
+
+    static const char *statusText(QC::Status st)
+    {
+        switch (st)
+        {
+        case QC::Status::Success:
+            return "Success";
+        case QC::Status::Error:
+            return "Error";
+        case QC::Status::InvalidParam:
+            return "InvalidParam";
+        case QC::Status::OutOfMemory:
+            return "OutOfMemory";
+        case QC::Status::NotFound:
+            return "NotFound";
+        case QC::Status::Timeout:
+            return "Timeout";
+        case QC::Status::Busy:
+            return "Busy";
+        case QC::Status::NotSupported:
+            return "NotSupported";
+        default:
+            return "Unknown";
+        }
     }
 
     static void EnsureNonTpmSecureStoreUnlocked()
@@ -154,6 +235,14 @@ namespace
     {
         auto &sc = QK::SecurityCenter::instance();
 
+        if (sc.bypassEnabled() &&
+            !sc.ownerIsEnrolled() &&
+            (QFS::VFS::instance().exists(kOwnerMarkerPath) || QFS::VFS::instance().exists(kOwnerMarkerPathLegacy)))
+        {
+            QK::Console::write("Owner marker detected in BYPASS mode; skipping pre-desktop enrollment gate.\r\n");
+            return;
+        }
+
         if (!sc.ownerIsEnrolled())
         {
             QK::Console::write("\r\nOwner enrollment required before desktop startup.\r\n");
@@ -166,12 +255,24 @@ namespace
                 QC::String::memset(passA, 0, sizeof(passA));
                 QC::String::memset(passB, 0, sizeof(passB));
 
-                if (!PromptSecretLine("Owner username: ", user, sizeof(user)))
+                if (!PromptLine("Owner username: ", user, sizeof(user)))
                     continue;
                 if (!PromptSecretLine("Owner password: ", passA, sizeof(passA)))
                     continue;
                 if (!PromptSecretLine("Confirm password: ", passB, sizeof(passB)))
                     continue;
+
+                if (!user[0])
+                {
+                    QK::Console::write("Username cannot be empty. Try again.\r\n");
+                    continue;
+                }
+
+                if (!passA[0])
+                {
+                    QK::Console::write("Password cannot be empty. Try again.\r\n");
+                    continue;
+                }
 
                 if (QC::String::strcmp(passA, passB) != 0)
                 {
@@ -198,7 +299,20 @@ namespace
                     break;
                 }
 
-                QK::Console::write("Enrollment failed. Try again.\r\n");
+                if ((st == QC::Status::NotSupported || st == QC::Status::InvalidParam) && sc.bypassEnabled())
+                {
+                    if (TryWriteBypassOwnerMarker(user))
+                        QK::Console::write("Owner marker saved for BYPASS mode.\r\n");
+                    else
+                        QK::Console::write("Warning: failed to save BYPASS owner marker.\r\n");
+
+                    QK::Console::write("Enrollment unavailable in BYPASS mode; continuing boot without owner enrollment.\r\n");
+                    break;
+                }
+
+                QK::Console::write("Enrollment failed (status=");
+                QK::Console::write(statusText(st));
+                QK::Console::write("). Try again.\r\n");
             }
         }
 
@@ -212,7 +326,7 @@ namespace
                 QC::String::memset(user, 0, sizeof(user));
                 QC::String::memset(pass, 0, sizeof(pass));
 
-                if (!PromptSecretLine("Owner username: ", user, sizeof(user)))
+                if (!PromptLine("Owner username: ", user, sizeof(user)))
                     continue;
                 if (!PromptSecretLine("Owner password: ", pass, sizeof(pass)))
                     continue;
@@ -391,6 +505,65 @@ namespace
     static QC::i32 g_prevX = 0;
     static QC::i32 g_prevY = 0;
     static volatile bool g_stopDesktopRequested = false;
+    static bool g_backspaceRepeatArmed = false;
+    static QC::u64 g_backspaceRepeatNextMs = 0;
+
+    static constexpr QC::u64 kBackspaceRepeatInitialDelayMs = 400;
+    static constexpr QC::u64 kBackspaceRepeatIntervalMs = 33;
+
+    static void armBackspaceRepeat(bool pressed)
+    {
+        if (!pressed)
+        {
+            g_backspaceRepeatArmed = false;
+            g_backspaceRepeatNextMs = 0;
+            return;
+        }
+
+        g_backspaceRepeatArmed = true;
+        g_backspaceRepeatNextMs = QDrv::Timer::instance().milliseconds() + kBackspaceRepeatInitialDelayMs;
+    }
+
+    static void maybePostBackspaceRepeat()
+    {
+        if (!g_backspaceRepeatArmed || QK::Console::inputEnabled())
+            return;
+
+        auto *kbd = QKDrv::Manager::instance().keyboardDriver();
+        if (!kbd || !kbd->isKeyPressed(static_cast<QC::u8>(QKDrv::PS2::Key::Backspace)))
+        {
+            g_backspaceRepeatArmed = false;
+            g_backspaceRepeatNextMs = 0;
+            return;
+        }
+
+        const QC::u64 nowMs = QDrv::Timer::instance().milliseconds();
+        if (nowMs < g_backspaceRepeatNextMs)
+            return;
+
+        const QC::u8 rawMods = kbd->modifiers();
+        const bool shift = (rawMods & 0x01) != 0;
+        const bool ctrl = (rawMods & 0x02) != 0;
+        const bool alt = (rawMods & 0x04) != 0;
+
+        QK::Event::Modifiers mods = QK::Event::Modifiers::None;
+        if (shift)
+            mods = mods | QK::Event::Modifiers::Shift;
+        if (ctrl)
+            mods = mods | QK::Event::Modifiers::Ctrl;
+        if (alt)
+            mods = mods | QK::Event::Modifiers::Alt;
+
+        QK::Event::EventManager::instance().postKeyEvent(
+            QK::Event::Type::KeyDown,
+            static_cast<QC::u8>(QKDrv::PS2::Key::Backspace),
+            static_cast<QC::u8>(QKDrv::PS2::Key::Backspace),
+            '\b',
+            mods,
+            false);
+
+        g_backspaceRepeatNextMs = nowMs + kBackspaceRepeatIntervalMs;
+    }
 
     static void logInt(QC::i32 value)
     {
@@ -729,6 +902,9 @@ namespace QK::Boot::Desktop
                 const bool caps = (rep.modifiers & 0x08) != 0;
                 evt.character = keyToChar(evt.key, evt.shift, caps);
 
+                if (evt.key == QKDrv::PS2::Key::Backspace)
+                    armBackspaceRepeat(evt.pressed);
+
                 // Keyboard routing is controlled by the console input enable flag.
                 // This lets TERMINAL startup mode hand off to the desktop via `startx`
                 // without mutating the configured startup mode.
@@ -758,8 +934,9 @@ namespace QK::Boot::Desktop
         }
         g_Log("Keyboard initialized\r\n");
 
-        // Desktop owns keyboard input; keep serial console non-interactive.
-        QK::Console::setInputEnabled(QK::Boot::Config::GetStartupMode() != QK::Boot::Config::StartupMode::Desktop);
+        // Keep console input enabled through startup gates (owner enrollment/unlock).
+        // We hand keyboard ownership to desktop only after the pre-desktop gate succeeds.
+        QK::Console::setInputEnabled(true);
 
         // Mark input initialized even for console-only startup modes so a later
         // `startx` can safely bring up the window system.
@@ -789,6 +966,9 @@ namespace QK::Boot::Desktop
         // Pre-desktop owner registration/login gate: enrollment/unlock must complete
         // before desktop initialization.
         RunPreDesktopOwnerGate();
+
+        // Desktop now owns keyboard input; keep serial console non-interactive.
+        QK::Console::setInputEnabled(false);
     }
 
     bool IsPrepared() { return g_State.Prepared; }
@@ -1173,6 +1353,8 @@ namespace QK::Boot::Desktop
 
             auto &eventMgr = QK::Event::EventManager::instance();
             auto &wm = QW::WindowManager::instance();
+
+            maybePostBackspaceRepeat();
 
             // Process a bounded batch, then give rendering a chance.
             // This keeps pointer hover/press visuals responsive even under

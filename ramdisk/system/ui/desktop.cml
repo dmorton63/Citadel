@@ -74,6 +74,16 @@
                             width="160"
                             height="32"
                             role="sidebar" />
+
+                  <Button id="btnCMMS"
+                            icon="cmms"
+                            text="CMMS"
+                            action="cmms"
+                            x="20"
+                            y="180"
+                            width="160"
+                            height="32"
+                            role="sidebar" />
                 </Panel>
 
                 <!-- MAIN CONTENT -->

@@ -3,6 +3,7 @@
 
 #include "QDDesktop.h"
 #include "QDColorUtils.h"
+#include "QDThemeAssets.h"
 #include "QWWindowManager.h"
 #include "QCJson.h"
 #include "QDCommandProcessor.h"
@@ -25,19 +26,21 @@
 #include "QG/FontManager.h"
 #include "QG/Image.h"
 #include "QG/SVG.h"
-#include "QWControls/Leaf/IconButton.h"
 #include "QWControls/Leaf/ImageView.h"
 
 #include "QKBootConfigTier.h"
 
 #include "QDrvTimer.h"
 #include "QWControls/Leaf/ScrollBar.h"
+#include "QCMSApp.h"
+#include "QDThemeImporter.h"
 
 namespace QD
 {
     namespace
     {
-        constexpr const char *OWNER_MARKER_PATH = "/system/owner.enrolled";
+        constexpr const char *OWNER_MARKER_PATH = "/system/OWNER.ENR";
+        constexpr const char *OWNER_MARKER_PATH_LEGACY = "/system/owner.enrolled";
     }
 
     // Sidebar item labels
@@ -52,6 +55,7 @@ namespace QD
     namespace
     {
         constexpr const char *LOG_MODULE = "QDesktop";
+        constexpr const char *CMMS_DB_PATH = "/system/CMMS.QDB";
         constexpr float BASE_THEME_FONT_SIZE = 12.0f;
         static bool g_imageCorpusChecked = false;
 
@@ -536,7 +540,8 @@ namespace QD
             if (!themeValue || !themeValue->isObject())
                 return false;
             return themeValue->find("base") || themeValue->find("overrides") || themeValue->find("file") || themeValue->find("path") ||
-                   themeValue->find("definition") || themeValue->find("colors") || themeValue->find("effects") || themeValue->find("animations");
+                   themeValue->find("definition") || themeValue->find("colors") || themeValue->find("effects") || themeValue->find("animations") ||
+                   themeValue->find("id");
         }
 
         inline QW::ButtonRole roleForJsonButton(const char *id, const QC::JSON::Value *controlValue)
@@ -775,7 +780,6 @@ namespace QD
           m_screenHeight(0),
           m_desktopWindow(nullptr),
           m_jsonDriven(false),
-          m_themeLoaded(false),
           m_topBar(nullptr),
           m_sidebar(nullptr),
           m_taskbar(nullptr),
@@ -806,7 +810,6 @@ namespace QD
         {
             m_taskbarEntries[i].windowId = 0;
             m_taskbarEntries[i].button = nullptr;
-            m_taskbarEntries[i].iconButton = nullptr;
             m_taskbarEntries[i].width = 0;
             m_taskbarEntries[i].height = 0;
             m_taskbarEntries[i].isActive = false;
@@ -852,7 +855,9 @@ namespace QD
         m_desktopWindow->setFlags(QW::WindowFlags::AlwaysBottom | QW::WindowFlags::NoFocus);
 
         // Prefer a CUI-ML desktop definition if present and valid; otherwise fall back to desktop JSON.
-        if (!tryInitializeFromCuiML() && !tryInitializeFromJson())
+        const bool initializedFromCuiML = tryInitializeFromCuiML();
+        const bool initializedFromJson = !initializedFromCuiML && tryInitializeFromJson();
+        if (!initializedFromCuiML && !initializedFromJson)
         {
             // Create the panels
             createTopBar();
@@ -864,6 +869,13 @@ namespace QD
             applyColors();
         }
 
+        if (initializedFromCuiML)
+            QC_LOG_INFO(LOG_MODULE, "Desktop mode: CUI-ML\n");
+        else if (initializedFromJson)
+            QC_LOG_INFO(LOG_MODULE, "Desktop mode: JSON\n");
+        else
+            QC_LOG_INFO(LOG_MODULE, "Desktop mode: hardcoded fallback\n");
+
         QK::Shutdown::Controller::instance().registerUIHandler(&Desktop::onShutdownRequested, this);
 
         ensureWindowEventListener();
@@ -871,8 +883,10 @@ namespace QD
         // Ensure command processor is available for terminals and JSON/app-driven command clients.
         QD::CommandProcessor::instance().initialize();
 
-        // First boot: show setup wizard if owner enrollment marker is missing.
-        if (!isOwnerEnrolled())
+        // In BYPASS mode we skip owner setup prompts during startup.
+        // Enrollment can be completed later when SC backend support is available.
+        const bool bypass = QK::SecurityCenter::instance().bypassEnabled();
+        if (!bypass && !isOwnerEnrolled())
         {
             showSetupWizard();
         }
@@ -962,6 +976,12 @@ namespace QD
             m_terminal = nullptr;
         }
 
+        if (m_cmmsDatabaseReady)
+        {
+            QCQL::Engine::instance().closeDatabase(m_cmmsDatabase);
+            m_cmmsDatabaseReady = false;
+        }
+
         if (m_jsonDriven)
         {
             clearJsonDesktopState();
@@ -1037,7 +1057,9 @@ namespace QD
         // Prefer the real credential record; fall back to marker for legacy installs.
         if (QK::SecurityCenter::instance().ownerIsEnrolled())
             return true;
-        return QFS::VFS::instance().exists(OWNER_MARKER_PATH);
+        if (QFS::VFS::instance().exists(OWNER_MARKER_PATH))
+            return true;
+        return QFS::VFS::instance().exists(OWNER_MARKER_PATH_LEGACY);
     }
 
     void Desktop::showSetupWizard()
@@ -1115,6 +1137,112 @@ namespace QD
         // Window is created lazily by openFile.
     }
 
+    bool Desktop::ensureCmmsDatabaseReady()
+    {
+        if (m_cmmsDatabaseReady)
+            return true;
+
+        auto &engine = QCQL::Engine::instance();
+        engine.initialize();
+
+        QCQL::Status st = engine.openDatabase(CMMS_DB_PATH, m_cmmsDatabase);
+        if (st == QCQL::Status::NotFound)
+        {
+            st = engine.createDatabase(CMMS_DB_PATH, m_cmmsDatabase);
+        }
+
+        if (st != QCQL::Status::Success)
+        {
+            QC_LOG_WARN(LOG_MODULE, "CMMS DB open/create failed path=%s status=%d", CMMS_DB_PATH, static_cast<int>(st));
+            return false;
+        }
+
+        st = engine.initializeSystemTables(m_cmmsDatabase);
+        if (st != QCQL::Status::Success)
+        {
+            QC_LOG_WARN(LOG_MODULE, "CMMS DB system table init failed status=%d", static_cast<int>(st));
+            return false;
+        }
+
+        st = ThemeImporter::importBuiltinThemes(m_cmmsDatabase);
+        if (st != QCQL::Status::Success)
+        {
+            QC_LOG_WARN(LOG_MODULE, "CMMS DB theme import failed status=%d", static_cast<int>(st));
+            return false;
+        }
+
+        auto hasThemeTables = [&](QCQL::Database &db) -> bool
+        {
+            QC::u32 tableId = 0;
+            if (engine.lookupTableId(db, "Themes", tableId) != QCQL::Status::Success)
+                return false;
+            if (engine.lookupTableId(db, "ThemeTokens", tableId) != QCQL::Status::Success)
+                return false;
+
+            return true;
+        };
+
+        auto hasThemeRows = [&](QCQL::Database &db) -> bool
+        {
+            // Validate content by scanning for at least one non-tombstoned theme row.
+            for (QC::usize t = 0; t < db.tables.size(); ++t)
+            {
+                if (QC::String::strcmp(db.tables[t].name, "Themes") != 0)
+                    continue;
+
+                QCQL::Table &themes = db.tables[t];
+                for (QC::usize p = 0; p < themes.pages.size(); ++p)
+                {
+                    QCQL::Page page{};
+                    if (engine.loadPage(db, themes.pages[p], page) != QCQL::Status::Success)
+                        continue;
+
+                    for (QC::usize r = 0; r < page.rowOffsets.size(); ++r)
+                    {
+                        QCQL::Row row{};
+                        if (engine.readRow(db, themes.pages[p], page.rowOffsets[r], row) != QCQL::Status::Success)
+                            continue;
+                        if (row.tombstone)
+                            continue;
+                        return true;
+                    }
+                }
+            }
+
+            return false;
+        };
+
+        if (!hasThemeTables(m_cmmsDatabase))
+        {
+            QC_LOG_WARN(LOG_MODULE, "CMMS DB missing expected theme tables after initialization");
+            return false;
+        }
+
+        if (!hasThemeRows(m_cmmsDatabase))
+        {
+            // Non-destructive retry: seed themes again, but keep DB available even if still empty.
+            st = ThemeImporter::importBuiltinThemes(m_cmmsDatabase);
+            if (st != QCQL::Status::Success)
+            {
+                QC_LOG_WARN(LOG_MODULE, "CMMS DB reseed attempt failed status=%d", static_cast<int>(st));
+            }
+        }
+
+        m_cmmsDatabaseReady = true;
+        return true;
+    }
+
+    void Desktop::openCMMS()
+    {
+        const QC::Rect area = workArea();
+        QCQL::Database *database = nullptr;
+        if (ensureCmmsDatabaseReady())
+        {
+            database = &m_cmmsDatabase;
+        }
+        QCMS::App::instance().open(database, area);
+    }
+
     void Desktop::openBrowserFile(const char *path)
     {
         openBrowser();
@@ -1180,7 +1308,6 @@ namespace QD
             openBrowserUrl(m_helpSrcOrUrl);
             return;
         }
-
         openBrowserFile(m_helpSrcOrUrl);
     }
 
@@ -1227,6 +1354,211 @@ namespace QD
 
         considerControl(m_jsonStartButton);
         considerControl(m_jsonShutdownButton);
+    }
+
+    bool Desktop::applyThemeStateOnce(ThemeID activeThemeId)
+    {
+        auto seasonFromThemeId = [](ThemeID id) -> Season
+        {
+            switch (id)
+            {
+            case ThemeID::Spring:
+                return Season::Spring;
+            case ThemeID::Summer:
+                return Season::Summer;
+            case ThemeID::Autumn:
+                return Season::Autumn;
+            case ThemeID::Winter:
+                return Season::Winter;
+            default:
+                return Season::Unknown;
+            }
+        };
+
+        auto loadThemeById = [&](ThemeID id) -> bool
+        {
+            const char *themeIdText = themeIdToString(id);
+            if (!themeIdText || !*themeIdText)
+                return false;
+
+            const char *themePathHint = nullptr;
+            char pathBuf[96];
+            QC::String::memset(pathBuf, 0, sizeof(pathBuf));
+
+            const Season season = seasonFromThemeId(id);
+            if (season != Season::Unknown)
+            {
+                const char *paths[4] = {};
+                QC::usize pathCount = 0;
+                seasonCandidatePaths(season, paths, sizeof(paths) / sizeof(paths[0]), &pathCount);
+                for (QC::usize i = 0; i < pathCount; ++i)
+                {
+                    QFS::File *f = QFS::VFS::instance().open(paths[i], QFS::OpenMode::Read);
+                    if (!f)
+                        continue;
+                    QFS::VFS::instance().close(f);
+
+                    QC::String::strncpy(pathBuf, paths[i], sizeof(pathBuf) - 1);
+                    pathBuf[sizeof(pathBuf) - 1] = '\0';
+                    themePathHint = pathBuf;
+                    break;
+                }
+            }
+
+            char json[256];
+            QC::String::memset(json, 0, sizeof(json));
+            const char *prefix = "{\"id\":\"";
+            const char *mid = "\",\"path\":\"";
+            const char *suffix = "\"}";
+            const QC::usize prefixLen = QC::String::strlen(prefix);
+            const QC::usize idLen = QC::String::strlen(themeIdText);
+            const QC::usize midLen = QC::String::strlen(mid);
+            const QC::usize pathLen = themePathHint ? QC::String::strlen(themePathHint) : 0;
+            const QC::usize suffixLen = QC::String::strlen(suffix);
+            const QC::usize totalLen = prefixLen + idLen + (themePathHint ? (midLen + pathLen) : 0) + suffixLen;
+            if (totalLen + 1 > sizeof(json))
+                return false;
+
+            QC::String::memcpy(json, prefix, prefixLen);
+            QC::String::memcpy(json + prefixLen, themeIdText, idLen);
+
+            QC::usize cursor = prefixLen + idLen;
+            if (themePathHint)
+            {
+                QC::String::memcpy(json + cursor, mid, midLen);
+                cursor += midLen;
+                QC::String::memcpy(json + cursor, themePathHint, pathLen);
+                cursor += pathLen;
+            }
+
+            QC::String::memcpy(json + cursor, suffix, suffixLen);
+            cursor += suffixLen;
+            json[cursor] = '\0';
+
+            QC::JSON::Value themeValue;
+            if (!QC::JSON::parse(json, themeValue) || !themeValue.isObject())
+                return false;
+
+            if (!loadThemeDefinition(&themeValue))
+                return false;
+
+            applyLoadedThemeToOverrides();
+            return true;
+        };
+
+        if (activeThemeId == ThemeID::Default)
+            activeThemeId = ThemeID::Standard;
+
+        resetThemeOverrides();
+
+        // Deterministic runtime theme flow:
+        // load default -> load active -> merge into one effective style snapshot.
+        if (!loadThemeById(ThemeID::Standard))
+            return false;
+
+        if (activeThemeId != ThemeID::Standard)
+        {
+            if (!loadThemeById(activeThemeId))
+                return false;
+        }
+
+        // Keep desktop background aligned with the currently active theme assets.
+        const char *wallpaperPath = m_loadedTheme.package.assets.backgrounds.desktopPrimary;
+        if (wallpaperPath && *wallpaperPath)
+        {
+            if (ImageAsset *asset = loadImageAsset(wallpaperPath))
+            {
+                m_backgroundConfig.mode = BackgroundMode::Image;
+                m_backgroundConfig.image = asset;
+                m_backgroundConfig.scaleMode = QG::ImageScaleMode::Stretch;
+                if (m_jsonDriven && m_jsonWallpaperView)
+                {
+                    m_jsonWallpaperView->setVisible(true);
+                    m_jsonWallpaperView->setScaleMode(m_backgroundConfig.scaleMode);
+                    m_jsonWallpaperView->setImage(&asset->surface);
+                }
+            }
+        }
+
+        // Clear panel background overrides so the new snapshot can repaint chrome colors.
+        if (m_sidebar)
+            m_sidebar->clearBackgroundColor();
+        if (m_topBar)
+            m_topBar->clearBackgroundColor();
+        if (m_taskbar)
+            m_taskbar->clearBackgroundColor();
+
+        applyColors();
+
+        if (m_desktopWindow)
+        {
+            const QW::Rect full = {0, 0, m_screenWidth, m_screenHeight};
+            m_desktopWindow->invalidateRect(full);
+        }
+
+        QW::WindowManager::instance().render();
+        return true;
+    }
+
+    bool Desktop::applyThemeByIdString(const char *themeIdText)
+    {
+        if (!themeIdText || !*themeIdText)
+            return false;
+
+        ThemeID target = ThemeID::Standard;
+        if (!themeIdFromString(themeIdText, &target))
+            return false;
+
+        return applyThemeStateOnce(target);
+    }
+
+    void Desktop::cycleThemeFromSettings()
+    {
+        ThemeID next = ThemeID::Standard;
+        switch (m_loadedTheme.package.id)
+        {
+        case ThemeID::Default:
+            next = ThemeID::Standard;
+            break;
+        case ThemeID::Standard:
+            next = ThemeID::Winter;
+            break;
+        case ThemeID::Winter:
+            next = ThemeID::Spring;
+            break;
+        case ThemeID::Spring:
+            next = ThemeID::Summer;
+            break;
+        case ThemeID::Summer:
+            next = ThemeID::Autumn;
+            break;
+        case ThemeID::Autumn:
+            next = ThemeID::Standard;
+            break;
+        default:
+            next = ThemeID::Standard;
+            break;
+        }
+
+        const char *nextIdText = themeIdToString(next);
+        if (!applyThemeByIdString(nextIdText))
+            return;
+
+        if (m_titleLabel)
+        {
+            char label[96];
+            QC::String::memset(label, 0, sizeof(label));
+            const char *prefix = "CITADEL Desktop - Theme: ";
+            const QC::usize prefixLen = QC::String::strlen(prefix);
+            const QC::usize idLen = QC::String::strlen(nextIdText);
+            if (prefixLen + idLen + 1 <= sizeof(label))
+            {
+                QC::String::memcpy(label, prefix, prefixLen);
+                QC::String::memcpy(label + prefixLen, nextIdText, idLen);
+                label[prefixLen + idLen] = '\0';
+                m_titleLabel->setText(label);
+            }
+        }
     }
 
     void Desktop::showShutdownPrompt(QK::Shutdown::Reason reason)
@@ -1310,7 +1642,7 @@ namespace QD
     void Desktop::resetThemeOverrides()
     {
         m_themeOverrides = ThemeOverrides{};
-        m_themeLoaded = false;
+        m_loadedTheme = ThemeLoadResult{};
         installDefaultMaterials();
     }
 
@@ -1394,7 +1726,7 @@ namespace QD
         return nullptr;
     }
 
-    bool Desktop::readFileBytes(const char *path, QC::Vector<QC::u8> &outBuffer) const
+    bool Desktop::readFileBytes(const char *path, QC::Vector<QC::u8> &outBuffer, bool logFailure) const
     {
         outBuffer.clear();
         if (!path || !*path)
@@ -1402,14 +1734,16 @@ namespace QD
         QFS::File *file = QFS::VFS::instance().open(path, QFS::OpenMode::Read);
         if (!file)
         {
-            QC_LOG_WARN(LOG_MODULE, "Image file %s not found", path);
+            if (logFailure)
+                QC_LOG_WARN(LOG_MODULE, "Image file %s not found", path);
             return false;
         }
         const QC::u64 size64 = file->size();
         if (size64 == 0 || size64 > 4 * 1024 * 1024)
         {
             QFS::VFS::instance().close(file);
-            QC_LOG_WARN(LOG_MODULE, "Image file %s has invalid size", path);
+            if (logFailure)
+                QC_LOG_WARN(LOG_MODULE, "Image file %s has invalid size", path);
             return false;
         }
         const QC::usize size = static_cast<QC::usize>(size64);
@@ -1419,7 +1753,8 @@ namespace QD
         if (read != static_cast<QC::isize>(size))
         {
             outBuffer.clear();
-            QC_LOG_WARN(LOG_MODULE, "Failed to read image file %s", path);
+            if (logFailure)
+                QC_LOG_WARN(LOG_MODULE, "Failed to read image file %s", path);
             return false;
         }
         return true;
@@ -1464,12 +1799,193 @@ namespace QD
             return true;
         };
 
+        auto startsWithAscii = [](const char *text, const char *prefix) -> bool {
+            if (!text || !prefix)
+                return false;
+            for (QC::usize i = 0; prefix[i] != '\0'; ++i)
+            {
+                if (text[i] == '\0' || text[i] != prefix[i])
+                    return false;
+            }
+            return true;
+        };
+
         const bool timing = isWallpaperPath(path);
         const QC::u64 t0 = timing ? QDrv::Timer::instance().milliseconds() : 0;
 
         QC::Vector<QC::u8> buffer;
-        if (!readFileBytes(path, buffer))
-            return nullptr;
+        char resolvedPathStorage[192];
+        QC::String::memset(resolvedPathStorage, 0, sizeof(resolvedPathStorage));
+        const char *resolvedPath = path;
+
+        auto storeResolvedPath = [&](const char *candidatePath) -> bool {
+            if (!candidatePath)
+                return false;
+
+            const QC::usize len = QC::String::strlen(candidatePath);
+            if (len + 1 > sizeof(resolvedPathStorage))
+                return false;
+
+            QC::String::memcpy(resolvedPathStorage, candidatePath, len);
+            resolvedPathStorage[len] = '\0';
+            resolvedPath = resolvedPathStorage;
+            return true;
+        };
+
+        if (!readFileBytes(path, buffer, false))
+        {
+            auto tryShadowedSystemAlias = [&](const char *sourcePath) -> bool {
+                if (!sourcePath)
+                    return false;
+
+                const char *systemWallPrefix = "/system/wall/";
+                const char *systemIconsPrefix = "/system/icons/";
+                const char *systemIconSvgPrefix = "/system/icons/svg/";
+                const char *aliasPrefix = nullptr;
+                const char *tail = nullptr;
+
+                if (startsWithAscii(sourcePath, systemIconSvgPrefix))
+                {
+                    aliasPrefix = "/ICONS/SVG/";
+                    tail = sourcePath + QC::String::strlen(systemIconSvgPrefix);
+                }
+                else if (startsWithAscii(sourcePath, systemIconsPrefix))
+                {
+                    aliasPrefix = "/ICONS/";
+                    tail = sourcePath + QC::String::strlen(systemIconsPrefix);
+                }
+                else if (startsWithAscii(sourcePath, systemWallPrefix))
+                {
+                    aliasPrefix = "/WALL/";
+                    tail = sourcePath + QC::String::strlen(systemWallPrefix);
+                }
+
+                if (!aliasPrefix || !tail || !*tail)
+                    return false;
+
+                char aliasPath[192];
+                QC::String::memset(aliasPath, 0, sizeof(aliasPath));
+                const QC::usize aliasLen = QC::String::strlen(aliasPrefix);
+                const QC::usize tailLen = QC::String::strlen(tail);
+                if (aliasLen + tailLen + 1 > sizeof(aliasPath))
+                    return false;
+
+                QC::String::memcpy(aliasPath, aliasPrefix, aliasLen);
+                QC::String::memcpy(aliasPath + aliasLen, tail, tailLen);
+                aliasPath[aliasLen + tailLen] = '\0';
+
+                if (!readFileBytes(aliasPath, buffer, false))
+                    return false;
+
+                return storeResolvedPath(aliasPath);
+            };
+
+            // Compatibility fallback for icon paths in JSON that use lowercase PNG names
+            // while the shipped corpus uses uppercase PNG and/or SVG aliases.
+            bool recovered = tryShadowedSystemAlias(path);
+            if (path && startsWithAscii(path, "/system/icons/"))
+            {
+                const char *lastSlash = nullptr;
+                const char *lastDot = nullptr;
+                for (const char *p = path; *p; ++p)
+                {
+                    if (*p == '/')
+                        lastSlash = p;
+                    else if (*p == '.')
+                        lastDot = p;
+                }
+
+                if (lastSlash && lastDot && lastDot > lastSlash + 1)
+                {
+                    char stemUpper[64];
+                    char stemLower[64];
+                    QC::String::memset(stemUpper, 0, sizeof(stemUpper));
+                    QC::String::memset(stemLower, 0, sizeof(stemLower));
+
+                    QC::usize n = 0;
+                    for (const char *p = lastSlash + 1; p < lastDot && n + 1 < sizeof(stemUpper); ++p)
+                    {
+                        char c = *p;
+                        if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_' || c == '-')
+                        {
+                            if (c >= 'a' && c <= 'z')
+                                stemUpper[n] = static_cast<char>(c - 'a' + 'A');
+                            else
+                                stemUpper[n] = c;
+
+                            if (c >= 'A' && c <= 'Z')
+                                stemLower[n] = static_cast<char>(c - 'A' + 'a');
+                            else
+                                stemLower[n] = c;
+                            ++n;
+                        }
+                    }
+                    stemUpper[n] = '\0';
+                    stemLower[n] = '\0';
+
+                    if (stemUpper[0])
+                    {
+                        char candidatePng[128];
+                        QC::String::memset(candidatePng, 0, sizeof(candidatePng));
+                        const char *pngPrefix = "/system/icons/";
+                        const char *pngSuffix = ".PNG";
+                        const QC::usize preLen = QC::String::strlen(pngPrefix);
+                        const QC::usize stemLen = QC::String::strlen(stemUpper);
+                        const QC::usize sufLen = QC::String::strlen(pngSuffix);
+                        if (preLen + stemLen + sufLen + 1 <= sizeof(candidatePng))
+                        {
+                            QC::String::memcpy(candidatePng, pngPrefix, preLen);
+                            QC::String::memcpy(candidatePng + preLen, stemUpper, stemLen);
+                            QC::String::memcpy(candidatePng + preLen + stemLen, pngSuffix, sufLen);
+                            candidatePng[preLen + stemLen + sufLen] = '\0';
+                            if (readFileBytes(candidatePng, buffer, false))
+                            {
+                                recovered = storeResolvedPath(candidatePng);
+                            }
+                        }
+
+                        if (!recovered)
+                        {
+                            char candidateSvg[160];
+                            QC::String::memset(candidateSvg, 0, sizeof(candidateSvg));
+                            const char *svgPrefix = "/system/icons/svg/";
+                            const char *svgSuffix = ".svg";
+                            const QC::usize sPreLen = QC::String::strlen(svgPrefix);
+                            const QC::usize sStemLen = QC::String::strlen(stemLower);
+                            const QC::usize sSufLen = QC::String::strlen(svgSuffix);
+                            if (sPreLen + sStemLen + sSufLen + 1 <= sizeof(candidateSvg))
+                            {
+                                QC::String::memcpy(candidateSvg, svgPrefix, sPreLen);
+                                QC::String::memcpy(candidateSvg + sPreLen, stemLower, sStemLen);
+                                QC::String::memcpy(candidateSvg + sPreLen + sStemLen, svgSuffix, sSufLen);
+                                candidateSvg[sPreLen + sStemLen + sSufLen] = '\0';
+                                if (readFileBytes(candidateSvg, buffer, false))
+                                {
+                                    recovered = storeResolvedPath(candidateSvg);
+                                }
+                            }
+                        }
+
+                        if (!recovered && QC::String::strcmp(stemLower, "shutdown") == 0)
+                        {
+                            const char *fallbackPower = "/system/icons/svg/power.svg";
+                            if (readFileBytes(fallbackPower, buffer, false))
+                            {
+                                recovered = storeResolvedPath(fallbackPower);
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (!recovered)
+            {
+                (void)readFileBytes(path, buffer, true);
+                return nullptr;
+            }
+
+            QC_LOG_WARN(LOG_MODULE, "Image path fallback: %s -> %s", path ? path : "<null>", resolvedPath ? resolvedPath : "<null>");
+        }
 
         const QC::u64 t1 = timing ? QDrv::Timer::instance().milliseconds() : 0;
         if (timing)
@@ -1490,19 +2006,68 @@ namespace QD
 
         const QC::u64 t2 = timing ? QDrv::Timer::instance().milliseconds() : 0;
 
-        const bool isSvg = endsWithIgnoreCaseAscii(path, ".svg");
+        const bool isSvg = endsWithIgnoreCaseAscii(resolvedPath, ".svg");
         bool decoded = false;
         if (isSvg)
         {
             decoded = QG::decodeSVG(buffer, asset->surface);
             if (!decoded)
-                QC_LOG_WARN(LOG_MODULE, "Failed to decode SVG %s", path ? path : "<null>");
+            QC_LOG_WARN(LOG_MODULE, "Failed to decode SVG %s", resolvedPath ? resolvedPath : "<null>");
         }
         else
         {
             decoded = QG::decodePNG(buffer, asset->surface);
             if (!decoded)
-                QC_LOG_WARN(LOG_MODULE, "Failed to decode PNG %s", path ? path : "<null>");
+            {
+                bool recoveredWithSvg = false;
+                if (resolvedPath && (startsWithAscii(resolvedPath, "/system/icons/") || startsWithAscii(resolvedPath, "/ICONS/")))
+                {
+                    const char *iconPrefix = startsWithAscii(resolvedPath, "/ICONS/") ? "/ICONS/" : "/system/icons/";
+                    const char *svgPrefix = startsWithAscii(resolvedPath, "/ICONS/") ? "/ICONS/svg/" : "/system/icons/svg/";
+                    const char *tail = resolvedPath + QC::String::strlen(iconPrefix);
+                    const char *dot = nullptr;
+                    for (const char *p = tail; *p; ++p)
+                    {
+                        if (*p == '.')
+                            dot = p;
+                    }
+
+                    if (tail && *tail && dot && dot > tail)
+                    {
+                        char svgPath[192];
+                        QC::String::memset(svgPath, 0, sizeof(svgPath));
+                        const QC::usize prefixLen = QC::String::strlen(svgPrefix);
+                        const QC::usize stemLen = static_cast<QC::usize>(dot - tail);
+                        const QC::usize suffixLen = 4;
+                        if (prefixLen + stemLen + suffixLen + 1 <= sizeof(svgPath))
+                        {
+                            QC::String::memcpy(svgPath, svgPrefix, prefixLen);
+                            for (QC::usize i = 0; i < stemLen; ++i)
+                            {
+                                char c = tail[i];
+                                if (c >= 'A' && c <= 'Z')
+                                    c = static_cast<char>(c - 'A' + 'a');
+                                svgPath[prefixLen + i] = c;
+                            }
+                            QC::String::memcpy(svgPath + prefixLen + stemLen, ".svg", suffixLen);
+                            svgPath[prefixLen + stemLen + suffixLen] = '\0';
+
+                            QC::Vector<QC::u8> svgBuffer;
+                            if (readFileBytes(svgPath, svgBuffer, false) && QG::decodeSVG(svgBuffer, asset->surface))
+                            {
+                                buffer = svgBuffer;
+                                recoveredWithSvg = storeResolvedPath(svgPath);
+                                decoded = recoveredWithSvg;
+                            }
+                        }
+                    }
+                }
+
+                if (!decoded)
+                    QC_LOG_WARN(LOG_MODULE, "Failed to decode PNG %s", resolvedPath ? resolvedPath : "<null>");
+                else if (recoveredWithSvg)
+                    QC_LOG_WARN(LOG_MODULE, "Image decode fallback: %s -> %s", path ? path : "<null>", resolvedPath ? resolvedPath : "<null>");
+            }
         }
 
         if (!decoded)
@@ -1656,59 +2221,12 @@ namespace QD
 
     bool Desktop::loadThemeDefinition(const QC::JSON::Value *themeValue)
     {
-        m_themeLoaded = false;
-        m_themeDefinition.reset();
-        if (!themeValue)
-            return false;
-
-        auto tryLoadPath = [&](const char *path) -> bool
-        {
-            if (!path || !*path)
-                return false;
-            if (!m_themeDefinition.loadFromFile(path))
-            {
-                QC_LOG_WARN(LOG_MODULE, "Failed to load theme file %s", path);
-                return false;
-            }
-            m_themeLoaded = true;
-            return true;
-        };
-
-        if (themeValue->isString())
-        {
-            const char *path = themeValue->asString(nullptr);
-            return tryLoadPath(path);
-        }
-
-        if (!themeValue->isObject())
-            return false;
-
-        if (tryLoadPath(stringOrNull(themeValue->find("file"))))
-            return true;
-        if (tryLoadPath(stringOrNull(themeValue->find("path"))))
-            return true;
-
-        if (const QC::JSON::Value *definition = themeValue->find("definition"))
-        {
-            if (definition->isObject())
-            {
-                m_themeLoaded = m_themeDefinition.loadFromJson(*definition);
-                return m_themeLoaded;
-            }
-        }
-
-        if (themeValue->find("colors") || themeValue->find("effects") || themeValue->find("animations") || themeValue->find("base"))
-        {
-            m_themeLoaded = m_themeDefinition.loadFromJson(*themeValue);
-            return m_themeLoaded;
-        }
-
-        return false;
+        return m_themeService.loadTheme(themeValue, m_loadedTheme);
     }
 
     void Desktop::applyLoadedThemeToOverrides()
     {
-        if (!m_themeLoaded)
+        if (!m_loadedTheme.loaded)
             return;
 
         const auto applyColor = [](ColorOverride &target, const QC::Color &value)
@@ -1717,7 +2235,7 @@ namespace QD
             target.value = value;
         };
 
-        const ThemeColorPalette &palette = m_themeDefinition.colors();
+        const ThemeColorPalette &palette = m_loadedTheme.theme.colors();
         applyColor(m_themeOverrides.palette.accent, palette.accentPrimary);
         applyColor(m_themeOverrides.palette.accentLight, palette.accentSecondary);
         applyColor(m_themeOverrides.palette.accentDark, palette.accentPrimary.darker(0.2f));
@@ -1726,7 +2244,7 @@ namespace QD
         applyColor(m_themeOverrides.palette.text, palette.textPrimary);
         applyColor(m_themeOverrides.palette.textSecondary, palette.textSecondary);
 
-        const ThemeEffects &effects = m_themeDefinition.effects();
+        const ThemeEffects &effects = m_loadedTheme.theme.effects();
         m_themeOverrides.metrics.cornerRadiusSet = true;
         m_themeOverrides.metrics.cornerRadius = effects.border.radius;
         m_themeOverrides.metrics.buttonCornerRadiusSet = true;
@@ -1805,7 +2323,7 @@ namespace QD
                      true);
 
         auto &fontOverrides = m_themeOverrides.font;
-        const ThemeFont &themeFont = m_themeDefinition.font();
+        const ThemeFont &themeFont = m_loadedTheme.theme.font();
         if (themeFont.family[0] != '\0')
         {
             fontOverrides.familySet = true;
@@ -2152,6 +2670,14 @@ namespace QD
         if (!themeValue || !themeValue->isObject())
             return;
 
+        // Allow desktop-overrides theme to switch the full theme package
+        // (id/file/definition/assets), not only palette deltas.
+        if (looksLikeFullThemeDefinition(themeValue))
+        {
+            parseThemeOverrides(themeValue);
+            return;
+        }
+
         // Merge-only: do not reset, do not load theme definitions.
         {
             bool changed = false;
@@ -2452,7 +2978,15 @@ namespace QD
         if (type && equalsIgnoreCase(type, "image"))
         {
             const char *path = stringOrNull(backgroundValue->find("path"));
-            if (ImageAsset *asset = loadImageAsset(path))
+            char resolvedPath[192];
+            QC::String::memset(resolvedPath, 0, sizeof(resolvedPath));
+            const char *pathToLoad = path;
+            if (resolveThemeAssetKey(path, &m_loadedTheme.package.assets, resolvedPath, sizeof(resolvedPath)))
+            {
+                pathToLoad = resolvedPath;
+            }
+
+            if (ImageAsset *asset = loadImageAsset(pathToLoad))
             {
                 m_backgroundConfig.mode = BackgroundMode::Image;
                 m_backgroundConfig.image = asset;
@@ -2515,291 +3049,6 @@ namespace QD
             m_jsonWallpaperView->setVisible(false);
             m_jsonWallpaperView->setImage(nullptr);
         }
-    }
-
-    void Desktop::applyThemeOverrides(QW::StyleSnapshot &snapshot) const
-    {
-        if (!m_themeOverrides.active)
-            return;
-
-        const auto &palette = m_themeOverrides.palette;
-
-        if (palette.accent.set)
-            snapshot.palette.accent = palette.accent.value;
-
-        if (palette.panel.set)
-        {
-            snapshot.palette.panelBackground = palette.panel.value;
-            snapshot.palette.buttonFace = palette.panel.value;
-            snapshot.palette.buttonHover = palette.panel.value.lighter(0.15f);
-            snapshot.palette.buttonPressed = palette.panel.value.darker(0.2f);
-        }
-
-        if (palette.panelBorder.set)
-        {
-            snapshot.palette.buttonBorder = palette.panelBorder.value;
-            snapshot.palette.windowBorderActive = palette.panelBorder.value;
-            snapshot.palette.windowBorderInactive = palette.panelBorder.value.darker(0.3f);
-        }
-
-        if (m_themeOverrides.effects.borderColor.set)
-        {
-            const QC::Color borderColor = m_themeOverrides.effects.borderColor.value;
-            snapshot.palette.buttonBorder = borderColor;
-            snapshot.palette.windowBorderActive = borderColor;
-            snapshot.palette.windowBorderInactive = borderColor.darker(0.3f);
-        }
-
-        if (palette.text.set)
-        {
-            snapshot.palette.controlText = palette.text.value;
-
-            auto applyTextIfUnset = [&](QW::ButtonRole role, const QC::Color &color)
-            {
-                const QC::u32 idx = static_cast<QC::u32>(role);
-                if (!m_themeOverrides.button[idx].text.set)
-                {
-                    snapshot.buttonStyles[idx].text = color;
-                }
-            };
-
-            applyTextIfUnset(QW::ButtonRole::Default, palette.text.value);
-            applyTextIfUnset(QW::ButtonRole::Taskbar, palette.text.value);
-        }
-
-        if (palette.textSecondary.set)
-        {
-            const QC::u32 sidebarIdx = static_cast<QC::u32>(QW::ButtonRole::Sidebar);
-            if (!m_themeOverrides.button[sidebarIdx].text.set)
-            {
-                snapshot.buttonStyles[sidebarIdx].text = palette.textSecondary.value;
-            }
-        }
-
-        const QC::u32 accentIdx = static_cast<QC::u32>(QW::ButtonRole::Accent);
-        auto &accentOverride = m_themeOverrides.button[accentIdx];
-        auto &accentSpec = snapshot.buttonStyles[accentIdx];
-
-        if (palette.accent.set && !accentOverride.fillNormal.set)
-            accentSpec.fillNormal = palette.accent.value;
-        if (palette.accentLight.set && !accentOverride.fillHover.set)
-            accentSpec.fillHover = palette.accentLight.value;
-        if (palette.accentDark.set && !accentOverride.fillPressed.set)
-            accentSpec.fillPressed = palette.accentDark.value;
-
-        bool updateButtonCorner = false;
-        if (m_themeOverrides.metrics.cornerRadiusSet)
-        {
-            snapshot.metrics.windowCornerRadius = m_themeOverrides.metrics.cornerRadius;
-            if (!m_themeOverrides.metrics.buttonCornerRadiusSet)
-            {
-                snapshot.metrics.buttonCornerRadius = m_themeOverrides.metrics.cornerRadius;
-            }
-            updateButtonCorner = true;
-        }
-
-        if (m_themeOverrides.metrics.buttonCornerRadiusSet)
-        {
-            snapshot.metrics.buttonCornerRadius = m_themeOverrides.metrics.buttonCornerRadius;
-            updateButtonCorner = true;
-        }
-
-        bool updateBorderWidth = false;
-        if (m_themeOverrides.metrics.borderWidthSet)
-        {
-            snapshot.metrics.borderWidth = m_themeOverrides.metrics.borderWidth;
-            updateBorderWidth = true;
-        }
-
-        if (updateButtonCorner)
-        {
-            const QC::u32 radius = snapshot.metrics.buttonCornerRadius;
-            for (QC::u32 i = 0; i < static_cast<QC::u32>(QW::ButtonRole::Count); ++i)
-            {
-                snapshot.buttonStyles[i].cornerRadius = radius;
-            }
-        }
-
-        if (updateBorderWidth)
-        {
-            const QC::u32 width = snapshot.metrics.borderWidth;
-            for (QC::u32 i = 0; i < static_cast<QC::u32>(QW::ButtonRole::Count); ++i)
-            {
-                snapshot.buttonStyles[i].borderWidth = width;
-            }
-        }
-
-        if (m_themeOverrides.font.sizeSet)
-        {
-            float scale = (m_themeOverrides.font.size > 0)
-                              ? static_cast<float>(m_themeOverrides.font.size) / BASE_THEME_FONT_SIZE
-                              : 1.0f;
-            if (scale < 0.5f)
-                scale = 0.5f;
-            else if (scale > 4.0f)
-                scale = 4.0f;
-            snapshot.metrics.textScale = scale;
-        }
-
-        const auto &shadow = m_themeOverrides.effects.shadow;
-        if (shadow.blurSet)
-        {
-            snapshot.metrics.shadowSize = shadow.blurRadius;
-            snapshot.metrics.buttonShadowSoftness = shadow.blurRadius;
-        }
-        if (shadow.offsetXSet)
-        {
-            snapshot.metrics.buttonShadowOffsetX = shadow.offsetX;
-        }
-        if (shadow.offsetYSet)
-        {
-            snapshot.metrics.buttonShadowOffsetY = shadow.offsetY;
-        }
-
-        const auto &glow = m_themeOverrides.effects.glow;
-        if (glow.radiusSet)
-        {
-            snapshot.metrics.focusRingWidth = glow.radius;
-        }
-
-        if (glow.radiusSet || glow.intensitySet || glow.color.set)
-        {
-            const auto applyGlow = [&](QW::ButtonRole role)
-            {
-                const QC::u32 idx = static_cast<QC::u32>(role);
-                auto &spec = snapshot.buttonStyles[idx];
-                QC::Color color = glow.color.set ? glow.color.value : spec.glow;
-                if (glow.intensitySet)
-                {
-                    color.a = clampToByte(glow.intensity);
-                }
-                spec.glow = color;
-                if (glow.radiusSet)
-                {
-                    spec.castsShadow = glow.radius > 0;
-                }
-            };
-
-            applyGlow(QW::ButtonRole::Accent);
-            applyGlow(QW::ButtonRole::SidebarSelected);
-            applyGlow(QW::ButtonRole::Destructive);
-            applyGlow(QW::ButtonRole::TaskbarActive);
-        }
-
-        auto applyButtonOverride = [&](QW::ButtonRole role)
-        {
-            const QC::u32 idx = static_cast<QC::u32>(role);
-            const auto &data = m_themeOverrides.button[idx];
-            if (!data.hasAny())
-                return;
-
-            auto &spec = snapshot.buttonStyles[idx];
-
-            auto findMaterial = [&](const char *name) -> const ButtonMaterialDefinition *
-            {
-                if (!name || !*name)
-                    return nullptr;
-                for (QC::u32 mi = 0; mi < m_themeOverrides.materialCount && mi < MAX_THEME_MATERIALS; ++mi)
-                {
-                    const auto &mat = m_themeOverrides.materials[mi];
-                    if (!mat.used)
-                        continue;
-                    if (QC::String::strcmp(mat.name, name) == 0)
-                        return &mat;
-                }
-                return nullptr;
-            };
-
-            auto applyShine = [&](float intensity)
-            {
-                const float amount = clamp01(intensity);
-                const QC::u8 alpha = static_cast<QC::u8>(amount * 255.0f);
-                spec.glow = spec.fillNormal.withAlpha(alpha);
-                spec.overlayHover = QC::Color(255, 255, 255, alpha);
-                spec.overlayPressed = spec.fillPressed.withAlpha(static_cast<QC::u8>(alpha * 0.7f));
-            };
-
-            auto applyMaterial = [&](const ButtonMaterialDefinition &mat)
-            {
-                if (mat.style.fillNormal.set)
-                    spec.fillNormal = mat.style.fillNormal.value;
-                if (mat.style.fillHover.set)
-                    spec.fillHover = mat.style.fillHover.value;
-                if (mat.style.fillPressed.set)
-                    spec.fillPressed = mat.style.fillPressed.value;
-                if (mat.style.text.set)
-                    spec.text = mat.style.text.value;
-                if (mat.style.border.set)
-                    spec.border = mat.style.border.value;
-                if (mat.style.glassSet)
-                    spec.glass = mat.style.glass;
-                if (mat.style.shineSet)
-                    applyShine(mat.style.shineIntensity);
-
-                if (mat.layers.hasAny())
-                {
-                    spec.materialLayers.enabled = true;
-
-                    QW::StyleSnapshot::ButtonStyle::MaterialLayerSet normal;
-                    if (mat.layers.normal.glossTop.set)
-                        normal.glossTop = mat.layers.normal.glossTop.value;
-                    if (mat.layers.normal.glossBottom.set)
-                        normal.glossBottom = mat.layers.normal.glossBottom.value;
-                    if (mat.layers.normal.shadeTop.set)
-                        normal.shadeTop = mat.layers.normal.shadeTop.value;
-                    if (mat.layers.normal.shadeBottom.set)
-                        normal.shadeBottom = mat.layers.normal.shadeBottom.value;
-                    spec.materialLayers.normal = normal;
-
-                    auto buildDerived = [&](const ButtonMaterialLayerSet &src) -> QW::StyleSnapshot::ButtonStyle::MaterialLayerSet
-                    {
-                        auto derived = normal;
-                        if (src.glossTop.set)
-                            derived.glossTop = src.glossTop.value;
-                        if (src.glossBottom.set)
-                            derived.glossBottom = src.glossBottom.value;
-                        if (src.shadeTop.set)
-                            derived.shadeTop = src.shadeTop.value;
-                        if (src.shadeBottom.set)
-                            derived.shadeBottom = src.shadeBottom.value;
-                        return derived;
-                    };
-
-                    spec.materialLayers.hovered = buildDerived(mat.layers.hover);
-                    spec.materialLayers.pressed = buildDerived(mat.layers.pressed);
-                }
-            };
-
-            if (data.materialSet && data.material[0] != '\0')
-            {
-                if (const ButtonMaterialDefinition *mat = findMaterial(data.material))
-                {
-                    applyMaterial(*mat);
-                }
-            }
-
-            if (data.fillNormal.set)
-                spec.fillNormal = data.fillNormal.value;
-            if (data.fillHover.set)
-                spec.fillHover = data.fillHover.value;
-            if (data.fillPressed.set)
-                spec.fillPressed = data.fillPressed.value;
-            if (data.text.set)
-                spec.text = data.text.value;
-            if (data.border.set)
-                spec.border = data.border.value;
-            if (data.glassSet)
-                spec.glass = data.glass;
-            if (data.shineSet)
-            {
-                applyShine(data.shineIntensity);
-            }
-        };
-
-        applyButtonOverride(QW::ButtonRole::Default);
-        applyButtonOverride(QW::ButtonRole::Sidebar);
-        applyButtonOverride(QW::ButtonRole::Accent);
-        applyButtonOverride(QW::ButtonRole::Destructive);
     }
 
     void Desktop::applyThemeToDesktopColors(DesktopColors &colors) const
@@ -5586,6 +5835,9 @@ namespace QD
                     if (!iconTokenOrPath || !*iconTokenOrPath)
                         return false;
 
+                    if (resolveThemeAssetKey(iconTokenOrPath, &m_loadedTheme.package.assets, out, outCap))
+                        return true;
+
                     if (const char *alias = lookupIconAliasPath(iconTokenOrPath))
                         iconTokenOrPath = alias;
 
@@ -5712,7 +5964,8 @@ namespace QD
                 }
 
                 auto *btn = new QW::Controls::Button(m_desktopWindow, textAttr, {x, y, static_cast<QC::u32>(w), static_cast<QC::u32>(h)});
-                btn->setBorderless(true);
+                btn->setContentMode(QW::ButtonContentMode::Text);
+                btn->setVariant(QW::ButtonVariant::Borderless);
 
                 if (fontScale > 0.0f)
                 {
@@ -5768,6 +6021,20 @@ namespace QD
                 {
                     btn->setClickHandler(onJsonTerminalClick, this);
                 }
+                else if (idAttr[0] && QC::String::strcmp(idAttr, "btnSettings") == 0)
+                {
+                    btn->setClickHandler(onJsonSettingsClick, this);
+                }
+                else if ((idAttr[0] && QC::String::strcmp(idAttr, "btnCMMS") == 0) ||
+                         (actionAttr[0] && streqIgnoreCaseAscii(actionAttr, "cmms")))
+                {
+                    btn->setClickHandler(onJsonCMMSClick, this);
+                    QC_LOG_INFO(LOG_MODULE,
+                                "CUI-ML: bound CMMS Button id='%s' action='%s' at x=%d y=%d w=%d h=%d",
+                                idAttr[0] ? idAttr : "<none>",
+                                actionAttr[0] ? actionAttr : "<none>",
+                                x, y, w, h);
+                }
                 else if ((idAttr[0] && QC::String::strcmp(idAttr, "shutDownButton") == 0) ||
                          (actionAttr[0] && streqIgnoreCaseAscii(actionAttr, "shutdown")))
                 {
@@ -5785,6 +6052,8 @@ namespace QD
             }
             else if (startsWithIgnoreCaseAscii(effectiveName, "IconButton"))
             {
+                // Backward-compatible parser alias: old IconButton markup now
+                // produces a standard Button configured for icon-only content.
                 char textAttr[256];
                 QC::String::memset(textAttr, 0, sizeof(textAttr));
                 parseAttrMerged("text", textAttr, sizeof(textAttr));
@@ -5840,6 +6109,9 @@ namespace QD
                     out[0] = '\0';
                     if (!iconTokenOrPath || !*iconTokenOrPath)
                         return false;
+
+                    if (resolveThemeAssetKey(iconTokenOrPath, &m_loadedTheme.package.assets, out, outCap))
+                        return true;
 
                     if (const char *alias = lookupIconAliasPath(iconTokenOrPath))
                         iconTokenOrPath = alias;
@@ -5934,14 +6206,16 @@ namespace QD
                 const bool hasHeightAttr = (hBuf[0] != '\0');
                 const bool hasText = (textAttr[0] != '\0');
 
-                // IconButton is icon-only; text is treated as tooltip.
+                // Icon-style buttons are icon-only; text is treated as tooltip.
                 // Keep layout size deterministic: default to a compact square when not specified.
                 if (w <= 0)
                     w = 32;
                 if (h <= 0)
                     h = 32;
 
-                auto *btn = new QW::Controls::IconButton(m_desktopWindow, {x, y, static_cast<QC::u32>(w), static_cast<QC::u32>(h)});
+                auto *btn = new QW::Controls::Button(m_desktopWindow, nullptr, {x, y, static_cast<QC::u32>(w), static_cast<QC::u32>(h)});
+                btn->setContentMode(QW::ButtonContentMode::Icon);
+                btn->setVariant(QW::ButtonVariant::Icon);
 
                 if (hasText)
                     btn->setTooltipText(textAttr);
@@ -5983,7 +6257,7 @@ namespace QD
                         else
                         {
                             const char *warnId = idAttr[0] ? idAttr : "<unnamed>";
-                            QC_LOG_WARN(LOG_MODULE, "IconButton '%s' icon missing or failed to load '%s'", warnId, iconPath);
+                            QC_LOG_WARN(LOG_MODULE, "Icon button '%s' icon missing or failed to load '%s'", warnId, iconPath);
                         }
                     }
                 }
@@ -5995,12 +6269,26 @@ namespace QD
 
                 if (idAttr[0] && QC::String::strcmp(idAttr, "btnTerminal") == 0)
                 {
-                    btn->setClickHandler(onJsonTerminalIconClick, this);
+                    btn->setClickHandler(onJsonTerminalButtonClick, this);
+                }
+                else if (idAttr[0] && QC::String::strcmp(idAttr, "btnSettings") == 0)
+                {
+                    btn->setClickHandler(onJsonSettingsButtonClick, this);
+                }
+                else if ((idAttr[0] && QC::String::strcmp(idAttr, "btnCMMS") == 0) ||
+                         (actionAttr[0] && streqIgnoreCaseAscii(actionAttr, "cmms")))
+                {
+                    btn->setClickHandler(onJsonCMMSButtonClick, this);
+                    QC_LOG_INFO(LOG_MODULE,
+                                "CUI-ML: bound CMMS icon button id='%s' action='%s' at x=%d y=%d w=%d h=%d",
+                                idAttr[0] ? idAttr : "<none>",
+                                actionAttr[0] ? actionAttr : "<none>",
+                                x, y, w, h);
                 }
                 else if ((idAttr[0] && QC::String::strcmp(idAttr, "shutDownButton") == 0) ||
                          (actionAttr[0] && streqIgnoreCaseAscii(actionAttr, "shutdown")))
                 {
-                    btn->setClickHandler(onJsonShutdownIconClick, this);
+                    btn->setClickHandler(onJsonShutdownButtonClick, this);
                 }
 
                 created = btn;
@@ -6119,6 +6407,8 @@ namespace QD
 
             QW::Rect bounds = {helpX, 4, static_cast<QC::u32>(helpW), static_cast<QC::u32>(helpH)};
             auto *btn = new QW::Controls::Button(m_desktopWindow, "?", bounds);
+            btn->setContentMode(QW::ButtonContentMode::Text);
+            btn->setVariant(QW::ButtonVariant::Compact);
             btn->setClickHandler(onHelpClick, this);
 
             m_helpButton = btn;
@@ -6670,7 +6960,9 @@ namespace QD
             else if (QC::String::strcmp(type, "button") == 0)
             {
                 const char *text = stringOrNull(controlValue->find("text"));
+                const char *action = stringOrNull(controlValue->find("action"));
                 auto *button = new QW::Controls::Button(m_desktopWindow, text ? text : "", bounds);
+                button->setContentMode(QW::ButtonContentMode::Text);
 
                 button->setRole(roleForJsonButton(id, controlValue));
 
@@ -6678,6 +6970,11 @@ namespace QD
                 if (id && QC::String::strcmp(id, "btnTerminal") == 0)
                 {
                     button->setClickHandler(onJsonTerminalClick, this);
+                }
+                else if ((id && QC::String::strcmp(id, "btnCMMS") == 0) ||
+                         (action && equalsIgnoreCase(action, "cmms")))
+                {
+                    button->setClickHandler(onJsonCMMSClick, this);
                 }
                 else if (id && QC::String::strcmp(id, "shutDownButton") == 0)
                 {
@@ -6932,6 +7229,7 @@ namespace QD
         // Logo button (left)
         QW::Rect logoBounds = {8, 6, 20, 20};
         m_logoButton = new QW::Controls::Button(m_desktopWindow, "C", logoBounds);
+        m_logoButton->setContentMode(QW::ButtonContentMode::Text);
         m_logoButton->setRole(QW::ButtonRole::Accent);
         m_topBar->addChild(m_logoButton);
 
@@ -6987,6 +7285,7 @@ namespace QD
                 buttonHeight};
 
             m_sidebarButtons[i] = new QW::Controls::Button(m_desktopWindow, SIDEBAR_LABELS[i], btnBounds);
+            m_sidebarButtons[i]->setContentMode(QW::ButtonContentMode::Text);
             m_sidebarButtons[i]->setId(i + 100); // Use ID to identify which button
             m_sidebarButtons[i]->setClickHandler(onSidebarClick, this);
             m_sidebarButtons[i]->setRole(QW::ButtonRole::Sidebar);
@@ -7106,34 +7405,9 @@ namespace QD
 
     void Desktop::publishStyleSnapshot(const DesktopColors &colors)
     {
-        QW::StyleSnapshot::VistaThemeConfig config;
-        config.windowBackground = colors.windowBg;
-        config.windowBorder = colors.windowBorder;
-        config.sidebarBackground = colors.sidebarBg;
-        config.sidebarHover = colors.sidebarHover;
-        config.sidebarSelected = colors.sidebarSelected;
-        config.sidebarText = colors.sidebarText;
-        config.topBarDivider = colors.topBarDivider;
-        config.taskbarBackground = colors.taskbarBg;
-        config.taskbarHover = colors.taskbarHover;
-        config.taskbarText = colors.taskbarText;
-        config.taskbarActiveWindow = colors.taskbarActiveWindow;
-        config.desktopBackgroundTop = colors.bgTop;
-        config.desktopBackgroundBottom = colors.bgBottom;
-        config.windowShadow = colors.windowShadow;
-        config.accent = accent();
+        QW::StyleSnapshot snapshot = m_themeService.buildStyleSnapshot(colors, m_themeOverrides, accent());
 
-        QW::StyleSnapshot snapshot = QW::StyleSnapshot::makeVista(config);
-        applyThemeOverrides(snapshot);
-
-        // Apply theme font family (TTF/OTF) via VFS -> FontManager.
-        // Search: /system/fonts then /shared/fonts. Family maps to <family>.ttf|.otf.
-        const char *family = (m_themeOverrides.active && m_themeOverrides.font.familySet)
-                                 ? m_themeOverrides.font.family
-                                 : "System";
-        if (!family || !*family)
-            family = "System";
-
+        const char *family = m_themeService.resolvedFontFamily(m_themeOverrides);
         const bool familyChanged = !m_lastAppliedFontFamilySet || (QC::String::strcmp(m_lastAppliedFontFamily, family) != 0);
         if (familyChanged)
         {
@@ -7247,7 +7521,6 @@ namespace QD
 
         m_taskbarEntries[m_taskbarWindowCount].windowId = windowId;
         m_taskbarEntries[m_taskbarWindowCount].button = nullptr;
-        m_taskbarEntries[m_taskbarWindowCount].iconButton = nullptr;
         m_taskbarEntries[m_taskbarWindowCount].width = isTerminal ? kTaskbarIconSize : kTaskbarButtonWidth;
         m_taskbarEntries[m_taskbarWindowCount].height = kTaskbarEntryHeight;
         m_taskbarEntries[m_taskbarWindowCount].isActive = false;
@@ -7255,10 +7528,12 @@ namespace QD
         if (isTerminal)
         {
             QW::Rect btnBounds = {0, 0, kTaskbarIconSize, kTaskbarEntryHeight};
-            auto *btn = new QW::Controls::IconButton(m_desktopWindow, btnBounds);
+            auto *btn = new QW::Controls::Button(m_desktopWindow, nullptr, btnBounds);
+            btn->setContentMode(QW::ButtonContentMode::Icon);
+            btn->setVariant(QW::ButtonVariant::Icon);
             btn->setId(windowId);
             btn->setTooltipText(title);
-            btn->setClickHandler(onTaskbarIconClick, this);
+            btn->setClickHandler(onTaskbarIconButtonClick, this);
             btn->setRole(QW::ButtonRole::Taskbar);
 
             if (ImageAsset *asset = loadImageAsset("/system/icons/TERMINAL.PNG"))
@@ -7267,12 +7542,13 @@ namespace QD
             }
 
             m_taskbar->addChild(btn);
-            m_taskbarEntries[m_taskbarWindowCount].iconButton = btn;
+            m_taskbarEntries[m_taskbarWindowCount].button = btn;
         }
         else
         {
             QW::Rect btnBounds = {0, 0, kTaskbarButtonWidth, kTaskbarEntryHeight};
             auto *btn = new QW::Controls::Button(m_desktopWindow, title ? title : "Window", btnBounds);
+            btn->setContentMode(QW::ButtonContentMode::Text);
             btn->setId(windowId);
             btn->setClickHandler(onTaskbarClick, this);
             btn->setRole(QW::ButtonRole::Taskbar);
@@ -7303,11 +7579,6 @@ namespace QD
                     m_taskbar->removeChild(m_taskbarEntries[i].button);
                     delete m_taskbarEntries[i].button;
                 }
-                if (m_taskbar && m_taskbarEntries[i].iconButton)
-                {
-                    m_taskbar->removeChild(m_taskbarEntries[i].iconButton);
-                    delete m_taskbarEntries[i].iconButton;
-                }
 
                 // Shift remaining entries
                 for (QC::u32 j = i; j < m_taskbarWindowCount - 1; ++j)
@@ -7318,7 +7589,6 @@ namespace QD
                 --m_taskbarWindowCount;
                 m_taskbarEntries[m_taskbarWindowCount].windowId = 0;
                 m_taskbarEntries[m_taskbarWindowCount].button = nullptr;
-                m_taskbarEntries[m_taskbarWindowCount].iconButton = nullptr;
                 m_taskbarEntries[m_taskbarWindowCount].width = 0;
                 m_taskbarEntries[m_taskbarWindowCount].height = 0;
                 m_taskbarEntries[m_taskbarWindowCount].isActive = false;
@@ -7347,9 +7617,6 @@ namespace QD
             if (m_taskbarEntries[i].button)
                 m_taskbarEntries[i].button->setRole(isActive ? QW::ButtonRole::TaskbarActive
                                                              : QW::ButtonRole::Taskbar);
-            if (m_taskbarEntries[i].iconButton)
-                m_taskbarEntries[i].iconButton->setRole(isActive ? QW::ButtonRole::TaskbarActive
-                                                                 : QW::ButtonRole::Taskbar);
         }
     }
 
@@ -7370,8 +7637,6 @@ namespace QD
 
             if (m_taskbarEntries[i].button)
                 m_taskbarEntries[i].button->setBounds(b);
-            if (m_taskbarEntries[i].iconButton)
-                m_taskbarEntries[i].iconButton->setBounds(b);
 
             x += static_cast<QC::i32>(w + kGap);
         }
@@ -7492,6 +7757,13 @@ namespace QD
             {
                 desktop->toggleTerminal();
             }
+            else if (desktop->m_selectedSidebarItem == SidebarItem::Settings)
+            {
+                if (!QK::SecurityCenter::instance().ownerIsEnrolled())
+                    desktop->showSetupWizard();
+                else
+                    desktop->cycleThemeFromSettings();
+            }
             else if (desktop->m_selectedSidebarItem == SidebarItem::Power)
             {
                 QK::Event::EventManager::instance().postShutdownEvent(
@@ -7533,7 +7805,30 @@ namespace QD
             static_cast<QC::u32>(QK::Shutdown::Reason::UserRequest));
     }
 
-    void Desktop::onJsonTerminalIconClick(QW::Controls::IconButton *button, void *userData)
+    void Desktop::onJsonSettingsClick(QW::Controls::Button *button, void *userData)
+    {
+        (void)button;
+        if (!userData)
+            return;
+
+        Desktop *desktop = static_cast<Desktop *>(userData);
+        if (!QK::SecurityCenter::instance().ownerIsEnrolled())
+            desktop->showSetupWizard();
+        else
+            desktop->cycleThemeFromSettings();
+    }
+
+    void Desktop::onJsonCMMSClick(QW::Controls::Button *button, void *userData)
+    {
+        (void)button;
+        if (!userData)
+            return;
+
+        Desktop *desktop = static_cast<Desktop *>(userData);
+        desktop->openCMMS();
+    }
+
+    void Desktop::onJsonTerminalButtonClick(QW::Controls::Button *button, void *userData)
     {
         (void)button;
         if (!userData)
@@ -7543,7 +7838,7 @@ namespace QD
         desktop->toggleTerminal();
     }
 
-    void Desktop::onJsonShutdownIconClick(QW::Controls::IconButton *button, void *userData)
+    void Desktop::onJsonShutdownButtonClick(QW::Controls::Button *button, void *userData)
     {
         (void)button;
         (void)userData;
@@ -7551,6 +7846,29 @@ namespace QD
         QK::Event::EventManager::instance().postShutdownEvent(
             QK::Event::Type::ShutdownRequest,
             static_cast<QC::u32>(QK::Shutdown::Reason::UserRequest));
+    }
+
+    void Desktop::onJsonSettingsButtonClick(QW::Controls::Button *button, void *userData)
+    {
+        (void)button;
+        if (!userData)
+            return;
+
+        Desktop *desktop = static_cast<Desktop *>(userData);
+        if (!QK::SecurityCenter::instance().ownerIsEnrolled())
+            desktop->showSetupWizard();
+        else
+            desktop->cycleThemeFromSettings();
+    }
+
+    void Desktop::onJsonCMMSButtonClick(QW::Controls::Button *button, void *userData)
+    {
+        (void)button;
+        if (!userData)
+            return;
+
+        Desktop *desktop = static_cast<Desktop *>(userData);
+        desktop->openCMMS();
     }
 
     void Desktop::onTaskbarClick(QW::Controls::Button *button, void *userData)
@@ -7573,7 +7891,7 @@ namespace QD
         }
     }
 
-    void Desktop::onTaskbarIconClick(QW::Controls::IconButton *button, void *userData)
+    void Desktop::onTaskbarIconButtonClick(QW::Controls::Button *button, void *userData)
     {
         if (!button || !userData)
             return;

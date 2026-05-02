@@ -1,9 +1,21 @@
 #pragma once
 
+#include "QCGeometry.h"
 #include "QCTypes.h"
 
 namespace QDrv
 {
+    struct VmwareSVGAUpdateStats
+    {
+        QC::u32 updateRectCalls = 0;
+        QC::u32 updateRectsCalls = 0;
+        QC::u32 fifoSyncCount = 0;
+        QC::u32 fifoDropCount = 0;
+        QC::u32 queuedRectCount = 0;
+        QC::u32 lastBatchRectCount = 0;
+        QC::u32 lastSyncBusyValue = 0;
+    };
+
     class VmwareSVGA
     {
     public:
@@ -24,6 +36,8 @@ namespace QDrv
         QC::u32 width() const;
         QC::u32 height() const;
         QC::u32 bitsPerPixel() const;
+        const VmwareSVGAUpdateStats &updateStats() const { return m_updateStats; }
+        void resetUpdateStats();
 
         // Defines the hardware cursor image and hotspot (best-effort).
         // If unsupported/unavailable, this is a no-op.
@@ -37,6 +51,7 @@ namespace QDrv
 
         // SVGA2D commands (no-op if 2D FIFO is unavailable)
         void updateRect(QC::u32 x, QC::u32 y, QC::u32 w, QC::u32 h);
+        void updateRects(const QC::Rect *rects, QC::usize count);
         void rectCopy(QC::u32 srcX, QC::u32 srcY, QC::u32 dstX, QC::u32 dstY, QC::u32 w, QC::u32 h);
 
     private:
@@ -46,6 +61,8 @@ namespace QDrv
 
         QC::u32 readReg(QC::u32 reg) const;
         void writeReg(QC::u32 reg, QC::u32 value) const;
+        bool enqueueUpdateRect(QC::u32 x, QC::u32 y, QC::u32 w, QC::u32 h, QC::u32 sequence);
+        void kickFifoSync(QC::u32 expectedNextCmd, QC::u32 sequence) const;
 
         bool m_initialized;
         bool m_available;
@@ -60,5 +77,6 @@ namespace QDrv
         QC::u32 m_fifoSizeBytes;
 
         bool m_cursorDefined = false;
+        VmwareSVGAUpdateStats m_updateStats;
     };
 }

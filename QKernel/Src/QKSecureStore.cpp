@@ -332,6 +332,9 @@ namespace
 
     constexpr const char *kWrapKeyPlainName = "WRAPKEY.BIN";
     constexpr const char *kWrapKeyKdfName = "WRAPKEY.KDF";
+    constexpr const char *kDefaultHiddenBaseDir = "/system/.sc";
+    constexpr const char *kLegacyBaseDir = "/system/sc";
+    constexpr const char *kCompatBaseDir = "/system";
 
     constexpr QC::u8 kWrapKeyKdfMagic[4] = {'W', 'K', 'D', '1'};
     constexpr QC::u32 kWrapKeyKdfVersion = 1;
@@ -339,6 +342,31 @@ namespace
 
     static bool g_nonTpmDerivedKeySet = false;
     static QC::u8 g_nonTpmDerivedKey[32];
+
+    static bool isDefaultHiddenBaseDir(const char *baseDir)
+    {
+        return baseDir && QC::String::strcmp(baseDir, kDefaultHiddenBaseDir) == 0;
+    }
+
+    static const char *resolveBaseDirForPath(const QK::SecureStore::Config &cfg)
+    {
+        const char *baseDir = cfg.baseDir ? cfg.baseDir : kDefaultHiddenBaseDir;
+        if (!isDefaultHiddenBaseDir(baseDir))
+            return baseDir;
+
+        QFS::FileInfo info;
+        QFS::VFS &vfs = QFS::VFS::instance();
+        if (vfs.stat(baseDir, &info) == QC::Status::Success && info.type == QFS::FileType::Directory)
+            return baseDir;
+
+        if (vfs.stat(kLegacyBaseDir, &info) == QC::Status::Success && info.type == QFS::FileType::Directory)
+            return kLegacyBaseDir;
+
+        if (vfs.stat(kCompatBaseDir, &info) == QC::Status::Success && info.type == QFS::FileType::Directory)
+            return kCompatBaseDir;
+
+        return baseDir;
+    }
 
     static void hmacSha256(const QC::u8 *key, QC::usize keyLen,
                            const QC::u8 *data, QC::usize dataLen,
@@ -904,7 +932,7 @@ namespace QK
     namespace SecureStore
     {
 
-        static Config g_defaultCfg = Config{.baseDir = "/system/.sc"};
+        static Config g_defaultCfg = Config{.baseDir = kDefaultHiddenBaseDir};
 
         Config defaultConfig()
         {
@@ -920,14 +948,32 @@ namespace QK
         {
             g_defaultCfg = cfg;
             if (!g_defaultCfg.baseDir)
-                g_defaultCfg.baseDir = "/system/.sc";
+                g_defaultCfg.baseDir = kDefaultHiddenBaseDir;
         }
 
         QC::Status ensureBaseDir(const Config &cfg)
         {
-            if (!cfg.baseDir)
-                return QC::Status::InvalidParam;
-            return ensureDirRecursive(cfg.baseDir);
+            const char *baseDir = cfg.baseDir ? cfg.baseDir : kDefaultHiddenBaseDir;
+            QC::Status st = ensureDirRecursive(baseDir);
+            if (st == QC::Status::NotSupported && isDefaultHiddenBaseDir(baseDir))
+            {
+                const QC::Status legacySt = ensureDirRecursive(kLegacyBaseDir);
+                if (legacySt == QC::Status::Success)
+                    return QC::Status::Success;
+
+                if (legacySt == QC::Status::NotSupported)
+                {
+                    QFS::FileInfo info;
+                    if (QFS::VFS::instance().stat(kCompatBaseDir, &info) == QC::Status::Success &&
+                        info.type == QFS::FileType::Directory)
+                    {
+                        return QC::Status::Success;
+                    }
+                }
+
+                return legacySt;
+            }
+            return st;
         }
 
         QC::Status writeBlob(const char *key, const void *data, QC::usize size, const Config &cfg)
@@ -939,8 +985,9 @@ namespace QK
             if (st != QC::Status::Success)
                 return st;
 
+            const char *baseDir = resolveBaseDirForPath(cfg);
             char path[256];
-            st = buildPath(path, sizeof(path), cfg.baseDir, key);
+            st = buildPath(path, sizeof(path), baseDir, key);
             if (st != QC::Status::Success)
                 return st;
 
@@ -960,8 +1007,9 @@ namespace QK
             if (!isValid83Key(key))
                 return QC::Status::InvalidParam;
 
+            const char *baseDir = resolveBaseDirForPath(cfg);
             char path[256];
-            QC::Status st = buildPath(path, sizeof(path), cfg.baseDir, key);
+            QC::Status st = buildPath(path, sizeof(path), baseDir, key);
             if (st != QC::Status::Success)
                 return st;
 
@@ -970,10 +1018,10 @@ namespace QK
             if (!file)
             {
                 // Compatibility path: attempt legacy non-hidden SC storage location.
-                if (cfg.baseDir && QC::String::strcmp(cfg.baseDir, "/system/.sc") == 0)
+                if (isDefaultHiddenBaseDir(baseDir))
                 {
                     char legacyPath[256];
-                    if (buildPath(legacyPath, sizeof(legacyPath), "/system/sc", key) == QC::Status::Success)
+                    if (buildPath(legacyPath, sizeof(legacyPath), kLegacyBaseDir, key) == QC::Status::Success)
                         file = vfs.open(legacyPath, QFS::OpenMode::Read);
                 }
                 if (!file)
@@ -1560,12 +1608,20 @@ namespace QK
             if (!isValid83Key(key))
                 return QC::Status::InvalidParam;
 
+            const char *baseDir = resolveBaseDirForPath(cfg);
             char path[256];
-            QC::Status st = buildPath(path, sizeof(path), cfg.baseDir, key);
+            QC::Status st = buildPath(path, sizeof(path), baseDir, key);
             if (st != QC::Status::Success)
                 return st;
 
-            return QFS::VFS::instance().remove(path);
+            st = QFS::VFS::instance().remove(path);
+            if (st == QC::Status::NotFound && isDefaultHiddenBaseDir(baseDir))
+            {
+                char legacyPath[256];
+                if (buildPath(legacyPath, sizeof(legacyPath), kLegacyBaseDir, key) == QC::Status::Success)
+                    return QFS::VFS::instance().remove(legacyPath);
+            }
+            return st;
         }
 
         bool exists(const char *key, const Config &cfg)
@@ -1573,17 +1629,18 @@ namespace QK
             if (!isValid83Key(key))
                 return false;
 
+            const char *baseDir = resolveBaseDirForPath(cfg);
             char path[256];
-            if (buildPath(path, sizeof(path), cfg.baseDir, key) != QC::Status::Success)
+            if (buildPath(path, sizeof(path), baseDir, key) != QC::Status::Success)
                 return false;
 
             if (QFS::VFS::instance().exists(path))
                 return true;
 
-            if (cfg.baseDir && QC::String::strcmp(cfg.baseDir, "/system/.sc") == 0)
+            if (isDefaultHiddenBaseDir(baseDir))
             {
                 char legacyPath[256];
-                if (buildPath(legacyPath, sizeof(legacyPath), "/system/sc", key) == QC::Status::Success)
+                if (buildPath(legacyPath, sizeof(legacyPath), kLegacyBaseDir, key) == QC::Status::Success)
                     return QFS::VFS::instance().exists(legacyPath);
             }
 

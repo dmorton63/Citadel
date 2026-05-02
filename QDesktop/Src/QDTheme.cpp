@@ -12,6 +12,28 @@ namespace QD
     {
         constexpr const char *LOG_MODULE = "QDTheme";
 
+        bool equalsIgnoreCase(const char *a, const char *b)
+        {
+            if (!a || !b)
+                return false;
+
+            while (*a && *b)
+            {
+                char ca = *a;
+                char cb = *b;
+                if (ca >= 'A' && ca <= 'Z')
+                    ca = static_cast<char>(ca - 'A' + 'a');
+                if (cb >= 'A' && cb <= 'Z')
+                    cb = static_cast<char>(cb - 'A' + 'a');
+                if (ca != cb)
+                    return false;
+                ++a;
+                ++b;
+            }
+
+            return *a == '\0' && *b == '\0';
+        }
+
         inline void copyString(char *dest, QC::usize destSize, const char *source)
         {
             if (!dest || destSize == 0)
@@ -309,6 +331,73 @@ namespace QD
         bool result = loadThemeFromJsonString(owned, outTheme);
         operator delete[](owned);
         return result;
+    }
+
+    const char *themeIdToString(ThemeID id)
+    {
+        switch (id)
+        {
+        case ThemeID::Default:
+            return "default";
+        case ThemeID::Standard:
+            return "standard";
+        case ThemeID::Winter:
+            return "winter";
+        case ThemeID::Spring:
+            return "spring";
+        case ThemeID::Summer:
+            return "summer";
+        case ThemeID::Autumn:
+            return "autumn";
+        case ThemeID::Midnight:
+            return "midnight";
+        case ThemeID::HighContrast:
+            return "highcontrast";
+        case ThemeID::Custom:
+            return "custom";
+        case ThemeID::Count:
+            break;
+        }
+
+        return "default";
+    }
+
+    bool themeIdFromString(const char *text, ThemeID *outId)
+    {
+        if (!text || !*text)
+            return false;
+
+        struct Mapping
+        {
+            const char *name;
+            ThemeID id;
+        };
+
+        static const Mapping kMappings[] = {
+            {"default", ThemeID::Default},
+            {"standard", ThemeID::Standard},
+            {"winter", ThemeID::Winter},
+            {"spring", ThemeID::Spring},
+            {"summer", ThemeID::Summer},
+            {"autumn", ThemeID::Autumn},
+            {"fall", ThemeID::Autumn},
+            {"midnight", ThemeID::Midnight},
+            {"highcontrast", ThemeID::HighContrast},
+            {"high-contrast", ThemeID::HighContrast},
+            {"custom", ThemeID::Custom},
+        };
+
+        for (const auto &entry : kMappings)
+        {
+            if (equalsIgnoreCase(text, entry.name))
+            {
+                if (outId)
+                    *outId = entry.id;
+                return true;
+            }
+        }
+
+        return false;
     }
 
 } // namespace QD

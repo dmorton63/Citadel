@@ -1,5 +1,7 @@
 #include "QKImageReader.h"
 
+#include "QKImagePipeline.h"
+
 #include "QFSFile.h"
 #include "QFSVFS.h"
 #include "QCString.h"
@@ -200,11 +202,160 @@ namespace QK::ImageReader
 
             return false;
         }
+
+        static void surfaceToRgbaBytes(const QG::ImageSurface &surface, ImageContext &ctx)
+        {
+            ctx.width = surface.width;
+            ctx.height = surface.height;
+            ctx.channels = 4;
+            ctx.pixels.resize(static_cast<QC::usize>(surface.width) * static_cast<QC::usize>(surface.height) * 4);
+
+            QC::usize di = 0;
+            for (QC::usize i = 0; i < surface.pixels.size() && (di + 3) < ctx.pixels.size(); ++i)
+            {
+                const QC::u32 argb = surface.pixels[i];
+                ctx.pixels[di++] = static_cast<QC::u8>((argb >> 16) & 0xFF); // R
+                ctx.pixels[di++] = static_cast<QC::u8>((argb >> 8) & 0xFF);  // G
+                ctx.pixels[di++] = static_cast<QC::u8>(argb & 0xFF);         // B
+                ctx.pixels[di++] = static_cast<QC::u8>((argb >> 24) & 0xFF); // A
+            }
+        }
+
+        static bool rgbaBytesToSurface(const ImageContext &ctx, QG::ImageSurface &surface)
+        {
+            if (ctx.width == 0 || ctx.height == 0 || ctx.channels != 4)
+                return false;
+            const QC::usize need = static_cast<QC::usize>(ctx.width) * static_cast<QC::usize>(ctx.height) * 4;
+            if (ctx.pixels.size() < need)
+                return false;
+
+            surface.reset();
+            surface.width = ctx.width;
+            surface.height = ctx.height;
+            surface.pixels.resize(static_cast<QC::usize>(ctx.width) * static_cast<QC::usize>(ctx.height));
+
+            QC::usize si = 0;
+            for (QC::usize i = 0; i < surface.pixels.size() && (si + 3) < ctx.pixels.size(); ++i)
+            {
+                const QC::u8 r = ctx.pixels[si++];
+                const QC::u8 g = ctx.pixels[si++];
+                const QC::u8 b = ctx.pixels[si++];
+                const QC::u8 a = ctx.pixels[si++];
+                surface.pixels[i] = (static_cast<QC::u32>(a) << 24) |
+                                    (static_cast<QC::u32>(r) << 16) |
+                                    (static_cast<QC::u32>(g) << 8) |
+                                    static_cast<QC::u32>(b);
+            }
+            return true;
+        }
+
+        class PngDecodeModule final : public IMGModule
+        {
+        public:
+            const char *name() const override { return "img.png"; }
+            bool supportsVerb(const char *verb) const override { return verb && QC::String::strcmp(verb, "decode") == 0; }
+            QC::Status runVerb(const ImagePipelineVerb &, ImageContext &ctx) override
+            {
+                QC::Vector<QC::u8> bytes;
+                bytes.resize(ctx.inputSize);
+                if (ctx.inputSize)
+                    QC::String::memcpy(bytes.data(), ctx.input, ctx.inputSize);
+
+                QG::ImageSurface surf;
+                if (!QG::decodePNG(bytes, surf))
+                    return QC::Status::Error;
+                surfaceToRgbaBytes(surf, ctx);
+                return QC::Status::Success;
+            }
+        };
+
+        class BmpDecodeModule final : public IMGModule
+        {
+        public:
+            const char *name() const override { return "img.bmp"; }
+            bool supportsVerb(const char *verb) const override { return verb && QC::String::strcmp(verb, "decode") == 0; }
+            QC::Status runVerb(const ImagePipelineVerb &, ImageContext &ctx) override
+            {
+                QC::Vector<QC::u8> bytes;
+                bytes.resize(ctx.inputSize);
+                if (ctx.inputSize)
+                    QC::String::memcpy(bytes.data(), ctx.input, ctx.inputSize);
+
+                QG::ImageSurface surf;
+                if (!decodeBmp(bytes, surf))
+                    return QC::Status::Error;
+                surfaceToRgbaBytes(surf, ctx);
+                return QC::Status::Success;
+            }
+        };
+
+        class IcoDecodeModule final : public IMGModule
+        {
+        public:
+            const char *name() const override { return "img.ico"; }
+            bool supportsVerb(const char *verb) const override { return verb && QC::String::strcmp(verb, "decode") == 0; }
+            QC::Status runVerb(const ImagePipelineVerb &, ImageContext &ctx) override
+            {
+                QC::Vector<QC::u8> bytes;
+                bytes.resize(ctx.inputSize);
+                if (ctx.inputSize)
+                    QC::String::memcpy(bytes.data(), ctx.input, ctx.inputSize);
+
+                QG::ImageSurface surf;
+                if (!decodeIco(bytes, surf))
+                    return QC::Status::Error;
+                surfaceToRgbaBytes(surf, ctx);
+                return QC::Status::Success;
+            }
+        };
+
+        static void registerBuiltinPipelineModules()
+        {
+            static bool registered = false;
+            if (registered)
+                return;
+
+            static PngDecodeModule s_png;
+            static BmpDecodeModule s_bmp;
+            static IcoDecodeModule s_ico;
+
+            (void)ImagePipelineDispatcher::instance().registerModule(&s_png);
+            (void)ImagePipelineDispatcher::instance().registerModule(&s_bmp);
+            (void)ImagePipelineDispatcher::instance().registerModule(&s_ico);
+            registered = true;
+        }
+
+        static QC::Status decodeViaPipeline(const QC::Vector<QC::u8> &bytes,
+                                            const char *moduleName,
+                                            QG::ImageSurface &outSurface)
+        {
+            if (!moduleName || !moduleName[0])
+                return QC::Status::InvalidParam;
+
+            ImageFormatDescriptor desc{};
+            QC::String::strncpy(desc.module, moduleName, sizeof(desc.module) - 1);
+            ImagePipelineVerb v{};
+            QC::String::strncpy(v.name, "decode", sizeof(v.name) - 1);
+            desc.verbs.push_back(v);
+
+            ImageContext ctx{};
+            ctx.input = bytes.data();
+            ctx.inputSize = bytes.size();
+
+            const QC::Status st = ImagePipelineDispatcher::instance().dispatch(desc, ctx);
+            if (st != QC::Status::Success)
+                return st;
+            if (!rgbaBytesToSurface(ctx, outSurface))
+                return QC::Status::Error;
+            return QC::Status::Success;
+        }
     }
 
     QC::Status loadAsset(const char *path, LoadResult &out)
     {
         out = {};
+
+        registerBuiltinPipelineModules();
 
         QC::Vector<QC::u8> bytes;
         if (!readAll(path, bytes))
@@ -216,7 +367,7 @@ namespace QK::ImageReader
 
         if (isPng)
         {
-            if (!QG::decodePNG(bytes, out.surface))
+            if (decodeViaPipeline(bytes, "img.png", out.surface) != QC::Status::Success)
                 return QC::Status::Error;
             out.format = Format::PNG;
             return QC::Status::Success;
@@ -224,7 +375,7 @@ namespace QK::ImageReader
 
         if (isBmp)
         {
-            if (!decodeBmp(bytes, out.surface))
+            if (decodeViaPipeline(bytes, "img.bmp", out.surface) != QC::Status::Success)
                 return QC::Status::Error;
             out.format = Format::BMP;
             return QC::Status::Success;
@@ -232,7 +383,7 @@ namespace QK::ImageReader
 
         if (isIco)
         {
-            if (!decodeIco(bytes, out.surface))
+            if (decodeViaPipeline(bytes, "img.ico", out.surface) != QC::Status::Success)
                 return QC::Status::Error;
             out.format = Format::ICO;
             return QC::Status::Success;

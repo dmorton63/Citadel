@@ -11,6 +11,7 @@
 #include "QKCommandCenter.h"
 
 #include "QKSystemVolumeCommands.h"
+#include "QKDrvManager.h"
 
 #include "Debug/Framebuffer/QKDebugFramebufferText.h"
 
@@ -1273,10 +1274,10 @@ namespace QK
 
             while (!g_captureReady)
             {
-                if (QArch::CPU::instance().interruptsEnabled())
-                    QArch::CPU::instance().halt();
-                else
-                    cpu_relax();
+                // USB keyboards are serviced by driver polling; without this,
+                // pre-desktop blocking prompts can appear to ignore input.
+                QKDrv::Manager::instance().poll();
+                cpu_relax();
             }
 
             QC::String::strncpy(out, g_captureLine, outSize - 1);

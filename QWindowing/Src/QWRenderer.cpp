@@ -121,17 +121,80 @@ namespace QW
 
     void Renderer::drawHLine(QC::i32 x, QC::i32 y, QC::u32 length, Color color)
     {
-        for (QC::u32 i = 0; i < length; ++i)
+        if (length == 0 || color.a == 0 || !m_buffer)
+            return;
+
+        const Rect clip = m_hasClipRect ? m_clipRect : Rect{0, 0, m_width, m_height};
+
+        if (y < clip.y || y >= clip.y + static_cast<QC::i32>(clip.height))
+            return;
+
+        QC::i32 x1 = x;
+        QC::i32 x2 = x + static_cast<QC::i32>(length) - 1;
+        const QC::i32 cx1 = clip.x;
+        const QC::i32 cx2 = clip.x + static_cast<QC::i32>(clip.width) - 1;
+        if (x1 < cx1) x1 = cx1;
+        if (x2 > cx2) x2 = cx2;
+        if (x1 > x2)
+            return;
+
+        QC::u32 *row = reinterpret_cast<QC::u32 *>(
+            reinterpret_cast<QC::u8 *>(m_buffer) + y * m_pitch);
+
+        if (color.a == 255)
         {
-            setPixel(x + static_cast<QC::i32>(i), y, color);
+            for (QC::i32 px = x1; px <= x2; ++px)
+                row[px] = color.value;
+        }
+        else
+        {
+            for (QC::i32 px = x1; px <= x2; ++px)
+            {
+                Color dst;
+                dst.value = row[px];
+                row[px] = color.blend(dst).value;
+            }
         }
     }
 
     void Renderer::drawVLine(QC::i32 x, QC::i32 y, QC::u32 length, Color color)
     {
-        for (QC::u32 i = 0; i < length; ++i)
+        if (length == 0 || color.a == 0 || !m_buffer)
+            return;
+
+        const Rect clip = m_hasClipRect ? m_clipRect : Rect{0, 0, m_width, m_height};
+
+        if (x < clip.x || x >= clip.x + static_cast<QC::i32>(clip.width))
+            return;
+
+        QC::i32 y1 = y;
+        QC::i32 y2 = y + static_cast<QC::i32>(length) - 1;
+        const QC::i32 cy1 = clip.y;
+        const QC::i32 cy2 = clip.y + static_cast<QC::i32>(clip.height) - 1;
+        if (y1 < cy1) y1 = cy1;
+        if (y2 > cy2) y2 = cy2;
+        if (y1 > y2)
+            return;
+
+        if (color.a == 255)
         {
-            setPixel(x, y + static_cast<QC::i32>(i), color);
+            for (QC::i32 py = y1; py <= y2; ++py)
+            {
+                QC::u32 *row = reinterpret_cast<QC::u32 *>(
+                    reinterpret_cast<QC::u8 *>(m_buffer) + py * m_pitch);
+                row[x] = color.value;
+            }
+        }
+        else
+        {
+            for (QC::i32 py = y1; py <= y2; ++py)
+            {
+                QC::u32 *row = reinterpret_cast<QC::u32 *>(
+                    reinterpret_cast<QC::u8 *>(m_buffer) + py * m_pitch);
+                Color dst;
+                dst.value = row[x];
+                row[x] = color.blend(dst).value;
+            }
         }
     }
 
@@ -240,11 +303,50 @@ namespace QW
 
     void Renderer::fillTriangle(Point p1, Point p2, Point p3, Color color)
     {
-        (void)p1;
-        (void)p2;
-        (void)p3;
-        (void)color;
-        // TODO: Implement triangle fill with scanline algorithm
+        if (color.a == 0)
+            return;
+
+        // Sort p1 <= p2 <= p3 by y
+        if (p2.y < p1.y) { Point t = p1; p1 = p2; p2 = t; }
+        if (p3.y < p1.y) { Point t = p1; p1 = p3; p3 = t; }
+        if (p3.y < p2.y) { Point t = p2; p2 = p3; p3 = t; }
+
+        const QC::i32 totalH = p3.y - p1.y;
+        if (totalH == 0)
+        {
+            // Degenerate: all on same row
+            QC::i32 xL = p1.x < p2.x ? p1.x : p2.x;
+            QC::i32 xR = p1.x > p2.x ? p1.x : p2.x;
+            if (p3.x < xL) xL = p3.x;
+            if (p3.x > xR) xR = p3.x;
+            if (xL <= xR)
+                drawHLine(xL, p1.y, static_cast<QC::u32>(xR - xL + 1), color);
+            return;
+        }
+
+        for (QC::i32 y = p1.y; y <= p3.y; ++y)
+        {
+            const QC::i32 dy13 = y - p1.y;
+            // x on the long edge p1->p3
+            const QC::i32 xa = p1.x + (p3.x - p1.x) * dy13 / totalH;
+
+            QC::i32 xb;
+            if (y <= p2.y)
+            {
+                const QC::i32 seg = p2.y - p1.y;
+                xb = (seg == 0) ? p2.x : p1.x + (p2.x - p1.x) * (y - p1.y) / seg;
+            }
+            else
+            {
+                const QC::i32 seg = p3.y - p2.y;
+                xb = (seg == 0) ? p3.x : p2.x + (p3.x - p2.x) * (y - p2.y) / seg;
+            }
+
+            const QC::i32 xL = xa < xb ? xa : xb;
+            const QC::i32 xR = xa < xb ? xb : xa;
+            if (xL <= xR)
+                drawHLine(xL, y, static_cast<QC::u32>(xR - xL + 1), color);
+        }
     }
 
     void Renderer::drawChar(QC::i32 x, QC::i32 y, char c, Color color)

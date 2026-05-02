@@ -17,6 +17,7 @@ add_library(QWindowing STATIC
 target_include_directories(QWindowing PUBLIC Include)
 target_link_libraries(QWindowing PUBLIC
     QCommon
+    QGfx
     QGraphics
     QDrivers
     QEvent

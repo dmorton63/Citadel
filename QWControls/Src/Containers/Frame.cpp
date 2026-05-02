@@ -8,65 +8,65 @@ namespace QW
     namespace Controls
     {
         FrameColors::FrameColors()
-            : background(Color(240, 240, 240, 255)),
-              backgroundEnd(Color(220, 220, 220, 255)),
-              borderLight(Color(255, 255, 255, 255)),
-              borderDark(Color(100, 100, 100, 255)),
-              borderMid(Color(160, 160, 160, 255)),
-              shadow(Color(0, 0, 0, 80)),
-              glow(Color(0, 120, 215, 128))
+                        : background(Color::windowBackground()),
+                            backgroundEnd(Color::windowBackground().darker(0.08f)),
+                            borderLight(Color::white()),
+                            borderDark(Color::buttonShadow().darker(0.25f)),
+                            borderMid(Color::buttonShadow()),
+              shadow(Color::black().withAlpha(80)),
+                            glow(Color::activeCaption().withAlpha(128))
         {
         }
 
         FrameColors FrameColors::defaultColors()
         {
             FrameColors c;
-            c.background = Color(240, 240, 240, 255);
-            c.backgroundEnd = Color(220, 220, 220, 255);
-            c.borderLight = Color(255, 255, 255, 255);
-            c.borderDark = Color(100, 100, 100, 255);
-            c.borderMid = Color(160, 160, 160, 255);
-            c.shadow = Color(0, 0, 0, 80);
-            c.glow = Color(0, 120, 215, 128);
+            c.background = Color::windowBackground();
+            c.backgroundEnd = Color::windowBackground().darker(0.08f);
+            c.borderLight = Color::white();
+            c.borderDark = Color::buttonShadow().darker(0.25f);
+            c.borderMid = Color::buttonShadow();
+            c.shadow = Color::black().withAlpha(80);
+            c.glow = Color::activeCaption().withAlpha(128);
             return c;
         }
 
         FrameColors FrameColors::vistaColors()
         {
             FrameColors c;
-            c.background = Color(245, 246, 247, 255);
-            c.backgroundEnd = Color(225, 226, 227, 255);
-            c.borderLight = Color(255, 255, 255, 255);
-            c.borderDark = Color(112, 112, 112, 255);
-            c.borderMid = Color(174, 179, 185, 255);
-            c.shadow = Color(0, 0, 0, 60);
-            c.glow = Color(60, 127, 177, 180);
+            c.background = Color::windowBackground().lighter(0.02f);
+            c.backgroundEnd = Color::windowBackground().darker(0.06f);
+            c.borderLight = Color::white();
+            c.borderDark = Color::buttonShadow().darker(0.2f);
+            c.borderMid = Color::buttonShadow().lighter(0.08f);
+            c.shadow = Color::black().withAlpha(60);
+            c.glow = Color::activeCaption().withAlpha(180);
             return c;
         }
 
         FrameColors FrameColors::darkColors()
         {
             FrameColors c;
-            c.background = Color(45, 45, 48, 255);
-            c.backgroundEnd = Color(30, 30, 30, 255);
-            c.borderLight = Color(70, 70, 70, 255);
-            c.borderDark = Color(20, 20, 20, 255);
-            c.borderMid = Color(63, 63, 70, 255);
-            c.shadow = Color(0, 0, 0, 120);
-            c.glow = Color(0, 122, 204, 180);
+            c.background = Color::windowBackground().darker(0.65f);
+            c.backgroundEnd = Color::windowBackground().darker(0.78f);
+            c.borderLight = Color::windowBackground().darker(0.55f);
+            c.borderDark = Color::windowBackground().darker(0.86f);
+            c.borderMid = Color::windowBackground().darker(0.62f);
+            c.shadow = Color::black().withAlpha(120);
+            c.glow = Color::activeCaption().withAlpha(180);
             return c;
         }
 
         FrameColors FrameColors::lightColors()
         {
             FrameColors c;
-            c.background = Color(255, 255, 255, 255);
-            c.backgroundEnd = Color(245, 245, 245, 255);
-            c.borderLight = Color(255, 255, 255, 255);
-            c.borderDark = Color(180, 180, 180, 255);
-            c.borderMid = Color(200, 200, 200, 255);
-            c.shadow = Color(0, 0, 0, 40);
-            c.glow = Color(0, 120, 215, 100);
+            c.background = Color::windowBackground().lighter(0.06f);
+            c.backgroundEnd = Color::windowBackground();
+            c.borderLight = Color::white();
+            c.borderDark = Color::buttonShadow().lighter(0.12f);
+            c.borderMid = Color::buttonShadow().lighter(0.28f);
+            c.shadow = Color::black().withAlpha(40);
+            c.glow = Color::activeCaption().withAlpha(100);
             return c;
         }
 

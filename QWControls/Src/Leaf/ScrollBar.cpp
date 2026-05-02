@@ -3,12 +3,69 @@
 
 #include "QWControls/Leaf/ScrollBar.h"
 #include "QWWindow.h"
+#include "QWStyleRenderer.h"
 #include "QGPainter.h"
 
 namespace QW
 {
     namespace Controls
     {
+        namespace
+        {
+            struct ScrollBarResolvedColors
+            {
+                Color track;
+                Color thumb;
+                Color thumbPressed;
+                Color arrow;
+                Color background;
+                Color border;
+            };
+
+            ScrollBarResolvedColors resolveColors(const PaintContext &context,
+                                                  bool hasTrackOverride,
+                                                  Color trackOverride,
+                                                  bool hasThumbOverride,
+                                                  Color thumbOverride,
+                                                  bool hasArrowOverride,
+                                                  Color arrowOverride,
+                                                  bool hasBackgroundOverride,
+                                                  Color backgroundOverride)
+            {
+                ScrollBarResolvedColors colors{};
+
+                if (const StyleSnapshot *snapshot = context.styleRenderer ? context.styleRenderer->styleSnapshot() : nullptr)
+                {
+                    colors.track = hasTrackOverride ? trackOverride : snapshot->palette.panelBackground.darker(0.06f);
+                    colors.thumb = hasThumbOverride ? thumbOverride : snapshot->palette.buttonFace;
+                    colors.thumbPressed = colors.thumb.darker(0.15f);
+                    colors.arrow = hasArrowOverride ? arrowOverride : snapshot->palette.controlText.withAlpha(220);
+                    colors.background = hasBackgroundOverride ? backgroundOverride : snapshot->palette.panelBackground;
+                    colors.border = snapshot->palette.windowBorderInactive;
+                    return colors;
+                }
+
+                colors.track = Color::windowBackground().darker(0.06f);
+                colors.thumb = Color::buttonFace();
+                colors.arrow = Color::controlText().withAlpha(220);
+                colors.background = Color::windowBackground();
+                colors.border = Color::buttonShadow();
+
+                colors.thumbPressed = colors.thumb.darker(0.15f);
+                if (hasTrackOverride)
+                    colors.track = trackOverride;
+                if (hasThumbOverride)
+                {
+                    colors.thumb = thumbOverride;
+                    colors.thumbPressed = thumbOverride.darker(0.15f);
+                }
+                if (hasArrowOverride)
+                    colors.arrow = arrowOverride;
+                if (hasBackgroundOverride)
+                    colors.background = backgroundOverride;
+                return colors;
+            }
+        }
 
         ScrollBar::ScrollBar()
             : ControlBase(),
@@ -20,9 +77,13 @@ namespace QW
               m_smallStep(1),
               m_largeStep(10),
               m_minThumbSize(16),
-              m_trackColor(Color(220, 220, 220, 255)),
-              m_thumbColor(Color(180, 180, 180, 255)),
-              m_arrowColor(Color(100, 100, 100, 255)),
+              m_trackColor(Color::windowBackground().darker(0.06f)),
+              m_thumbColor(Color::buttonFace()),
+              m_arrowColor(Color::controlText()),
+              m_hasTrackColorOverride(false),
+              m_hasThumbColorOverride(false),
+              m_hasArrowColorOverride(false),
+              m_hasBackgroundColorOverride(false),
               m_changeHandler(nullptr),
               m_changeUserData(nullptr),
               m_dragging(false),
@@ -30,7 +91,7 @@ namespace QW
               m_pressedArea(HitArea::None),
               m_clickToMax(false)
         {
-            m_bgColor = Color(240, 240, 240, 255);
+                        m_bgColor = Color::windowBackground();
         }
 
         ScrollBar::ScrollBar(Window *window, Rect bounds, ScrollOrientation orientation)
@@ -43,9 +104,13 @@ namespace QW
               m_smallStep(1),
               m_largeStep(10),
               m_minThumbSize(16),
-              m_trackColor(Color(220, 220, 220, 255)),
-              m_thumbColor(Color(180, 180, 180, 255)),
-              m_arrowColor(Color(100, 100, 100, 255)),
+              m_trackColor(Color::windowBackground().darker(0.06f)),
+              m_thumbColor(Color::buttonFace()),
+              m_arrowColor(Color::controlText()),
+              m_hasTrackColorOverride(false),
+              m_hasThumbColorOverride(false),
+              m_hasArrowColorOverride(false),
+              m_hasBackgroundColorOverride(false),
               m_changeHandler(nullptr),
               m_changeUserData(nullptr),
               m_dragging(false),
@@ -53,11 +118,39 @@ namespace QW
               m_pressedArea(HitArea::None),
               m_clickToMax(false)
         {
-            m_bgColor = Color(240, 240, 240, 255);
+                        m_bgColor = Color::windowBackground();
         }
 
         ScrollBar::~ScrollBar()
         {
+        }
+
+        void ScrollBar::setTrackColor(Color color)
+        {
+            m_trackColor = color;
+            m_hasTrackColorOverride = true;
+            invalidate();
+        }
+
+        void ScrollBar::setThumbColor(Color color)
+        {
+            m_thumbColor = color;
+            m_hasThumbColorOverride = true;
+            invalidate();
+        }
+
+        void ScrollBar::setArrowColor(Color color)
+        {
+            m_arrowColor = color;
+            m_hasArrowColorOverride = true;
+            invalidate();
+        }
+
+        void ScrollBar::setBackgroundColor(Color color)
+        {
+            m_bgColor = color;
+            m_hasBackgroundColorOverride = true;
+            invalidate();
         }
 
         void ScrollBar::setOrientation(ScrollOrientation orientation)
@@ -118,28 +211,37 @@ namespace QW
 
             Rect abs = absoluteBounds();
             auto *painter = context.painter;
+            const ScrollBarResolvedColors colors = resolveColors(context,
+                                                                 m_hasTrackColorOverride,
+                                                                 m_trackColor,
+                                                                 m_hasThumbColorOverride,
+                                                                 m_thumbColor,
+                                                                 m_hasArrowColorOverride,
+                                                                 m_arrowColor,
+                                                                 m_hasBackgroundColorOverride,
+                                                                 m_bgColor);
 
-            painter->fillRect(abs, m_bgColor);
+            painter->fillRect(abs, colors.background);
 
             Rect trackRect = calculateTrackRect();
-            painter->fillRect(trackRect, m_trackColor);
+            painter->fillRect(trackRect, colors.track);
 
             Rect arrowUp = calculateArrowUpRect();
             Rect arrowDown = calculateArrowDownRect();
-            painter->fillRect(arrowUp, m_bgColor);
-            painter->fillRect(arrowDown, m_bgColor);
-            painter->drawRect(arrowUp, m_arrowColor);
-            painter->drawRect(arrowDown, m_arrowColor);
+            painter->fillRect(arrowUp, colors.background);
+            painter->fillRect(arrowDown, colors.background);
+            painter->drawRect(arrowUp, colors.arrow);
+            painter->drawRect(arrowDown, colors.arrow);
 
             Rect thumbRect = calculateThumbRect();
-            Color thumbDrawColor = m_thumbColor;
+            Color thumbDrawColor = colors.thumb;
             if (m_dragging || m_pressedArea == HitArea::Thumb)
-                thumbDrawColor = Color(150, 150, 150, 255);
+                thumbDrawColor = colors.thumbPressed;
 
             painter->fillRect(thumbRect, thumbDrawColor);
-            painter->drawRect(thumbRect, m_arrowColor);
+            painter->drawRect(thumbRect, colors.arrow);
 
-            painter->drawRect(abs, Color(160, 160, 160, 255));
+            painter->drawRect(abs, colors.border);
         }
 
         bool ScrollBar::onMouseMove(QC::i32 x, QC::i32 y, QC::i32 deltaX, QC::i32 deltaY)

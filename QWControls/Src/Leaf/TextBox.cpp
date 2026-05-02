@@ -6,12 +6,70 @@
 #include "QCMemUtil.h"
 #include "QCString.h"
 #include "QWWindow.h"
+#include "QWStyleRenderer.h"
 #include "QGPainter.h"
 
 namespace QW
 {
     namespace Controls
     {
+        namespace
+        {
+            struct TextBoxResolvedColors
+            {
+                Color text;
+                Color border;
+                Color selection;
+                Color background;
+                Color placeholder;
+            };
+
+            TextBoxResolvedColors resolveColors(const PaintContext &context,
+                                                bool focused,
+                                                bool hasTextOverride,
+                                                Color textOverride,
+                                                bool hasBorderOverride,
+                                                Color borderOverride,
+                                                bool hasSelectionOverride,
+                                                Color selectionOverride,
+                                                bool hasBackgroundOverride,
+                                                Color backgroundOverride)
+            {
+                TextBoxResolvedColors colors{};
+
+                if (const StyleSnapshot *snapshot = context.styleRenderer ? context.styleRenderer->styleSnapshot() : nullptr)
+                {
+                    colors.text = hasTextOverride ? textOverride : snapshot->palette.controlText;
+                    colors.border = hasBorderOverride ? borderOverride : (focused ? snapshot->palette.accent : snapshot->palette.windowBorderInactive);
+                    colors.selection = hasSelectionOverride ? selectionOverride : snapshot->palette.accent.withAlpha(168);
+                    colors.background = hasBackgroundOverride ? backgroundOverride : snapshot->palette.windowBackground;
+                    colors.placeholder = snapshot->palette.controlText.withAlpha(150);
+                    return colors;
+                }
+
+                // Fallback semantic palette when no style snapshot is available.
+                const Color baseText = Color::controlText();
+                const Color baseAccent = Color::activeCaption();
+                const Color baseBorder = Color::buttonShadow();
+                const Color baseBackground = Color::windowBackground();
+
+                colors.text = baseText;
+                colors.border = focused ? baseAccent : baseBorder;
+                colors.selection = baseAccent.withAlpha(168);
+                colors.background = baseBackground;
+
+                colors.placeholder = colors.text.withAlpha(150);
+                if (hasTextOverride)
+                    colors.text = textOverride;
+                if (hasBorderOverride)
+                    colors.border = borderOverride;
+                if (hasSelectionOverride)
+                    colors.selection = selectionOverride;
+                if (hasBackgroundOverride)
+                    colors.background = backgroundOverride;
+                return colors;
+            }
+        }
 
         TextBox::TextBox()
             : ControlBase(),
@@ -24,16 +82,20 @@ namespace QW
               m_maxLength(1024),
               m_readOnly(false),
               m_password(false),
-              m_textColor(Color(0, 0, 0, 255)),
-              m_borderColor(Color(128, 128, 128, 255)),
-              m_selectionColor(Color(51, 153, 255, 255)),
+              m_textColor(Color::controlText()),
+              m_borderColor(Color::buttonShadow()),
+              m_selectionColor(Color::activeCaption()),
+              m_hasTextColorOverride(false),
+              m_hasBorderColorOverride(false),
+              m_hasSelectionColorOverride(false),
+              m_hasBackgroundColorOverride(false),
               m_changeHandler(nullptr),
               m_changeUserData(nullptr),
               m_submitHandler(nullptr),
               m_submitUserData(nullptr),
               m_scrollOffset(0)
         {
-            m_bgColor = Color(255, 255, 255, 255);
+            m_bgColor = Color::windowBackground();
             m_placeholder[0] = '\0';
 
             // Initial allocation
@@ -56,16 +118,20 @@ namespace QW
               m_maxLength(1024),
               m_readOnly(false),
               m_password(false),
-              m_textColor(Color(0, 0, 0, 255)),
-              m_borderColor(Color(128, 128, 128, 255)),
-              m_selectionColor(Color(51, 153, 255, 255)),
+              m_textColor(Color::controlText()),
+              m_borderColor(Color::buttonShadow()),
+              m_selectionColor(Color::activeCaption()),
+              m_hasTextColorOverride(false),
+              m_hasBorderColorOverride(false),
+              m_hasSelectionColorOverride(false),
+              m_hasBackgroundColorOverride(false),
               m_changeHandler(nullptr),
               m_changeUserData(nullptr),
               m_submitHandler(nullptr),
               m_submitUserData(nullptr),
               m_scrollOffset(0)
         {
-            m_bgColor = Color(255, 255, 255, 255);
+            m_bgColor = Color::windowBackground();
             m_placeholder[0] = '\0';
 
             // Initial allocation
@@ -178,6 +244,34 @@ namespace QW
             m_selEnd = 0;
         }
 
+        void TextBox::setTextColor(Color color)
+        {
+            m_textColor = color;
+            m_hasTextColorOverride = true;
+            invalidate();
+        }
+
+        void TextBox::setBorderColor(Color color)
+        {
+            m_borderColor = color;
+            m_hasBorderColorOverride = true;
+            invalidate();
+        }
+
+        void TextBox::setSelectionColor(Color color)
+        {
+            m_selectionColor = color;
+            m_hasSelectionColorOverride = true;
+            invalidate();
+        }
+
+        void TextBox::setBackgroundColor(Color color)
+        {
+            m_bgColor = color;
+            m_hasBackgroundColorOverride = true;
+            invalidate();
+        }
+
         void TextBox::setTextChangeHandler(TextChangeHandler handler, void *userData)
         {
             m_changeHandler = handler;
@@ -201,10 +295,20 @@ namespace QW
             const QC::Size glyphSize = painter->measureText("M");
             const QC::i32 glyphAdvance = (glyphSize.width > 0) ? glyphSize.width : 8;
             const QC::i32 lineHeight = (glyphSize.height > 0) ? glyphSize.height : 16;
+            const TextBoxResolvedColors colors = resolveColors(context,
+                                                               m_focused,
+                                                               m_hasTextColorOverride,
+                                                               m_textColor,
+                                                               m_hasBorderColorOverride,
+                                                               m_borderColor,
+                                                               m_hasSelectionColorOverride,
+                                                               m_selectionColor,
+                                                               m_hasBackgroundColorOverride,
+                                                               m_bgColor);
 
             // Background + border
-            painter->fillRect(abs, m_bgColor);
-            painter->drawRect(abs, m_borderColor);
+            painter->fillRect(abs, colors.background);
+            painter->drawRect(abs, colors.border);
 
             const QC::Rect painterBounds = painter->bounds();
             const QC::Rect oldClip = painter->clipRect();
@@ -231,17 +335,16 @@ namespace QW
                     for (QC::usize i = 0; i < len; ++i)
                         masked[i] = '*';
                     masked[len] = '\0';
-                    painter->drawText(textX, textY, masked, m_textColor);
+                    painter->drawText(textX, textY, masked, colors.text);
                 }
                 else
                 {
-                    painter->drawText(textX, textY, m_text, m_textColor);
+                    painter->drawText(textX, textY, m_text, colors.text);
                 }
             }
             else if (m_placeholder[0] != '\0')
             {
-                Color placeholderColor(160, 160, 160, 255);
-                painter->drawText(textX, textY, m_placeholder, placeholderColor);
+                painter->drawText(textX, textY, m_placeholder, colors.placeholder);
             }
 
             // Selection highlight
@@ -252,7 +355,7 @@ namespace QW
                 QC::i32 selX = abs.x + 4 + static_cast<QC::i32>(start * static_cast<QC::usize>(glyphAdvance));
                 QC::u32 selWidth = static_cast<QC::u32>((end - start) * static_cast<QC::usize>(glyphAdvance));
                 Rect selRect = {selX, abs.y + 2, selWidth, abs.height - 4};
-                painter->fillRect(selRect, m_selectionColor);
+                painter->fillRect(selRect, colors.selection);
             }
 
             // Caret last so it stays visible atop selection
@@ -260,7 +363,7 @@ namespace QW
             {
                 QC::i32 cursorX = abs.x + 4 + static_cast<QC::i32>(m_cursorPos * static_cast<QC::usize>(glyphAdvance));
                 Rect cursorRect = {cursorX, abs.y + 2, 1, abs.height - 4};
-                painter->fillRect(cursorRect, m_textColor);
+                painter->fillRect(cursorRect, colors.text);
             }
 
             if (oldWasFullClip)

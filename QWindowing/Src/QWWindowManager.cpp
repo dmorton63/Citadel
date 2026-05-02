@@ -58,6 +58,24 @@ namespace QW
         // MouseButton values are 1..N.
         return (1u << (b - 1));
     }
+
+    static Rect decoratedInvalidationRect(const Rect &bounds)
+    {
+        // Compositor decorations paint at the bounds edge, and shadow extends
+        // beyond the right/bottom edge. Expand slightly on all sides so drag/
+        // destroy invalidation fully clears any residual pixels.
+        static constexpr QC::i32 kLeftExpand = 1;
+        static constexpr QC::i32 kTopExpand = 1;
+        static constexpr QC::i32 kRightExpand = 7;
+        static constexpr QC::i32 kBottomExpand = 7;
+
+        const QC::i32 expandedX = bounds.x - kLeftExpand;
+        const QC::i32 expandedY = bounds.y - kTopExpand;
+        const QC::u32 expandedWidth = bounds.width + static_cast<QC::u32>(kLeftExpand + kRightExpand);
+        const QC::u32 expandedHeight = bounds.height + static_cast<QC::u32>(kTopExpand + kBottomExpand);
+        return Rect{expandedX, expandedY, expandedWidth, expandedHeight};
+    }
+
     WindowManager &WindowManager::instance()
     {
         static WindowManager s_instance;
@@ -206,7 +224,7 @@ namespace QW
             return;
 
         // Capture bounds before removal so we can repaint the region that was covered.
-        const Rect oldBounds = window->bounds();
+        const Rect oldBounds = decoratedInvalidationRect(window->bounds());
 
         // If called from within a window's event handler, defer deletion until after
         // dispatch returns to avoid deleting 'this' while executing.
@@ -342,12 +360,14 @@ namespace QW
         if (oldFocus)
         {
             postWindowEvent(QK::Event::Type::WindowBlur, oldFocus);
+                oldFocus->invalidate();
         }
 
         // Post focus event to new window
         if (window)
         {
             postWindowEvent(QK::Event::Type::WindowFocus, window);
+                window->invalidate();
         }
 
         syncRuntimeWindowRegistry(m_windows, m_focusedWindow);
@@ -378,7 +398,7 @@ namespace QW
         }
 
         setFocus(window);
-        invalidate(window->bounds());
+        invalidate(decoratedInvalidationRect(window->bounds()));
 
         syncRuntimeWindowRegistry(m_windows, m_focusedWindow);
     }
@@ -435,7 +455,7 @@ namespace QW
             m_windows[j] = m_windows[j - 1];
         m_windows[toIndex] = window;
 
-        invalidate(window->bounds());
+        invalidate(decoratedInvalidationRect(window->bounds()));
 
         syncRuntimeWindowRegistry(m_windows, m_focusedWindow);
     }
@@ -558,9 +578,14 @@ namespace QW
                     newBounds.x = newX;
                     newBounds.y = newY;
 
-                    invalidate(oldBounds);
+                    const Rect oldDecoratedBounds = decoratedInvalidationRect(oldBounds);
+                    const Rect newDecoratedBounds = decoratedInvalidationRect(newBounds);
+                    const bool usedRectCopy = m_compositor && m_compositor->rectCopy(oldDecoratedBounds, newDecoratedBounds);
+
+                    invalidate(oldDecoratedBounds);
                     m_dragWindow->setBounds(newBounds);
-                    invalidate(newBounds);
+                    if (!usedRectCopy)
+                        invalidate(newDecoratedBounds);
                     postWindowEvent(QK::Event::Type::WindowMove, m_dragWindow);
 
                     syncRuntimeWindowRegistry(m_windows, m_focusedWindow);

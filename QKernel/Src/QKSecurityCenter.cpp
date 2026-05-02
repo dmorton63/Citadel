@@ -561,6 +561,7 @@ namespace QK
     namespace
     {
         static constexpr const char *kOwnerCredKey = "OWNERCRD"; // 8.3 safe
+        static constexpr const char *kOwnerCredCompatBaseDir = "/system";
         static constexpr const char *kRecoveryCodeKey = "RCOVR1";
         static constexpr const char *kVaultHeaderKey = "VAULTHDR";
         static constexpr QC::u32 kOwnerCredMagic = 0x4F435244;    // 'OCRD'
@@ -884,6 +885,48 @@ namespace QK
             return *a == 0 && *b == 0;
         }
 
+        static char lowerAsciiLocal(char c)
+        {
+            if (c >= 'A' && c <= 'Z')
+                return static_cast<char>(c + 32);
+            return c;
+        }
+
+        static bool streqIgnoreCase(const char *a, const char *b)
+        {
+            if (a == b)
+                return true;
+            if (!a || !b)
+                return false;
+            while (*a && *b)
+            {
+                if (lowerAsciiLocal(*a) != lowerAsciiLocal(*b))
+                    return false;
+                ++a;
+                ++b;
+            }
+            return *a == 0 && *b == 0;
+        }
+
+        static QC::Status normalizeOwnerUsername(const char *username, char out[32])
+        {
+            if (!out)
+                return QC::Status::InvalidParam;
+
+            QC::String::memset(out, 0, 32);
+            if (!username || !username[0])
+                return QC::Status::InvalidParam;
+
+            QC::usize n = QC::String::strlen(username);
+            if (n >= 32)
+                n = 31;
+
+            for (QC::usize i = 0; i < n; ++i)
+                out[i] = lowerAsciiLocal(username[i]);
+            out[n] = 0;
+            return QC::Status::Success;
+        }
+
         enum class OwnerCredKind : QC::u8
         {
             Unknown = 0,
@@ -902,6 +945,12 @@ namespace QK
         {
             QC::Vector<QC::u8> blob;
             QC::Status st = QK::SecureStore::readSealedBlob(kOwnerCredKey, blob);
+            if (st == QC::Status::NotSupported)
+            {
+                QK::SecureStore::Config compatCfg = QK::SecureStore::defaultConfig();
+                compatCfg.baseDir = kOwnerCredCompatBaseDir;
+                st = QK::SecureStore::readSealedBlob(kOwnerCredKey, blob, compatCfg);
+            }
             if (st != QC::Status::Success)
                 return st;
 
@@ -938,7 +987,14 @@ namespace QK
 
         static QC::Status writeOwnerCred(const OwnerCredRecordV2 &rec)
         {
-            return QK::SecureStore::writeSealedBlob(kOwnerCredKey, &rec, sizeof(rec));
+            QC::Status st = QK::SecureStore::writeSealedBlob(kOwnerCredKey, &rec, sizeof(rec));
+            if (st == QC::Status::NotSupported)
+            {
+                QK::SecureStore::Config compatCfg = QK::SecureStore::defaultConfig();
+                compatCfg.baseDir = kOwnerCredCompatBaseDir;
+                st = QK::SecureStore::writeSealedBlob(kOwnerCredKey, &rec, sizeof(rec), compatCfg);
+            }
+            return st;
         }
     }
 
@@ -1233,6 +1289,11 @@ namespace QK
         if (!username || !username[0] || !secret)
             return QC::Status::Error;
 
+        char canonicalUser[32];
+        QC::Status st = normalizeOwnerUsername(username, canonicalUser);
+        if (st != QC::Status::Success)
+            return st;
+
         if (ownerIsEnrolled())
             return QC::Status::Busy;
 
@@ -1249,11 +1310,11 @@ namespace QK
         rec.saltLen = 16;
         rec.iterations = kDefaultIterations;
 
-        QC::Status st = qkFillRandom(nullptr, rec.salt, sizeof(rec.salt));
+        st = qkFillRandom(nullptr, rec.salt, sizeof(rec.salt));
         if (st != QC::Status::Success)
             return st;
 
-        QC::String::strncpy(rec.username, username, sizeof(rec.username) - 1);
+        QC::String::strncpy(rec.username, canonicalUser, sizeof(rec.username) - 1);
         computeVerifierV2(rec.username, secret, rec.salt, rec.iterations, rec.verifier);
 
         st = QK::SecureStore::ensureBaseDir();
@@ -1274,17 +1335,33 @@ namespace QK
         st = deriveVaultRootKey(m_ownerUmk, rec.username, kVaultVersion, m_ownerVrk);
         if (st != QC::Status::Success)
         {
-            clearOwnerSessionKeys();
-            return st;
+            if (st == QC::Status::NotSupported && m_mode == Mode::Bypass)
+            {
+                m_ownerVrkReady = false;
+            }
+            else
+            {
+                clearOwnerSessionKeys();
+                return st;
+            }
         }
-        m_ownerVrkReady = true;
-
-        OwnerVaultHeader vaultHeader{};
-        st = generatePerUserVaultHeader(rec.username, vaultHeader);
-        if (st != QC::Status::Success)
+        else
         {
-            clearOwnerSessionKeys();
-            return st;
+            m_ownerVrkReady = true;
+        }
+
+        if (m_ownerVrkReady)
+        {
+            OwnerVaultHeader vaultHeader{};
+            st = generatePerUserVaultHeader(rec.username, vaultHeader);
+            if (st != QC::Status::Success)
+            {
+                if (!(st == QC::Status::NotSupported && m_mode == Mode::Bypass))
+                {
+                    clearOwnerSessionKeys();
+                    return st;
+                }
+            }
         }
 
         // Enrollment implies an unlocked session.
@@ -1301,6 +1378,11 @@ namespace QK
         if (!username || !username[0] || !secret)
             return QC::Status::Error;
 
+        char canonicalUser[32];
+        QC::Status st = normalizeOwnerUsername(username, canonicalUser);
+        if (st != QC::Status::Success)
+            return st;
+
         ++m_ownerUnlockAttempts;
 
         if (ownerLockedOut())
@@ -1311,14 +1393,14 @@ namespace QK
         }
 
         OwnerCredAny rec;
-        QC::Status st = readOwnerCred(rec);
+        st = readOwnerCred(rec);
         if (st != QC::Status::Success)
             return st;
 
         bool ok = false;
         if (rec.kind == OwnerCredKind::V2)
         {
-            if (streq(username, rec.v2.username))
+            if (streqIgnoreCase(canonicalUser, rec.v2.username))
             {
                 QC::u8 v[32];
                 computeVerifierV2(rec.v2.username, secret, rec.v2.salt, rec.v2.iterations, v);
@@ -1328,7 +1410,7 @@ namespace QK
         }
         else if (rec.kind == OwnerCredKind::V1)
         {
-            if (streq(username, rec.v1.username))
+            if (streqIgnoreCase(canonicalUser, rec.v1.username))
             {
                 const QC::u64 v = computeVerifierV1(rec.v1.username, secret);
                 ok = (v == rec.v1.verifier);
@@ -1368,11 +1450,21 @@ namespace QK
             st = deriveVaultRootKey(m_ownerUmk, rec.v2.username, kVaultVersion, m_ownerVrk);
             if (st != QC::Status::Success)
             {
-                m_ownerUnlocked = false;
-                clearOwnerSessionKeys();
-                return st;
+                if (st == QC::Status::NotSupported && m_mode == Mode::Bypass)
+                {
+                    m_ownerVrkReady = false;
+                }
+                else
+                {
+                    m_ownerUnlocked = false;
+                    clearOwnerSessionKeys();
+                    return st;
+                }
             }
-            m_ownerVrkReady = true;
+            else
+            {
+                m_ownerVrkReady = true;
+            }
         }
         else
         {
@@ -1418,7 +1510,12 @@ namespace QK
 
     bool SecurityCenter::ownerIsEnrolled() const
     {
-        return QK::SecureStore::exists(kOwnerCredKey);
+        if (QK::SecureStore::exists(kOwnerCredKey))
+            return true;
+
+        QK::SecureStore::Config compatCfg = QK::SecureStore::defaultConfig();
+        compatCfg.baseDir = kOwnerCredCompatBaseDir;
+        return QK::SecureStore::exists(kOwnerCredKey, compatCfg);
     }
 
     bool SecurityCenter::ownerLockedOut() const

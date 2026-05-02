@@ -6,12 +6,46 @@
 #include "QCMemUtil.h"
 #include "QCString.h"
 #include "QWWindow.h"
+#include "QWStyleRenderer.h"
 #include "QGPainter.h"
 
 namespace QW
 {
     namespace Controls
     {
+        namespace
+        {
+            struct LabelResolvedColors
+            {
+                Color text;
+                Color background;
+            };
+
+            LabelResolvedColors resolveColors(const PaintContext &context,
+                                              bool hasTextOverride,
+                                              Color textOverride,
+                                              bool hasBackgroundOverride,
+                                              Color backgroundOverride)
+            {
+                LabelResolvedColors colors{};
+
+                if (const StyleSnapshot *snapshot = context.styleRenderer ? context.styleRenderer->styleSnapshot() : nullptr)
+                {
+                    colors.text = hasTextOverride ? textOverride : snapshot->palette.controlText;
+                    colors.background = hasBackgroundOverride ? backgroundOverride : snapshot->palette.panelBackground;
+                    return colors;
+                }
+
+                colors.text = Color::controlText();
+                colors.background = Color::windowBackground();
+
+                if (hasTextOverride)
+                    colors.text = textOverride;
+                if (hasBackgroundOverride)
+                    colors.background = backgroundOverride;
+                return colors;
+            }
+        }
 
         Label::Label()
             : ControlBase(),
@@ -20,13 +54,15 @@ namespace QW
               m_verticalAlign(VerticalAlign::Top),
               m_wordWrap(false),
               m_transparent(true),
-                            m_underline(false),
-                            m_textScaleOverride(0.0f),
-              m_textColor(Color(0, 0, 0, 255))
+              m_underline(false),
+              m_textScaleOverride(0.0f),
+                            m_textColor(Color::controlText()),
+              m_hasTextColorOverride(false),
+              m_hasBackgroundColorOverride(false)
         {
-            m_bgColor = Color(255, 255, 255, 255);
-                        m_clickHandler = nullptr;
-                        m_clickUserData = nullptr;
+                        m_bgColor = Color::windowBackground();
+            m_clickHandler = nullptr;
+            m_clickUserData = nullptr;
         }
 
         Label::Label(Window *window, const char *text, Rect bounds)
@@ -36,14 +72,16 @@ namespace QW
               m_verticalAlign(VerticalAlign::Top),
               m_wordWrap(false),
               m_transparent(false),
-                            m_underline(false),
-                            m_textScaleOverride(0.0f),
-              m_textColor(Color(0, 0, 0, 255))
+              m_underline(false),
+              m_textScaleOverride(0.0f),
+                            m_textColor(Color::controlText()),
+              m_hasTextColorOverride(false),
+              m_hasBackgroundColorOverride(false)
         {
-            m_bgColor = Color(255, 255, 255, 255);
+                        m_bgColor = Color::windowBackground();
             setText(text);
-                        m_clickHandler = nullptr;
-                        m_clickUserData = nullptr;
+            m_clickHandler = nullptr;
+            m_clickUserData = nullptr;
         }
 
         Label::~Label()
@@ -80,6 +118,20 @@ namespace QW
         {
             m_clickHandler = handler;
             m_clickUserData = userData;
+        }
+
+        void Label::setTextColor(Color color)
+        {
+            m_textColor = color;
+            m_hasTextColorOverride = true;
+            invalidate();
+        }
+
+        void Label::setBackgroundColor(Color color)
+        {
+            m_bgColor = color;
+            m_hasBackgroundColorOverride = true;
+            invalidate();
         }
 
         bool Label::hitTest(int x, int y) const
@@ -124,9 +176,15 @@ namespace QW
                 painter->setTextScale(m_textScaleOverride);
             }
 
+            const LabelResolvedColors colors = resolveColors(context,
+                                                             m_hasTextColorOverride,
+                                                             m_textColor,
+                                                             m_hasBackgroundColorOverride,
+                                                             m_bgColor);
+
             if (!m_transparent)
             {
-                painter->fillRect(abs, m_bgColor);
+                painter->fillRect(abs, colors.background);
             }
 
             if (!m_text)
@@ -176,7 +234,7 @@ namespace QW
             const QC::Rect clip = oldClip.intersection(absInPixels);
             painter->setClipRect(clip);
 
-            painter->drawText(textX, textY, m_text, m_textColor);
+            painter->drawText(textX, textY, m_text, colors.text);
 
             if (oldWasFullClip)
                 painter->clearClipRect();
@@ -188,7 +246,7 @@ namespace QW
                 // Underline only the first line (sufficient for MVP).
                 const QC::i32 ulY = textY + static_cast<QC::i32>(textSize.height) - 1;
                 if (textSize.width > 0)
-                    painter->drawHLine(textX, ulY, textSize.width, m_textColor);
+                    painter->drawHLine(textX, ulY, textSize.width, colors.text);
             }
 
             if (m_textScaleOverride > 0.0f)

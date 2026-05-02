@@ -1,9 +1,64 @@
 {
+  "version": 1,
   "banner_text": "CITADEL Overrides Active",
+  "season": "auto",
+  "colors": {
+    "background": "#1B2230",
+    "accent": "#4EA0FF",
+    "text": "#F4F8FF"
+  },
+  "theme": {
+    "overrides": {
+      "button": {
+        "sidebar": {
+          "fillNormal": "#661A1A1A",
+          "fillHover": "#882A2A2A",
+          "fillPressed": "#992A2A2A",
+          "text": "#FFFFFF",
+          "border": "#80303030",
+          "glass": true
+        },
+        "accent": {
+          "fillNormal": "#883F3F47",
+          "fillHover": "#AA6BB6FF",
+          "fillPressed": "#AA2F5A8A",
+          "text": "#FFFFFF",
+          "border": "#80303030",
+          "glass": true
+        },
+        "destructive": {
+          "fillNormal": "#AAC84040",
+          "fillHover": "#BBD85A5A",
+          "fillPressed": "#BBA03030",
+          "text": "#FFFFFF",
+          "border": "#A0802020",
+          "glass": true
+        }
+      }
+    }
+  },
   "layout": {
-    "taskbar": { "x": 0, "y": "bottom-48", "width": "100%", "height": 48 },
-    "clockLabel": { "x": "right-100", "y": 18 },
-    "btnTerminal": { "x": 20, "y": 140, "width": 160, "height": 32 },
-    "btnSettings": { "x": 20, "y": 100, "width": 160, "height": 32 }
+    "taskbar": {
+      "x": 0,
+      "y": "bottom-48",
+      "width": "100%",
+      "height": 48
+    },
+    "clockLabel": {
+      "x": "right-100",
+      "y": 18
+    },
+    "btnTerminal": {
+      "x": 20,
+      "y": 140,
+      "width": 160,
+      "height": 32
+    },
+    "btnSettings": {
+      "x": 20,
+      "y": 100,
+      "width": 160,
+      "height": 32
+    }
   }
 }

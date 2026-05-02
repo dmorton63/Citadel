@@ -138,9 +138,9 @@ namespace QW
             return;
 
         // Controls may draw slightly outside their nominal bounds (hover lift,
-        // focus rings, soft shadows). Expand a bit so visual state changes don't
-        // leave stale pixels.
-        static constexpr QC::i32 kInvalidateMargin = 32;
+        // focus rings, soft shadows). Keep margin modest to avoid over-invalidation
+        // spikes when rapidly traversing between distant UI regions.
+        static constexpr QC::i32 kInvalidateMargin = 10;
 
         const QC::i32 maxW = static_cast<QC::i32>(m_bounds.width);
         const QC::i32 maxH = static_cast<QC::i32>(m_bounds.height);

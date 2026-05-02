@@ -14,12 +14,7 @@ namespace QW
     public:
         void initialize(Framebuffer *fb) override;
         void present() override;
-        void present(const QC::Rect *dirtyRects, QC::usize dirtyCount) override
-        {
-            (void)dirtyRects;
-            (void)dirtyCount;
-            present();
-        }
+        void present(const QC::Rect *dirtyRects, QC::usize dirtyCount) override;
 
     private:
         Framebuffer *m_framebuffer = nullptr;

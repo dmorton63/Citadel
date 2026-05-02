@@ -64,27 +64,26 @@ namespace QW
             const QC::i32 bottom = rect.y + static_cast<QC::i32>(rect.height) - 1;
             const QC::i32 r = static_cast<QC::i32>(radius);
 
-            const QC::i32 cyTop = top + (r - 1);
-            const QC::i32 cyBottom = bottom - (r - 1);
-
-            QC::i32 dy = 0;
-            if (y < cyTop)
-                dy = cyTop - y;
-            else if (y > cyBottom)
-                dy = y - cyBottom;
-
             QC::i32 inset = 0;
-            if (dy > 0)
+            const QC::i32 topBandEnd = top + r - 1;
+            const QC::i32 bottomBandStart = bottom - r + 1;
+            if (y <= topBandEnd || y >= bottomBandStart)
             {
-                const QC::u32 r2 = radius * radius;
-                const QC::u32 dy2 = static_cast<QC::u32>(dy * dy);
-                const QC::u32 inside = (dy2 >= r2) ? 0 : (r2 - dy2);
-                const QC::u32 maxX = isqrt_u32(inside);
-                inset = (r - 1) - static_cast<QC::i32>(maxX);
+                const QC::i32 centerY = (y <= topBandEnd)
+                                          ? (top + r)
+                                          : (bottom - r + 1);
+                const QC::u32 diameter = radius * 2u;
+                const QC::i32 dyScaled = ((y * 2) + 1) - (centerY * 2);
+                const QC::u32 dyScaledAbs = static_cast<QC::u32>(dyScaled < 0 ? -dyScaled : dyScaled);
+                const QC::u32 diameter2 = diameter * diameter;
+                const QC::u32 dy2 = dyScaledAbs * dyScaledAbs;
+                const QC::u32 inside = (dy2 >= diameter2) ? 0 : (diameter2 - dy2);
+                const QC::u32 maxDxScaled = isqrt_u32(inside);
+                inset = static_cast<QC::i32>((diameter - maxDxScaled) / 2u);
                 if (inset < 0)
                     inset = 0;
-                if (inset > (r - 1))
-                    inset = (r - 1);
+                if (inset > r)
+                    inset = r;
             }
 
             x1 = left + inset;

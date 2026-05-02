@@ -15,6 +15,11 @@ namespace QW
             return a < b ? a : b;
         }
 
+        inline QC::u32 umax(QC::u32 a, QC::u32 b)
+        {
+            return a > b ? a : b;
+        }
+
         inline QC::u32 isqrt_u32(QC::u32 x)
         {
             QC::u32 op = x;
@@ -66,27 +71,26 @@ namespace QW
             const QC::i32 bottom = rect.y + static_cast<QC::i32>(rect.height) - 1;
             const QC::i32 r = static_cast<QC::i32>(radius);
 
-            const QC::i32 cyTop = top + (r - 1);
-            const QC::i32 cyBottom = bottom - (r - 1);
-
-            QC::i32 dy = 0;
-            if (y < cyTop)
-                dy = cyTop - y;
-            else if (y > cyBottom)
-                dy = y - cyBottom;
-
             QC::i32 inset = 0;
-            if (dy > 0)
+            const QC::i32 topBandEnd = top + r - 1;
+            const QC::i32 bottomBandStart = bottom - r + 1;
+            if (y <= topBandEnd || y >= bottomBandStart)
             {
-                const QC::u32 r2 = radius * radius;
-                const QC::u32 dy2 = static_cast<QC::u32>(dy * dy);
-                const QC::u32 inside = (dy2 >= r2) ? 0 : (r2 - dy2);
-                const QC::u32 maxX = isqrt_u32(inside);
-                inset = (r - 1) - static_cast<QC::i32>(maxX);
+                const QC::i32 centerY = (y <= topBandEnd)
+                                          ? (top + r)
+                                          : (bottom - r + 1);
+                const QC::u32 diameter = radius * 2u;
+                const QC::i32 dyScaled = ((y * 2) + 1) - (centerY * 2);
+                const QC::u32 dyScaledAbs = static_cast<QC::u32>(dyScaled < 0 ? -dyScaled : dyScaled);
+                const QC::u32 diameter2 = diameter * diameter;
+                const QC::u32 dy2 = dyScaledAbs * dyScaledAbs;
+                const QC::u32 inside = (dy2 >= diameter2) ? 0 : (diameter2 - dy2);
+                const QC::u32 maxDxScaled = isqrt_u32(inside);
+                inset = static_cast<QC::i32>((diameter - maxDxScaled) / 2u);
                 if (inset < 0)
                     inset = 0;
-                if (inset > (r - 1))
-                    inset = (r - 1);
+                if (inset > r)
+                    inset = r;
             }
 
             x1 = left + inset;
@@ -331,7 +335,7 @@ namespace QW
             spec.border = a.darker(0.25f);
             spec.glow = config.accent.withAlpha(90);
             spec.glass = true;
-            spec.overlayHover = QC::Color(255, 255, 255, 90);
+            spec.overlayHover = textOnDark.withAlpha(90);
             spec.overlayPressed = a.darker(0.35f).withAlpha(110);
             spec.outline = a.darker(0.35f);
             spec.outlineHover = a.lighter(0.06f);
@@ -348,7 +352,7 @@ namespace QW
             spec.border = config.topBarDivider;
             spec.glow = QC::Color::transparent();
             spec.glass = false;
-            spec.overlayHover = QC::Color(255, 255, 255, 35);
+            spec.overlayHover = textOnDark.withAlpha(35);
             spec.overlayPressed = config.sidebarHover.darker(0.2f).withAlpha(80);
             spec.outline = config.topBarDivider.withAlpha(90);
             spec.outlineHover = config.topBarDivider.withAlpha(140);
@@ -366,7 +370,7 @@ namespace QW
             spec.border = base.darker(0.3f);
             spec.glow = config.accent.withAlpha(70);
             spec.glass = true;
-            spec.overlayHover = QC::Color(255, 255, 255, 60);
+            spec.overlayHover = textOnDark.withAlpha(60);
             spec.overlayPressed = base.darker(0.35f).withAlpha(110);
             spec.outline = base.darker(0.35f);
             spec.outlineHover = base.lighter(0.05f);
@@ -383,7 +387,7 @@ namespace QW
             spec.border = config.topBarDivider;
             spec.glow = QC::Color::transparent();
             spec.glass = false;
-            spec.overlayHover = QC::Color(255, 255, 255, 30);
+            spec.overlayHover = textOnDark.withAlpha(30);
             spec.overlayPressed = config.taskbarHover.darker(0.25f).withAlpha(70);
             spec.outline = config.topBarDivider.withAlpha(120);
             spec.outlineHover = config.topBarDivider.withAlpha(170);
@@ -401,7 +405,7 @@ namespace QW
             spec.border = base.darker(0.3f);
             spec.glow = base.withAlpha(90);
             spec.glass = true;
-            spec.overlayHover = QC::Color(255, 255, 255, 70);
+            spec.overlayHover = textOnDark.withAlpha(70);
             spec.overlayPressed = base.darker(0.35f).withAlpha(110);
             spec.outline = base.darker(0.35f);
             spec.outlineHover = base.lighter(0.06f);
@@ -418,7 +422,7 @@ namespace QW
             spec.border = destructiveBase.darker(0.25f);
             spec.glow = destructiveBase.withAlpha(80);
             spec.glass = true;
-            spec.overlayHover = QC::Color(255, 255, 255, 85);
+            spec.overlayHover = textOnDark.withAlpha(85);
             spec.overlayPressed = destructiveBase.darker(0.35f).withAlpha(120);
             spec.outline = destructiveBase.darker(0.35f);
             spec.outlineHover = destructiveBase.lighter(0.05f);
@@ -513,11 +517,49 @@ namespace QW
         if (!m_backend)
             return;
 
+        const auto resolveContentMode = [&]() -> ButtonContentMode
+        {
+            if (args.contentMode != ButtonContentMode::Auto)
+                return args.contentMode;
+
+            const bool hasText = (args.text && args.text[0]);
+            const bool hasIcon = (args.icon && args.icon->isValid());
+            if (hasText && hasIcon)
+                return ButtonContentMode::TextAndIcon;
+            if (hasIcon)
+                return ButtonContentMode::Icon;
+            return ButtonContentMode::Text;
+        };
+
+        const ButtonContentMode contentMode = resolveContentMode();
+
+        const auto resolveVariant = [&]() -> ButtonVariant
+        {
+            if (args.variant != ButtonVariant::Standard)
+                return args.variant;
+
+            if (args.borderless)
+            {
+                return contentMode == ButtonContentMode::Icon
+                           ? ButtonVariant::Icon
+                           : ButtonVariant::Borderless;
+            }
+
+            return ButtonVariant::Standard;
+        };
+
+        const ButtonVariant variant = resolveVariant();
+
         const StyleSnapshot &styleData = style();
         const auto &spec = buttonStyle(styleData, args.role);
         const auto &caps = m_backend->capabilities();
 
-        const bool borderless = args.borderless;
+        const QC::u32 baseRadius = (args.cornerRadius > 0) ? args.cornerRadius : spec.cornerRadius;
+
+        const bool borderless = args.borderless ||
+                    variant == ButtonVariant::Borderless ||
+                    variant == ButtonVariant::Icon ||
+                    variant == ButtonVariant::Ghost;
 
         const bool disabled = args.state == ButtonPaintArgs::State::Disabled;
         const bool hovered = args.state == ButtonPaintArgs::State::Hovered;
@@ -533,14 +575,21 @@ namespace QW
             buttonRect.y += styleData.metrics.buttonPressDepth;
         }
 
+        QC::u32 effectiveRadius = baseRadius;
+        if (variant == ButtonVariant::Pill)
+        {
+            const QC::u32 maxAxis = umax(buttonRect.width, buttonRect.height);
+            effectiveRadius = maxAxis > 0 ? maxAxis : baseRadius;
+        }
+
         if (!borderless && args.defaultButton && spec.focusOutline.a > 0 && styleData.metrics.focusRingWidth > 0)
         {
             const QC::i32 inflate = static_cast<QC::i32>(styleData.metrics.focusRingWidth);
             QC::Rect focusRect = expandRect(buttonRect, inflate);
-            const bool focusRounded = spec.cornerRadius > 0 && caps.supportsRoundedRect;
+            const bool focusRounded = effectiveRadius > 0 && caps.supportsRoundedRect;
             if (focusRounded)
             {
-                const QC::u32 focusRadius = spec.cornerRadius + styleData.metrics.focusRingWidth;
+                const QC::u32 focusRadius = effectiveRadius + styleData.metrics.focusRingWidth;
                 m_backend->drawRoundedRect(focusRect,
                                            focusRadius,
                                            QC::Color::transparent(),
@@ -576,7 +625,7 @@ namespace QW
         QC::Color textColor = disabled ? spec.textDisabled : spec.text;
 
         const QC::u32 borderWidth = (spec.borderWidth > 0) ? spec.borderWidth : styleData.metrics.borderWidth;
-        const bool canRound = spec.cornerRadius > 0 && caps.supportsRoundedRect;
+        const bool canRound = effectiveRadius > 0 && caps.supportsRoundedRect;
 
         // For material-driven glass, avoid a uniform solid border/outline.
         // The "edge" should be conveyed by reflections (inner strokes) and transparency.
@@ -597,7 +646,7 @@ namespace QW
             if (canRound)
             {
                 m_backend->drawRoundedRect(rect,
-                                           spec.cornerRadius,
+                                           effectiveRadius,
                                            shapeFill,
                                            shapeBorder,
                                            shapeBorderWidth);
@@ -622,13 +671,74 @@ namespace QW
             return QC::Color::transparent();
         };
 
+        const auto iconExtentForRect = [&](const QC::Rect &rect) -> QC::i32
+        {
+            QC::i32 maxIcon = static_cast<QC::i32>(rect.height) - 12;
+            if (variant == ButtonVariant::Compact)
+                maxIcon -= 2;
+            else if (variant == ButtonVariant::Toolbar)
+                maxIcon -= 1;
+
+            if (maxIcon < 12)
+                maxIcon = static_cast<QC::i32>(rect.height);
+
+            QC::i32 cap = 24;
+            if (variant == ButtonVariant::Compact)
+                cap = 16;
+            else if (variant == ButtonVariant::Toolbar)
+                cap = 20;
+
+            if (maxIcon > cap)
+                maxIcon = cap;
+            return maxIcon;
+        };
+
+        const auto contentGap = [&]() -> QC::i32
+        {
+            if (contentMode != ButtonContentMode::TextAndIcon)
+                return 0;
+
+            switch (variant)
+            {
+            case ButtonVariant::Compact:
+                return 4;
+            case ButtonVariant::Toolbar:
+                return 5;
+            default:
+                return 6;
+            }
+        };
+
+        const auto borderlessHighlightPadding = [&](bool hasText, bool hasIcon) -> QC::Point
+        {
+            QC::i32 padX = (hasText && hasIcon) ? 10 : 8;
+            QC::i32 padY = 6;
+
+            if (variant == ButtonVariant::Compact)
+            {
+                padX = (hasText && hasIcon) ? 8 : 6;
+                padY = 4;
+            }
+            else if (variant == ButtonVariant::Toolbar)
+            {
+                padX = (hasText && hasIcon) ? 9 : 7;
+                padY = 5;
+            }
+
+            return QC::Point{padX, padY};
+        };
+
         if (borderless)
         {
             QC::Color overlay = overlayColorForState();
             if (overlay.a > 0)
             {
-                const bool hasText = (args.text && args.text[0]);
-                const bool hasIcon = (args.icon && args.icon->isValid());
+                const bool hasText = ((contentMode == ButtonContentMode::Text ||
+                                       contentMode == ButtonContentMode::TextAndIcon) &&
+                                      args.text && args.text[0]);
+                const bool hasIcon = ((contentMode == ButtonContentMode::Icon ||
+                                       contentMode == ButtonContentMode::TextAndIcon) &&
+                                      args.icon && args.icon->isValid());
 
                 QC::Size textSize{0, 0};
                 if (hasText && m_context.painter)
@@ -640,16 +750,11 @@ namespace QW
                 QC::i32 iconH = 0;
                 if (hasIcon)
                 {
-                    QC::i32 maxIcon = static_cast<QC::i32>(buttonRect.height) - 12;
-                    if (maxIcon < 12)
-                        maxIcon = static_cast<QC::i32>(buttonRect.height);
-                    if (maxIcon > 24)
-                        maxIcon = 24;
-                    iconW = maxIcon;
-                    iconH = maxIcon;
+                    iconW = iconExtentForRect(buttonRect);
+                    iconH = iconW;
                 }
 
-                const QC::i32 gap = (hasText && hasIcon) ? 6 : 0;
+                const QC::i32 gap = contentGap();
                 const QC::i32 contentW = (hasIcon ? iconW : 0) + gap + (hasText ? static_cast<QC::i32>(textSize.width) : 0);
                 const QC::i32 contentH = (iconH > static_cast<QC::i32>(textSize.height)) ? iconH : static_cast<QC::i32>(textSize.height);
                 QC::i32 contentX = buttonRect.x + (static_cast<QC::i32>(buttonRect.width) - contentW) / 2;
@@ -662,13 +767,12 @@ namespace QW
                     contentYOffset += styleData.metrics.buttonTextPressedOffset;
                 contentY += contentYOffset;
 
-                const QC::i32 padX = (hasText && hasIcon) ? 10 : 8;
-                const QC::i32 padY = 6;
+                const QC::Point highlightPadding = borderlessHighlightPadding(hasText, hasIcon);
                 QC::Rect highlightRect{
-                    contentX - padX,
-                    contentY - padY,
-                    static_cast<QC::u32>(contentW + (padX * 2)),
-                    static_cast<QC::u32>(contentH + (padY * 2))};
+                    contentX - highlightPadding.x,
+                    contentY - highlightPadding.y,
+                    static_cast<QC::u32>(contentW + (highlightPadding.x * 2)),
+                    static_cast<QC::u32>(contentH + (highlightPadding.y * 2))};
 
                 auto clampToButton = [&](const QC::Rect &rect) -> QC::Rect
                 {
@@ -743,9 +847,9 @@ namespace QW
             if (inner.width > 0 && inner.height > 1)
             {
                 QC::u32 innerRadius = 0;
-                if (canRound && spec.cornerRadius > inset)
+                if (canRound && effectiveRadius > inset)
                 {
-                    innerRadius = spec.cornerRadius - inset;
+                    innerRadius = effectiveRadius - inset;
                 }
 
                 QC::u32 glossHeight = inner.height / 2;
@@ -782,9 +886,9 @@ namespace QW
                     {
                         const QC::u32 innerInset = inset;
                         QC::u32 innerRadius = 0;
-                        if (canRound && spec.cornerRadius > innerInset)
+                        if (canRound && effectiveRadius > innerInset)
                         {
-                            innerRadius = spec.cornerRadius - innerInset;
+                            innerRadius = effectiveRadius - innerInset;
                         }
 
                         if (light.a > 0)
@@ -944,8 +1048,12 @@ namespace QW
 
         if (m_context.painter)
         {
-            const bool hasText = (args.text && args.text[0]);
-            const bool hasIcon = (args.icon && args.icon->isValid());
+            const bool hasText = ((contentMode == ButtonContentMode::Text ||
+                                   contentMode == ButtonContentMode::TextAndIcon) &&
+                                  args.text && args.text[0]);
+            const bool hasIcon = ((contentMode == ButtonContentMode::Icon ||
+                                   contentMode == ButtonContentMode::TextAndIcon) &&
+                                  args.icon && args.icon->isValid());
             if (hasText || hasIcon)
             {
                 QC::Vector<QC::u32> iconScratchRow;
@@ -960,16 +1068,11 @@ namespace QW
                 QC::i32 iconH = 0;
                 if (hasIcon)
                 {
-                    QC::i32 maxIcon = static_cast<QC::i32>(buttonRect.height) - 12;
-                    if (maxIcon < 12)
-                        maxIcon = static_cast<QC::i32>(buttonRect.height);
-                    if (maxIcon > 24)
-                        maxIcon = 24;
-                    iconW = maxIcon;
-                    iconH = maxIcon;
+                    iconW = iconExtentForRect(buttonRect);
+                    iconH = iconW;
                 }
 
-                const QC::i32 gap = (hasText && hasIcon) ? 6 : 0;
+                const QC::i32 gap = contentGap();
                 const QC::i32 contentW = (hasIcon ? iconW : 0) + gap + (hasText ? static_cast<QC::i32>(textSize.width) : 0);
                 QC::i32 contentX = buttonRect.x + (static_cast<QC::i32>(buttonRect.width) - contentW) / 2;
 

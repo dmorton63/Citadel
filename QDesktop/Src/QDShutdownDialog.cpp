@@ -100,12 +100,14 @@ namespace QD
 
         QW::Rect confirmBounds = {startX, baseY, static_cast<QC::u32>(buttonWidth), static_cast<QC::u32>(buttonHeight)};
         m_confirmButton = new QW::Controls::Button(m_window, "Shut Down", confirmBounds);
+        m_confirmButton->setContentMode(QW::ButtonContentMode::Text);
         m_confirmButton->setClickHandler(onConfirm, this);
         m_confirmButton->setRole(QW::ButtonRole::Destructive);
         m_root->addChild(m_confirmButton);
 
         QW::Rect cancelBounds = {startX + buttonWidth + spacing, baseY, static_cast<QC::u32>(buttonWidth), static_cast<QC::u32>(buttonHeight)};
         m_cancelButton = new QW::Controls::Button(m_window, "Cancel", cancelBounds);
+        m_cancelButton->setContentMode(QW::ButtonContentMode::Text);
         m_cancelButton->setClickHandler(onCancel, this);
         m_cancelButton->setRole(QW::ButtonRole::Default);
         m_root->addChild(m_cancelButton);

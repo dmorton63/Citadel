@@ -45,6 +45,8 @@ namespace QW
         // Double buffering
         void *backBuffer() const { return m_backBuffer; }
         void swap();
+        void swapRect(const Rect &rect);
+        bool copyBackBufferRect(const Rect &src, const Rect &dst);
         void setVSync(bool enabled) { m_vsync = enabled; }
 
         // Pixel operations

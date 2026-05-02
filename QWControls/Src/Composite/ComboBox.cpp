@@ -19,8 +19,8 @@ namespace QW
               m_style(ComboBoxStyle::DropList),
               m_selectedIndex(-1),
               m_droppedDown(false),
-              m_textColor(Color(0, 0, 0, 255)),
-              m_dropdownBgColor(Color(255, 255, 255, 255)),
+                            m_textColor(Color::controlText()),
+                            m_dropdownBgColor(Color::windowBackground()),
               m_maxDropdownItems(8),
               m_textBox(nullptr),
               m_dropButton(nullptr),
@@ -37,8 +37,8 @@ namespace QW
               m_style(ComboBoxStyle::DropList),
               m_selectedIndex(-1),
               m_droppedDown(false),
-              m_textColor(Color(0, 0, 0, 255)),
-              m_dropdownBgColor(Color(255, 255, 255, 255)),
+                            m_textColor(Color::controlText()),
+                            m_dropdownBgColor(Color::windowBackground()),
               m_maxDropdownItems(8),
               m_textBox(nullptr),
               m_dropButton(nullptr),
@@ -84,6 +84,7 @@ namespace QW
             {
                 m_textBox->setReadOnly(true);
             }
+            m_textBox->setTextColor(m_textColor);
             addChild(m_textBox);
 
             // Create dropdown button

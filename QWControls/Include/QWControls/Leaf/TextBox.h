@@ -54,16 +54,16 @@ namespace QW
 
             // Appearance
             Color textColor() const { return m_textColor; }
-            void setTextColor(Color color) { m_textColor = color; }
+            void setTextColor(Color color);
 
             Color borderColor() const { return m_borderColor; }
-            void setBorderColor(Color color) { m_borderColor = color; }
+            void setBorderColor(Color color);
 
             Color selectionColor() const { return m_selectionColor; }
-            void setSelectionColor(Color color) { m_selectionColor = color; }
+            void setSelectionColor(Color color);
 
             Color backgroundColor() const { return m_bgColor; }
-            void setBackgroundColor(Color color) { m_bgColor = color; }
+            void setBackgroundColor(Color color);
 
             // Events
             void setTextChangeHandler(TextChangeHandler handler, void *userData);
@@ -102,6 +102,10 @@ namespace QW
             Color m_borderColor;
             Color m_selectionColor;
             Color m_bgColor;
+            bool m_hasTextColorOverride;
+            bool m_hasBorderColorOverride;
+            bool m_hasSelectionColorOverride;
+            bool m_hasBackgroundColorOverride;
 
             TextChangeHandler m_changeHandler;
             void *m_changeUserData;

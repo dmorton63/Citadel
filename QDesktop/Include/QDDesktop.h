@@ -36,16 +36,10 @@
 #include "QG/Image.h"
 #include "QKEventListener.h"
 #include "QDAccent.h"
-#include "QDTheme.h"
+#include "QCQLEngine.h"
+#include "QDThemeOverrides.h"
+#include "QDThemeService.h"
 #include "QDTerminal.h"
-
-namespace QW
-{
-    namespace Controls
-    {
-        class IconButton;
-    }
-}
 
 namespace QK
 {
@@ -213,7 +207,6 @@ namespace QD
         void updateLayout();
         void applyColors();
         void publishStyleSnapshot(const DesktopColors &colors);
-        void applyThemeOverrides(QW::StyleSnapshot &snapshot) const;
         void applyThemeToDesktopColors(DesktopColors &colors) const;
         void updateSidebarButtonRoles();
         void resetBackgroundConfig();
@@ -222,12 +215,17 @@ namespace QD
         ImageAsset *findImageAsset(const char *path) const;
         ImageAsset *loadImageAsset(const char *path);
         void releaseImageAssets();
-        bool readFileBytes(const char *path, QC::Vector<QC::u8> &outBuffer) const;
+        bool readFileBytes(const char *path, QC::Vector<QC::u8> &outBuffer, bool logFailure = true) const;
 
         void openTerminal();
         void toggleTerminal();
         void openBrowser();
+        bool ensureCmmsDatabaseReady();
+        void openCMMS();
         void openHelpWindow();
+        bool applyThemeStateOnce(ThemeID activeThemeId);
+        void cycleThemeFromSettings();
+        bool applyThemeByIdString(const char *themeIdText);
         void recomputeTaskbarWindowBase();
         void showShutdownPrompt(QK::Shutdown::Reason reason);
 
@@ -238,14 +236,18 @@ namespace QD
         // JSON desktop action handlers
         static void onJsonTerminalClick(QW::Controls::Button *button, void *userData);
         static void onJsonShutdownClick(QW::Controls::Button *button, void *userData);
+        static void onJsonSettingsClick(QW::Controls::Button *button, void *userData);
+        static void onJsonCMMSClick(QW::Controls::Button *button, void *userData);
 
-        // CUI-ML IconButton action handlers
-        static void onJsonTerminalIconClick(QW::Controls::IconButton *button, void *userData);
-        static void onJsonShutdownIconClick(QW::Controls::IconButton *button, void *userData);
+        // CUI-ML icon-style button action handlers
+        static void onJsonTerminalButtonClick(QW::Controls::Button *button, void *userData);
+        static void onJsonShutdownButtonClick(QW::Controls::Button *button, void *userData);
+        static void onJsonSettingsButtonClick(QW::Controls::Button *button, void *userData);
+        static void onJsonCMMSButtonClick(QW::Controls::Button *button, void *userData);
 
         // Taskbar button click handler
         static void onTaskbarClick(QW::Controls::Button *button, void *userData);
-        static void onTaskbarIconClick(QW::Controls::IconButton *button, void *userData);
+        static void onTaskbarIconButtonClick(QW::Controls::Button *button, void *userData);
 
         static bool onWindowEvent(const QK::Event::Event &event, void *userData);
         void ensureWindowEventListener();
@@ -265,165 +267,9 @@ namespace QD
         QC::Vector<QW::Controls::IControl *> m_jsonControls;
         QC::Vector<QW::Controls::IControl *> m_jsonRootControls;
 
-        struct ColorOverride
-        {
-            bool set = false;
-            QC::Color value;
-        };
-
-        struct PaletteOverrides
-        {
-            ColorOverride accent;
-            ColorOverride accentLight;
-            ColorOverride accentDark;
-            ColorOverride panel;
-            ColorOverride panelBorder;
-            ColorOverride text;
-            ColorOverride textSecondary;
-        };
-
-        struct MetricsOverrides
-        {
-            bool cornerRadiusSet = false;
-            QC::u32 cornerRadius = 0;
-            bool buttonCornerRadiusSet = false;
-            QC::u32 buttonCornerRadius = 0;
-            bool borderWidthSet = false;
-            QC::u32 borderWidth = 0;
-        };
-
-        struct ButtonStyleOverrides
-        {
-            ColorOverride fillNormal;
-            ColorOverride fillHover;
-            ColorOverride fillPressed;
-            ColorOverride text;
-            ColorOverride border;
-            bool glassSet = false;
-            bool glass = false;
-            bool shineSet = false;
-            float shineIntensity = 0.0f;
-            bool materialSet = false;
-            char material[48] = {};
-            bool hasAny() const
-            {
-                return fillNormal.set || fillHover.set || fillPressed.set || text.set || border.set || glassSet || shineSet || materialSet;
-            }
-        };
-
-        static constexpr QC::u32 MAX_THEME_MATERIALS = 16;
-
-        struct ButtonMaterialStyle
-        {
-            ColorOverride fillNormal;
-            ColorOverride fillHover;
-            ColorOverride fillPressed;
-            ColorOverride text;
-            ColorOverride border;
-            bool glassSet = false;
-            bool glass = false;
-            bool shineSet = false;
-            float shineIntensity = 0.0f;
-            bool hasAny() const
-            {
-                return fillNormal.set || fillHover.set || fillPressed.set || text.set || border.set || glassSet || shineSet;
-            }
-        };
-
-        struct ButtonMaterialLayerSet
-        {
-            ColorOverride glossTop;
-            ColorOverride glossBottom;
-            ColorOverride shadeTop;
-            ColorOverride shadeBottom;
-            bool hasAny() const
-            {
-                return glossTop.set || glossBottom.set || shadeTop.set || shadeBottom.set;
-            }
-        };
-
-        struct ButtonMaterialLayers
-        {
-            ButtonMaterialLayerSet normal;
-            ButtonMaterialLayerSet hover;
-            ButtonMaterialLayerSet pressed;
-            bool hasAny() const
-            {
-                return normal.hasAny() || hover.hasAny() || pressed.hasAny();
-            }
-        };
-
-        struct ButtonMaterialDefinition
-        {
-            bool used = false;
-            char name[48] = {};
-            ButtonMaterialStyle style;
-            ButtonMaterialLayers layers;
-            bool hasAny() const
-            {
-                return style.hasAny() || layers.hasAny();
-            }
-        };
-
-        struct ShadowOverrides
-        {
-            bool offsetXSet = false;
-            QC::i32 offsetX = 0;
-            bool offsetYSet = false;
-            QC::i32 offsetY = 0;
-            bool blurSet = false;
-            QC::u32 blurRadius = 0;
-            ColorOverride color;
-        };
-
-        struct GlowOverrides
-        {
-            bool radiusSet = false;
-            QC::u32 radius = 0;
-            bool intensitySet = false;
-            QC::u32 intensity = 0;
-            ColorOverride color;
-        };
-
-        struct TransparencyOverrides
-        {
-            bool windowOpacitySet = false;
-            QC::u8 windowOpacity = 0xFF;
-            bool panelOpacitySet = false;
-            QC::u8 panelOpacity = 0xFF;
-        };
-
-        struct EffectsOverrides
-        {
-            ColorOverride borderColor;
-            ShadowOverrides shadow;
-            GlowOverrides glow;
-        };
-
-        struct FontOverrides
-        {
-            bool familySet = false;
-            char family[48] = {};
-            bool sizeSet = false;
-            QC::u8 size = 12;
-        };
-
-        struct ThemeOverrides
-        {
-            PaletteOverrides palette;
-            MetricsOverrides metrics;
-            ButtonStyleOverrides button[static_cast<QC::u32>(QW::ButtonRole::Count)];
-            ButtonMaterialDefinition materials[MAX_THEME_MATERIALS];
-            QC::u32 materialCount = 0;
-            EffectsOverrides effects;
-            TransparencyOverrides transparency;
-            FontOverrides font;
-            bool active = false;
-        };
-
         ThemeOverrides m_themeOverrides;
-        Theme m_themeDefinition;
-        bool m_themeLoaded;
+        ThemeService m_themeService;
+        ThemeLoadResult m_loadedTheme;
 
         // Font loading (theme-selected family -> VFS bytes -> QG::FontManager)
         bool m_lastAppliedFontFamilySet = false;
@@ -475,7 +321,6 @@ namespace QD
         {
             QC::u32 windowId;
             QW::Controls::Button *button;
-            QW::Controls::IconButton *iconButton;
             QC::u32 width;
             QC::u32 height;
             bool isActive;
@@ -496,6 +341,9 @@ namespace QD
 
         SetupWizard *m_setupWizard;
         LoginDialog *m_loginDialog;
+
+        QCQL::Database m_cmmsDatabase;
+        bool m_cmmsDatabaseReady = false;
 
         struct ImageAsset
         {

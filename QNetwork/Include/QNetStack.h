@@ -21,6 +21,15 @@ namespace QNet
         UDP = 17
     };
 
+    struct PortAuditEvent
+    {
+        QC::u64 t_ms = 0;
+        QC::u64 code = 0;
+        Protocol protocol = Protocol::ICMP;
+        QC::u16 port = 0;
+        QC::u32 ownerPid = 0;
+    };
+
     class Stack
     {
     public:
@@ -44,6 +53,12 @@ namespace QNet
         // Best-effort port hygiene: close idle TCP listeners/half-open and ephemeral UDP binds.
         QC::usize closeUnusedPorts();
 
+        // Managed port lifecycle hooks used by transport layers.
+        bool openManagedPort(Protocol protocol, QC::u16 port, QC::u32 ownerPid);
+        bool closeManagedPort(Protocol protocol, QC::u16 port);
+        bool isManagedPortOpen(Protocol protocol, QC::u16 port) const;
+        QC::usize copyPortAuditEvents(PortAuditEvent *out, QC::usize max) const;
+
         // NIC driver callback
         static void setTransmitCallback(void (*callback)(const void *, QC::usize));
         static void transmitToNIC(const void *data, QC::usize length);
@@ -58,6 +73,13 @@ namespace QNet
         IP *m_ip;
         TCP *m_tcp;
         UDP *m_udp;
+
+        static constexpr QC::usize PortAuditLogSize = 64;
+        PortAuditEvent m_portAudit[PortAuditLogSize] = {};
+        QC::usize m_portAuditHead = 0;
+        QC::usize m_portAuditCount = 0;
+
+        void pushPortAudit(QC::u64 code, Protocol protocol, QC::u16 port, QC::u32 ownerPid);
     };
 
 } // namespace QNet

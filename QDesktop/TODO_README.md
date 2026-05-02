@@ -237,7 +237,7 @@ namespace QC
   - [x] Event handling (IEventReceiver)
   - [x] Bounds and state management
   - [x] Parent/window hierarchy
-- [ ] Themed rendering (per UIStyle)
+- [x] Themed rendering (per UIStyle)
 - [ ] Animation state machine
 - [ ] Layout constraints
 
@@ -276,7 +276,7 @@ namespace QC
 - [ ] `QW::Controls::StatusBar` - Status bar
 
 ### 5.6 UIStyle-Aware Controls (NEW)
-- [ ] All controls query `currentUIStyle()` for rendering
+- [x] All controls query `currentUIStyle()` for rendering
 - [ ] Frame adapts to style (3D vs flat vs rounded)
 - [ ] Per-style color palettes
 - [ ] Per-style hover/focus effects

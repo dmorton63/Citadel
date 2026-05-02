@@ -135,12 +135,14 @@ namespace QD
 
         QW::Rect unlockBounds = {startX, baseY, static_cast<QC::u32>(buttonWidth), static_cast<QC::u32>(buttonHeight)};
         m_unlockButton = new QW::Controls::Button(m_window, "Unlock", unlockBounds);
+        m_unlockButton->setContentMode(QW::ButtonContentMode::Text);
         m_unlockButton->setRole(QW::ButtonRole::Accent);
         m_unlockButton->setClickHandler(&LoginDialog::onUnlockClick, this);
         m_root->addChild(m_unlockButton);
 
         QW::Rect cancelBounds = {startX + buttonWidth + spacing, baseY, static_cast<QC::u32>(buttonWidth), static_cast<QC::u32>(buttonHeight)};
         m_cancelButton = new QW::Controls::Button(m_window, "Cancel", cancelBounds);
+        m_cancelButton->setContentMode(QW::ButtonContentMode::Text);
         m_cancelButton->setRole(QW::ButtonRole::Default);
         m_cancelButton->setClickHandler(&LoginDialog::onCancelClick, this);
         m_root->addChild(m_cancelButton);

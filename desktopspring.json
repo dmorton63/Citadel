@@ -1,18 +1,84 @@
 {
   "desktop": {
+    "theme": {
+      "id": "spring",
+      "definition": {
+        "name": "Citadel Spring",
+        "colors": {
+          "windowBackground": "#182018",
+          "titleBarGradientStart": "#4A8F4A",
+          "titleBarGradientEnd": "#3A4A3A",
+          "buttonNormal": "#6490D99F",
+          "buttonHover": "#644DFF00",
+          "buttonPressed": "#FF028F00",
+          "buttonGlow": "#806CBF6C",
+          "textPrimary": "#FFFFFF",
+          "textSecondary": "#E8F5E9",
+          "border": "#3A4A3A",
+          "shadow": "#80000000",
+          "accentPrimary": "#6CCF6C",
+          "accentSecondary": "#B2F5B2"
+        },
+        "font": {
+          "family": "System",
+          "size": 12
+        },
+        "effects": {
+          "border": {
+            "width": 1,
+            "radius": 20,
+            "color": "#3A4A3A"
+          },
+          "shadow": {
+            "offsetX": 0,
+            "offsetY": 2,
+            "blur": 6,
+            "color": "#80000000"
+          },
+          "glow": {
+            "radius": 5,
+            "intensity": 128,
+            "color": "#806CBF6C"
+          },
+          "transparency": {
+            "windowOpacity": 255,
+            "panelOpacity": 100
+          }
+        },
+        "animations": {
+          "hoverDurationMs": 120,
+          "pressDurationMs": 50,
+          "windowOpenDurationMs": 180
+        }
+      },
+      "assets": {
+        "icons": {
+          "settings": "/system/icons/SETTINGS.PNG",
+          "terminal": "/system/icons/TERMINAL.PNG",
+          "folder": "/system/icons/FOLDER.PNG",
+          "start": "/system/icons/START.PNG",
+          "shutdown": "/system/icons/svg/power.svg"
+        },
+        "backgrounds": {
+          "desktopPrimary": "/system/wall/SPRING.PNG",
+          "desktopSecondary": "/system/wall/SPRING.PNG",
+          "lockScreen": "/system/wall/SPRING.PNG"
+        },
+        "textures": {
+          "glassNoise": "/system/textures/glass_noise.png",
+          "panelOverlay": "/system/textures/panel_overlay.png"
+        },
+        "illustrations": {
+          "boot": "/system/illustrations/boot.svg",
+          "setup": "/system/illustrations/setup.svg",
+          "recovery": "/system/illustrations/recovery.svg"
+        }
+      }
+    },
     "background": {
       "type": "image",
       "path": "/system/wall/SPRING.PNG",
       "mode": "stretch"
-    },
-    "theme": {
-      "accent": "#6CBF6C",
-      "accentLight": "#A8E6A8",
-      "accentDark": "#4A8F4A",
-      "text": "#FFFFFF",
-      "textSecondary": "#E8F5E9",
-      "panel": "#1F2A1F",
-      "panelBorder": "#3A4A3A"
     }
   }
 }

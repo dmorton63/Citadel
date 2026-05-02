@@ -52,6 +52,9 @@ namespace QNet
         }
         m_icmpEchoHead = 0;
         m_icmpEchoTail = 0;
+        m_ingressTick = 0;
+        for (QC::usize i = 0; i < IngressRateSlots; ++i)
+            m_ingressRate[i] = IngressRateSlot{};
     }
 
     IP::~IP()
@@ -61,6 +64,69 @@ namespace QNet
     void IP::initialize()
     {
         m_identification = 1;
+        m_ingressTick = 0;
+        m_guardStats = IngressGuardStats{};
+        for (QC::usize i = 0; i < IngressRateSlots; ++i)
+            m_ingressRate[i] = IngressRateSlot{};
+    }
+
+    void IP::resetIngressGuardStats()
+    {
+        m_guardStats = IngressGuardStats{};
+    }
+
+    bool IP::allowInboundRate(QC::u8 protocol, QC::u16 dstPort)
+    {
+        static constexpr QC::u16 kMaxTokens = 32;
+        static constexpr QC::u16 kRefillEveryPackets = 4;
+
+        ++m_ingressTick;
+
+        QC::usize slot = IngressRateSlots;
+        QC::usize freeSlot = IngressRateSlots;
+        for (QC::usize i = 0; i < IngressRateSlots; ++i)
+        {
+            if (m_ingressRate[i].used)
+            {
+                if (m_ingressRate[i].protocol == protocol && m_ingressRate[i].port == dstPort)
+                {
+                    slot = i;
+                    break;
+                }
+            }
+            else if (freeSlot == IngressRateSlots)
+            {
+                freeSlot = i;
+            }
+        }
+
+        if (slot == IngressRateSlots)
+        {
+            slot = (freeSlot != IngressRateSlots) ? freeSlot : (dstPort % IngressRateSlots);
+            m_ingressRate[slot].used = true;
+            m_ingressRate[slot].protocol = protocol;
+            m_ingressRate[slot].port = dstPort;
+            m_ingressRate[slot].tokens = kMaxTokens;
+            m_ingressRate[slot].lastTick = m_ingressTick;
+        }
+
+        IngressRateSlot &s = m_ingressRate[slot];
+        const QC::u64 delta = (m_ingressTick >= s.lastTick) ? (m_ingressTick - s.lastTick) : 0;
+        if (delta != 0)
+        {
+            QC::u16 refill = static_cast<QC::u16>(delta / kRefillEveryPackets);
+            if (refill != 0)
+            {
+                QC::u32 t = static_cast<QC::u32>(s.tokens) + refill;
+                s.tokens = static_cast<QC::u16>((t > kMaxTokens) ? kMaxTokens : t);
+            }
+            s.lastTick = m_ingressTick;
+        }
+
+        if (s.tokens == 0)
+            return false;
+        --s.tokens;
+        return true;
     }
 
     void IP::clearIcmpEchoReplies()
@@ -117,9 +183,13 @@ namespace QNet
             }
         }
 
+        const QC::u16 totalLength = ntohs(header->totalLength);
+        if (totalLength < headerLen || totalLength > length)
+            return;
+
         // Get payload
         const void *payload = static_cast<const QC::u8 *>(data) + headerLen;
-        QC::usize payloadLen = ntohs(header->totalLength) - headerLen;
+        QC::usize payloadLen = totalLength - headerLen;
 
         // Dispatch based on protocol
         switch (header->protocol)
@@ -129,10 +199,90 @@ namespace QNet
             break;
 
         case static_cast<QC::u8>(Protocol::TCP):
+            if (payloadLen < sizeof(TCPHeader))
+            {
+                ++m_guardStats.tcpMalformedDrops;
+                return;
+            }
+            {
+                const auto *tcp = static_cast<const TCPHeader *>(payload);
+                const QC::u16 dstPort = ntohs(tcp->destPort);
+                const QC::u8 dataOffset = (tcp->dataOffset >> 4) & 0x0F;
+                const QC::usize tcpHeaderLen = static_cast<QC::usize>(dataOffset) * 4;
+                if (dataOffset < 5 || tcpHeaderLen > payloadLen || tcpHeaderLen > 60)
+                {
+                    ++m_guardStats.tcpMalformedDrops;
+                    return;
+                }
+                const QC::usize tcpPayloadLen = payloadLen - tcpHeaderLen;
+                if (tcpPayloadLen > 4096)
+                {
+                    ++m_guardStats.tcpMalformedDrops;
+                    return;
+                }
+                // Drop contradictory control flags up front.
+                if ((tcp->flags & (TCPFlags::SYN | TCPFlags::FIN)) == (TCPFlags::SYN | TCPFlags::FIN))
+                {
+                    ++m_guardStats.tcpMalformedDrops;
+                    return;
+                }
+                if ((tcp->flags & (TCPFlags::SYN | TCPFlags::RST)) == (TCPFlags::SYN | TCPFlags::RST))
+                {
+                    ++m_guardStats.tcpMalformedDrops;
+                    return;
+                }
+                // Port Manager stage 1 boundary policy: if no managed owner exists for
+                // the destination port, drop unsolicited inbound traffic.
+                if (!Stack::instance().isManagedPortOpen(Protocol::TCP, dstPort))
+                {
+                    ++m_guardStats.tcpBoundaryDrops;
+                    return;
+                }
+                if (!allowInboundRate(static_cast<QC::u8>(Protocol::TCP), dstPort))
+                {
+                    ++m_guardStats.tcpRateDrops;
+                    return;
+                }
+            }
+            ++m_guardStats.tcpAccepted;
             Stack::instance().tcp()->receivePacket(header->source, payload, payloadLen);
             break;
 
         case static_cast<QC::u8>(Protocol::UDP):
+            if (payloadLen < sizeof(UDPHeader))
+            {
+                ++m_guardStats.udpMalformedDrops;
+                return;
+            }
+            {
+                const auto *udp = static_cast<const UDPHeader *>(payload);
+                const QC::u16 dstPort = ntohs(udp->destPort);
+                const QC::u16 udpLen = ntohs(udp->length);
+                if (udpLen < sizeof(UDPHeader) || udpLen > payloadLen)
+                {
+                    ++m_guardStats.udpMalformedDrops;
+                    return;
+                }
+                const QC::usize udpPayloadLen = udpLen - sizeof(UDPHeader);
+                if (udpPayloadLen > 2048)
+                {
+                    ++m_guardStats.udpMalformedDrops;
+                    return;
+                }
+                // Port Manager stage 1 boundary policy: if no managed owner exists for
+                // the destination port, drop unsolicited inbound traffic.
+                if (!Stack::instance().isManagedPortOpen(Protocol::UDP, dstPort))
+                {
+                    ++m_guardStats.udpBoundaryDrops;
+                    return;
+                }
+                if (!allowInboundRate(static_cast<QC::u8>(Protocol::UDP), dstPort))
+                {
+                    ++m_guardStats.udpRateDrops;
+                    return;
+                }
+            }
+            ++m_guardStats.udpAccepted;
             Stack::instance().udp()->receivePacket(header->source, payload, payloadLen);
             break;
         }

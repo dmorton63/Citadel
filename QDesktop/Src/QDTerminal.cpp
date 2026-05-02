@@ -526,6 +526,8 @@ namespace QD
         // Close button in the upper-right corner
         QC::Rect closeBounds = {static_cast<QC::i32>(w - kPad - 20), 2, 20, 20};
         auto *closeButton = new QW::Controls::Button(m_window, "X", closeBounds);
+        closeButton->setContentMode(QW::ButtonContentMode::Text);
+        closeButton->setVariant(QW::ButtonVariant::Compact);
         closeButton->setRole(QW::ButtonRole::Destructive);
         closeButton->setClickHandler(&Terminal::onCloseClick, this);
         m_content->addChild(closeButton);
@@ -686,12 +688,14 @@ namespace QD
 
         QW::Rect okBounds = {startX, baseY, static_cast<QC::u32>(buttonWidth), static_cast<QC::u32>(buttonHeight)};
         m_chmodeOk = new QW::Controls::Button(m_chmodeWindow, "OK", okBounds);
+        m_chmodeOk->setContentMode(QW::ButtonContentMode::Text);
         m_chmodeOk->setRole(QW::ButtonRole::Accent);
         m_chmodeOk->setClickHandler(&Terminal::onChmodeOkClick, this);
         m_chmodeRoot->addChild(m_chmodeOk);
 
         QW::Rect cancelBounds = {startX + buttonWidth + spacing, baseY, static_cast<QC::u32>(buttonWidth), static_cast<QC::u32>(buttonHeight)};
         m_chmodeCancel = new QW::Controls::Button(m_chmodeWindow, "Cancel", cancelBounds);
+        m_chmodeCancel->setContentMode(QW::ButtonContentMode::Text);
         m_chmodeCancel->setRole(QW::ButtonRole::Default);
         m_chmodeCancel->setClickHandler(&Terminal::onChmodeCancelClick, this);
         m_chmodeRoot->addChild(m_chmodeCancel);
@@ -847,6 +851,7 @@ namespace QD
         const QC::i32 startX = (DIALOG_WIDTH - buttonWidth) / 2;
         QW::Rect okBounds = {startX, baseY, static_cast<QC::u32>(buttonWidth), static_cast<QC::u32>(buttonHeight)};
         m_shutdownPermOk = new QW::Controls::Button(m_shutdownPermWindow, "OK", okBounds);
+        m_shutdownPermOk->setContentMode(QW::ButtonContentMode::Text);
         m_shutdownPermOk->setRole(QW::ButtonRole::Default);
         m_shutdownPermOk->setClickHandler(&Terminal::onShutdownPermissionOkClick, this);
         m_shutdownPermRoot->addChild(m_shutdownPermOk);
@@ -1321,6 +1326,19 @@ namespace QD
 
             m_desktop->openCuiMLFile(pathBuf);
             appendLine("cuiml: opened");
+            return;
+        }
+
+        if (streqIgnoreCase(cmd, "enroll"))
+        {
+            if (!m_desktop)
+            {
+                appendLine("enroll: no desktop");
+                return;
+            }
+
+            m_desktop->showSetupWizard();
+            appendLine("enroll: opened owner setup");
             return;
         }
 

@@ -172,6 +172,11 @@ namespace QDrv
         return readReg(SVGA_REG_BITS_PER_PIXEL);
     }
 
+    void VmwareSVGA::resetUpdateStats()
+    {
+        m_updateStats = VmwareSVGAUpdateStats{};
+    }
+
     bool VmwareSVGA::initialize()
     {
         if (m_initialized)
@@ -371,6 +376,56 @@ namespace QDrv
 
         static QC::u32 s_updateCount = 0;
         ++s_updateCount;
+        ++m_updateStats.updateRectCalls;
+        m_updateStats.lastBatchRectCount = 1;
+
+        if (enqueueUpdateRect(x, y, w, h, s_updateCount))
+        {
+            kickFifoSync(m_fifo[SVGA_FIFO_NEXT_CMD], s_updateCount);
+        }
+    }
+
+    void VmwareSVGA::updateRects(const QC::Rect *rects, QC::usize count)
+    {
+        if (!m_2dAvailable || !m_fifo || !rects || count == 0)
+            return;
+
+        static QC::u32 s_batchCount = 0;
+        ++s_batchCount;
+        ++m_updateStats.updateRectsCalls;
+
+        QC::u32 queued = 0;
+        for (QC::usize i = 0; i < count; ++i)
+        {
+            const QC::Rect &r = rects[i];
+            if (r.isEmpty())
+                continue;
+
+            if (!enqueueUpdateRect(static_cast<QC::u32>(r.x),
+                                   static_cast<QC::u32>(r.y),
+                                   r.width,
+                                   r.height,
+                                   s_batchCount))
+            {
+                break;
+            }
+            ++queued;
+        }
+
+        m_updateStats.lastBatchRectCount = queued;
+
+        if (queued > 0)
+        {
+            kickFifoSync(m_fifo[SVGA_FIFO_NEXT_CMD], s_batchCount);
+        }
+    }
+
+    bool VmwareSVGA::enqueueUpdateRect(QC::u32 x, QC::u32 y, QC::u32 w, QC::u32 h, QC::u32 sequence)
+    {
+        if (!m_2dAvailable || !m_fifo)
+            return false;
+
+        ++m_updateStats.queuedRectCount;
 
         // Command: [CMD, x, y, w, h]
         constexpr QC::u32 dwords = 5;
@@ -381,7 +436,7 @@ namespace QDrv
         QC::u32 next = m_fifo[SVGA_FIFO_NEXT_CMD];
         const QC::u32 stop = m_fifo[SVGA_FIFO_STOP];
 
-        if ((s_updateCount % 120u) == 1u)
+        if ((sequence % 120u) == 1u)
         {
             // Defensive: if something disabled the device mid-run, re-enable it.
             const QC::u32 enabled = readReg(SVGA_REG_ENABLE);
@@ -391,13 +446,14 @@ namespace QDrv
                 writeReg(SVGA_REG_ENABLE, 1);
             }
             QC_LOG_INFO("QDrvSVGA", "SVGA_CMD_UPDATE #%u rect=%u,%u %ux%u next=0x%X stop=0x%X (min=0x%X max=0x%X)",
-                        s_updateCount, x, y, w, h, next, stop, min, max);
+                        sequence, x, y, w, h, next, stop, min, max);
         }
 
         if (!fifoHasSpace(min, next, stop, max, bytes))
         {
             QC_LOG_WARN("QDrvSVGA", "SVGA2D FIFO full; drop UPDATE");
-            return;
+            ++m_updateStats.fifoDropCount;
+            return false;
         }
 
         if (next + bytes > max)
@@ -406,7 +462,8 @@ namespace QDrv
             if (!fifoHasSpace(min, min, stop, max, bytes))
             {
                 QC_LOG_WARN("QDrvSVGA", "SVGA2D FIFO wrap blocked; drop UPDATE");
-                return;
+                ++m_updateStats.fifoDropCount;
+                return false;
             }
             next = min;
         }
@@ -428,6 +485,14 @@ namespace QDrv
         // Ensure NEXT_CMD is visible before kicking the device.
         QC::write_barrier();
 
+        return true;
+    }
+
+    void VmwareSVGA::kickFifoSync(QC::u32 expectedNextCmd, QC::u32 sequence) const
+    {
+        VmwareSVGA *self = const_cast<VmwareSVGA *>(this);
+        ++self->m_updateStats.fifoSyncCount;
+
         // Best-effort: nudge the device to process FIFO.
         // Avoid long busy-waits in the compositor path.
         writeReg(SVGA_REG_SYNC, 1);
@@ -439,14 +504,15 @@ namespace QDrv
                 break;
         }
 
+        self->m_updateStats.lastSyncBusyValue = busy;
         // Read back STOP to confirm command consumption.
         // If STOP doesn't catch up to NEXT_CMD, the host isn't processing FIFO.
         const QC::u32 stopAfter = m_fifo[SVGA_FIFO_STOP];
-        if (stopAfter != next && (s_updateCount % 120u) == 1u)
+        if (stopAfter != expectedNextCmd && (sequence % 120u) == 1u)
         {
-            QC_LOG_WARN("QDrvSVGA", "SVGA FIFO not fully consumed after SYNC (stop=0x%X expected=0x%X)", stopAfter, next);
+            QC_LOG_WARN("QDrvSVGA", "SVGA FIFO not fully consumed after SYNC (stop=0x%X expected=0x%X)", stopAfter, expectedNextCmd);
         }
-        if (busy != 0 && (s_updateCount % 120u) == 1u)
+        if (busy != 0 && (sequence % 120u) == 1u)
         {
             QC_LOG_WARN("QDrvSVGA", "SVGA busy still set after UPDATE kick (busy=%u)", busy);
         }

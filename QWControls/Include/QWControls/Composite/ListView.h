@@ -90,16 +90,16 @@ namespace QW
 
             // Appearance
             Color textColor() const { return m_textColor; }
-            void setTextColor(Color color) { m_textColor = color; }
+            void setTextColor(Color color);
 
             Color selectionColor() const { return m_selColor; }
-            void setSelectionColor(Color color) { m_selColor = color; }
+            void setSelectionColor(Color color);
 
             Color headerColor() const { return m_headerColor; }
-            void setHeaderColor(Color color) { m_headerColor = color; }
+            void setHeaderColor(Color color);
 
             Color backgroundColor() const { return m_bgColor; }
-            void setBackgroundColor(Color color) { m_bgColor = color; }
+            void setBackgroundColor(Color color);
 
             QC::u32 itemHeight() const { return m_itemHeight; }
             void setItemHeight(QC::u32 height) { m_itemHeight = height; }
@@ -137,6 +137,10 @@ namespace QW
             Color m_selColor;
             Color m_headerColor;
             Color m_bgColor;
+            bool m_hasTextColorOverride;
+            bool m_hasSelectionColorOverride;
+            bool m_hasHeaderColorOverride;
+            bool m_hasBackgroundColorOverride;
 
             SelectionChangeHandler m_selChangeHandler;
             void *m_selChangeUserData;

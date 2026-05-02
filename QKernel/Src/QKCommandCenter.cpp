@@ -36,7 +36,19 @@
 #include "QKImageReader.h"
 #include "QKModuleLoader.h"
 #include "QKSimpleDb.h"
+#include "QKCmdAuth.h"
+#include "QKCmdParse.h"
+#include "QKCmdPathFs.h"
+#include "QKCmdBuiltins.h"
+#include "QKCmdDebugTest.h"
+#include "QKCmdNet.h"
 #include "QKBootEventLog.h"
+
+#include "QCQLEngine.h"
+
+#include "QWWindowManager.h"
+#include "QWCompositor.h"
+#include "QDrvVmwareSVGA.h"
 
 #include "QSCSecurityCenter.h"
 #include "QKSystemPump.h"
@@ -418,6 +430,63 @@ namespace QK::CmdCenter
                 line[idx++] = value[i];
             line[idx] = '\0';
             ctx.writeLine(line);
+        }
+
+        static void writeKeyValueU32(const QC::Cmd::Context &ctx, const char *key, QC::u32 value)
+        {
+            char valueBuf[32];
+            QC::String::memset(valueBuf, 0, sizeof(valueBuf));
+            QC::u32 remaining = value;
+            int idx = 0;
+            if (remaining == 0)
+            {
+                valueBuf[idx++] = '0';
+            }
+            else
+            {
+                char tmp[32];
+                int tmpIdx = 0;
+                while (remaining > 0 && tmpIdx < 31)
+                {
+                    tmp[tmpIdx++] = static_cast<char>('0' + (remaining % 10));
+                    remaining /= 10;
+                }
+                for (int i = tmpIdx - 1; i >= 0; --i)
+                    valueBuf[idx++] = tmp[i];
+            }
+            valueBuf[idx] = '\0';
+            writeKeyValue(ctx, key, valueBuf);
+        }
+
+        static void writeKeyValueU64(const QC::Cmd::Context &ctx, const char *key, QC::u64 value)
+        {
+            char valueBuf[32];
+            QC::String::memset(valueBuf, 0, sizeof(valueBuf));
+            QC::u64 remaining = value;
+            int idx = 0;
+            if (remaining == 0)
+            {
+                valueBuf[idx++] = '0';
+            }
+            else
+            {
+                char tmp[32];
+                int tmpIdx = 0;
+                while (remaining > 0 && tmpIdx < 31)
+                {
+                    tmp[tmpIdx++] = static_cast<char>('0' + (remaining % 10));
+                    remaining /= 10;
+                }
+                for (int i = tmpIdx - 1; i >= 0; --i)
+                    valueBuf[idx++] = tmp[i];
+            }
+            valueBuf[idx] = '\0';
+            writeKeyValue(ctx, key, valueBuf);
+        }
+
+        static void writeKeyValueBool(const QC::Cmd::Context &ctx, const char *key, bool value)
+        {
+            writeKeyValue(ctx, key, value ? "yes" : "no");
         }
 
         static bool segmentEquals(const char *start, QC::usize len, const char *literal)
@@ -1478,6 +1547,82 @@ namespace QK::CmdCenter
                 }
                 ctx.writeLine(line);
             }
+            return true;
+        }
+
+        static bool cmdVideo(const char *args, const QC::Cmd::Context &ctx, void *)
+        {
+            char sub[32];
+            QC::String::memset(sub, 0, sizeof(sub));
+            const char *p = args ? skipSpaces(args) : nullptr;
+            if (!p || *p == '\0' || !readToken(p, sub, sizeof(sub)))
+            {
+                ctx.writeLine("usage: video <stats|reset>");
+                return true;
+            }
+
+            auto &wm = QW::WindowManager::instance();
+            QW::Compositor *compositor = wm.compositor();
+            auto &svga = QDrv::VmwareSVGA::instance();
+
+            if (streqIgnoreCase(sub, "reset"))
+            {
+                svga.resetUpdateStats();
+                if (compositor)
+                    compositor->resetStats();
+                ctx.writeLine("video: stats reset");
+                return true;
+            }
+
+            if (!streqIgnoreCase(sub, "stats"))
+            {
+                ctx.writeLine("usage: video <stats|reset>");
+                return true;
+            }
+
+            ctx.writeLine("Video Stats:");
+            writeKeyValueBool(ctx, "svga_available", svga.isAvailable());
+            writeKeyValueBool(ctx, "svga_2d", svga.has2D());
+            writeKeyValueBool(ctx, "svga_hw_cursor", svga.hasHardwareCursor());
+
+            const auto &svgaStats = svga.updateStats();
+            writeKeyValueU32(ctx, "svga_update_rect_calls", svgaStats.updateRectCalls);
+            writeKeyValueU32(ctx, "svga_update_rects_calls", svgaStats.updateRectsCalls);
+            writeKeyValueU32(ctx, "svga_queued_rects", svgaStats.queuedRectCount);
+            writeKeyValueU32(ctx, "svga_last_batch_rects", svgaStats.lastBatchRectCount);
+            writeKeyValueU32(ctx, "svga_fifo_syncs", svgaStats.fifoSyncCount);
+            writeKeyValueU32(ctx, "svga_fifo_drops", svgaStats.fifoDropCount);
+            writeKeyValueU32(ctx, "svga_last_sync_busy", svgaStats.lastSyncBusyValue);
+
+            if (!compositor)
+            {
+                ctx.writeLine("video: desktop compositor not active");
+                return true;
+            }
+
+            const auto &stats = compositor->stats();
+            const auto &accel = compositor->accelerationStats();
+            writeKeyValueU64(ctx, "compose_last_ms", stats.lastComposeTimeMs);
+            writeKeyValueU32(ctx, "compose_frames", stats.frameCount);
+            writeKeyValueU64(ctx, "dirty_area", stats.lastDirtyArea);
+            writeKeyValueU32(ctx, "dirty_coverage_pct", stats.lastDirtyCoveragePercent);
+            writeKeyValueU64(ctx, "dirty_regions_live", static_cast<QC::u64>(stats.dirtyRegionCount));
+            writeKeyValueU64(ctx, "dirty_regions_merged", static_cast<QC::u64>(stats.lastMergedDirtyRegionCount));
+            writeKeyValueU64(ctx, "present_dirty_rects", static_cast<QC::u64>(stats.lastPresentedDirtyRectCount));
+            writeKeyValueU32(ctx, "dirty_collapse_count", stats.dirtyCollapseCount);
+            writeKeyValueBool(ctx, "present_full_frame", stats.lastPresentWasFullFrame);
+            writeKeyValueBool(ctx, "present_batched", stats.lastPresentUsedBatching);
+            writeKeyValueBool(ctx, "hardware_cursor_active", stats.hardwareCursorActive);
+            writeKeyValueBool(ctx, "qgfx_active", accel.qgfxActive);
+            writeKeyValueBool(ctx, "qgfx_scanout_uploads_active", accel.qgfxScanoutUploadsActive);
+            writeKeyValueBool(ctx, "qgfx_rect_copy_active", accel.qgfxRectCopyActive);
+            writeKeyValueU32(ctx, "qgfx_present_calls", accel.qgfxPresentCalls);
+            writeKeyValueU32(ctx, "qgfx_present_successes", accel.qgfxPresentSuccesses);
+            writeKeyValueU32(ctx, "qgfx_scanout_upload_calls", accel.qgfxScanoutUploadCalls);
+            writeKeyValueU32(ctx, "qgfx_scanout_upload_rects", accel.qgfxScanoutUploadRects);
+            writeKeyValueU32(ctx, "qgfx_scanout_upload_fallbacks", accel.qgfxScanoutUploadFallbacks);
+            writeKeyValueU32(ctx, "qgfx_rect_copy_batches", accel.qgfxRectCopyBatches);
+            writeKeyValueU32(ctx, "qgfx_rect_copy_ops", accel.qgfxRectCopyOps);
             return true;
         }
 
@@ -2802,6 +2947,15 @@ namespace QK::CmdCenter
             return true;
         }
 
+        static bool cmdClear(const char *, const QC::Cmd::Context &ctx, void *)
+        {
+            ctx.writeLine("\x1b[2J\x1b[H");
+            // Fallback for terminals that ignore ANSI clear sequences.
+            for (QC::usize i = 0; i < 24; ++i)
+                ctx.writeLine("");
+            return true;
+        }
+
         static bool cmdShowMode(const char *, const QC::Cmd::Context &ctx, void *)
         {
             const auto mode = QK::Boot::Config::GetStartupMode();
@@ -2845,6 +2999,26 @@ namespace QK::CmdCenter
             }
 
             ctx.writeLine("setmode: persisted (takes effect next boot)");
+            return true;
+        }
+
+        static bool cmdStartx(const char *, const QC::Cmd::Context &ctx, void *)
+        {
+            const auto mode = QK::Boot::Config::GetStartupMode();
+            if (mode == QK::Boot::Config::StartupMode::Desktop)
+            {
+                ctx.writeLine("startx: desktop mode already configured");
+                return true;
+            }
+
+            const QC::Status st = QK::Boot::Config::PersistStartupMode(QK::Boot::Config::StartupMode::Desktop, nullptr);
+            if (st != QC::Status::Success)
+            {
+                ctx.writeLine("startx: failed to persist desktop mode");
+                return true;
+            }
+
+            ctx.writeLine("startx: desktop mode enabled (reboot to enter desktop)");
             return true;
         }
 
@@ -3068,6 +3242,820 @@ namespace QK::CmdCenter
             }
 
             ctx.writeLine("usage: db <status|list|get|set|del|save|reload> ...");
+            return true;
+        }
+
+        struct CsqlSession
+        {
+            bool open = false;
+            QCQL::Database database = {};
+            char path[192] = {};
+        };
+
+        static CsqlSession g_csqlSession;
+
+        static const char *qcqlStatusName(QCQL::Status st)
+        {
+            switch (st)
+            {
+            case QCQL::Status::Success:
+                return "Success";
+            case QCQL::Status::Error:
+                return "Error";
+            case QCQL::Status::InvalidParam:
+                return "InvalidParam";
+            case QCQL::Status::NotFound:
+                return "NotFound";
+            case QCQL::Status::PermissionDenied:
+                return "PermissionDenied";
+            case QCQL::Status::AlreadyExists:
+                return "AlreadyExists";
+            case QCQL::Status::OutOfMemory:
+                return "OutOfMemory";
+            case QCQL::Status::NotSupported:
+                return "NotSupported";
+            case QCQL::Status::Corrupt:
+                return "Corrupt";
+            }
+            return "Unknown";
+        }
+
+        static bool csqlListTables(const QC::Cmd::Context &ctx)
+        {
+            if (!g_csqlSession.open)
+            {
+                ctx.writeLine("csql: no database is open");
+                return true;
+            }
+
+            char head[224];
+            QC::String::memset(head, 0, sizeof(head));
+            (void)appendString(head, sizeof(head), "csql: tables_loaded=");
+            (void)appendU64Dec(head, sizeof(head), static_cast<QC::u64>(g_csqlSession.database.tables.size()));
+            (void)appendString(head, sizeof(head), " path=");
+            (void)appendString(head, sizeof(head), g_csqlSession.path);
+            ctx.writeLine(head);
+
+            if (g_csqlSession.database.tables.empty())
+            {
+                ctx.writeLine("csql: no tables found");
+                return true;
+            }
+
+            for (QC::usize i = 0; i < g_csqlSession.database.tables.size(); ++i)
+            {
+                const QCQL::Table &t = g_csqlSession.database.tables[i];
+                char line[192];
+                QC::String::memset(line, 0, sizeof(line));
+                (void)appendU64Dec(line, sizeof(line), static_cast<QC::u64>(i + 1));
+                (void)appendString(line, sizeof(line), ") ");
+                (void)appendString(line, sizeof(line), t.name[0] ? t.name : "(unnamed)");
+                (void)appendString(line, sizeof(line), " id=");
+                (void)appendU64Dec(line, sizeof(line), static_cast<QC::u64>(t.tableId));
+                (void)appendString(line, sizeof(line), " columns=");
+                (void)appendU64Dec(line, sizeof(line), static_cast<QC::u64>(t.schema.columns.size()));
+                ctx.writeLine(line);
+            }
+
+            return true;
+        }
+
+        static const char *csqlColumnTypeName(QCQL::ColumnType type)
+        {
+            switch (type)
+            {
+            case QCQL::ColumnType::Text:
+                return "text";
+            case QCQL::ColumnType::Int:
+                return "int";
+            case QCQL::ColumnType::Bool:
+                return "bool";
+            case QCQL::ColumnType::DateTime:
+                return "datetime";
+            }
+            return "unknown";
+        }
+
+        static const QCQL::Table *csqlFindTableByName(const char *name)
+        {
+            if (!g_csqlSession.open || !name || *name == '\0')
+                return nullptr;
+
+            for (QC::usize i = 0; i < g_csqlSession.database.tables.size(); ++i)
+            {
+                const QCQL::Table &t = g_csqlSession.database.tables[i];
+                if (streqIgnoreCase(t.name, name))
+                    return &t;
+            }
+            return nullptr;
+        }
+
+        static bool csqlDescribeTable(const char *tableName, const QC::Cmd::Context &ctx)
+        {
+            if (!g_csqlSession.open)
+            {
+                ctx.writeLine("csql: no database is open");
+                return true;
+            }
+
+            const QCQL::Table *table = csqlFindTableByName(tableName);
+            if (!table)
+            {
+                ctx.writeLine("csql: table not found");
+                return true;
+            }
+
+            char head[224];
+            QC::String::memset(head, 0, sizeof(head));
+            (void)appendString(head, sizeof(head), "csql: schema ");
+            (void)appendString(head, sizeof(head), table->name);
+            (void)appendString(head, sizeof(head), " columns=");
+            (void)appendU64Dec(head, sizeof(head), static_cast<QC::u64>(table->schema.columns.size()));
+            (void)appendString(head, sizeof(head), " pages=");
+            (void)appendU64Dec(head, sizeof(head), static_cast<QC::u64>(table->pages.size()));
+            ctx.writeLine(head);
+
+            for (QC::usize i = 0; i < table->schema.columns.size(); ++i)
+            {
+                const QCQL::Column &col = table->schema.columns[i];
+                char line[224];
+                QC::String::memset(line, 0, sizeof(line));
+                (void)appendU64Dec(line, sizeof(line), static_cast<QC::u64>(i + 1));
+                (void)appendString(line, sizeof(line), ") ");
+                (void)appendString(line, sizeof(line), col.name[0] ? col.name : "(unnamed)");
+                (void)appendString(line, sizeof(line), " type=");
+                (void)appendString(line, sizeof(line), csqlColumnTypeName(col.type));
+                if (col.isPrimaryKey)
+                    (void)appendString(line, sizeof(line), " pk=1");
+                ctx.writeLine(line);
+            }
+
+            return true;
+        }
+
+        static void csqlAppendCell(char *line, QC::usize cap, QC::u64 &len, const QCQL::Cell &cell)
+        {
+            auto appendText = [&](const char *text) {
+                if (!text)
+                    return;
+                for (const char *p = text; *p && len + 1 < cap; ++p)
+                    line[len++] = *p;
+                line[len] = '\0';
+            };
+
+            auto appendU64 = [&](QC::u64 value) {
+                char tmp[32];
+                QC::String::memset(tmp, 0, sizeof(tmp));
+                QC::usize digits = 0;
+                if (value == 0)
+                {
+                    appendText("0");
+                    return;
+                }
+                while (value > 0 && digits < sizeof(tmp))
+                {
+                    tmp[digits++] = static_cast<char>('0' + (value % 10));
+                    value /= 10;
+                }
+                while (digits > 0)
+                {
+                    if (len + 1 >= cap)
+                        break;
+                    line[len++] = tmp[--digits];
+                }
+                line[len] = '\0';
+            };
+
+            if (cell.type == QCQL::ColumnType::Text)
+            {
+                for (QC::usize i = 0; i < cell.bytes.size(); ++i)
+                {
+                    const char ch = static_cast<char>(cell.bytes[i]);
+                    if (ch == '\0')
+                        continue;
+                    if (ch >= 32 && ch <= 126)
+                    {
+                        if (len + 1 >= cap)
+                            break;
+                        line[len++] = ch;
+                    }
+                    else
+                    {
+                        if (len + 1 >= cap)
+                            break;
+                        line[len++] = ' ';
+                    }
+                }
+                line[len] = '\0';
+                return;
+            }
+
+            if (cell.type == QCQL::ColumnType::Bool)
+            {
+                appendText((!cell.bytes.empty() && cell.bytes[0] != 0) ? "true" : "false");
+                return;
+            }
+
+            if (cell.type == QCQL::ColumnType::Int || cell.type == QCQL::ColumnType::DateTime)
+            {
+                QC::u64 value = 0;
+                const QC::usize maxBytes = cell.bytes.size() < 8 ? cell.bytes.size() : static_cast<QC::usize>(8);
+                for (QC::usize i = 0; i < maxBytes; ++i)
+                    value |= (static_cast<QC::u64>(cell.bytes[i]) << (8 * i));
+                if (cell.type == QCQL::ColumnType::DateTime)
+                    appendText("ts=");
+                appendU64(value);
+                return;
+            }
+
+            appendText("<bin>");
+        }
+
+        static bool csqlParseU64(const char *text, QC::u64 &out)
+        {
+            if (!text)
+                return false;
+            while (*text == ' ' || *text == '\t')
+                ++text;
+            if (*text < '0' || *text > '9')
+                return false;
+
+            QC::u64 value = 0;
+            while (*text >= '0' && *text <= '9')
+            {
+                value = (value * 10) + static_cast<QC::u64>(*text - '0');
+                ++text;
+            }
+            out = value;
+            return true;
+        }
+
+        static bool csqlDumpRows(const char *tableName, QC::u64 limit, const QC::Cmd::Context &ctx)
+        {
+            if (!g_csqlSession.open)
+            {
+                ctx.writeLine("csql: no database is open");
+                return true;
+            }
+
+            const QCQL::Table *table = csqlFindTableByName(tableName);
+            if (!table)
+            {
+                ctx.writeLine("csql: table not found");
+                return true;
+            }
+
+            if (limit == 0)
+                limit = 25;
+
+            char head[224];
+            QC::String::memset(head, 0, sizeof(head));
+            (void)appendString(head, sizeof(head), "csql: rows ");
+            (void)appendString(head, sizeof(head), table->name);
+            (void)appendString(head, sizeof(head), " limit=");
+            (void)appendU64Dec(head, sizeof(head), limit);
+            (void)appendString(head, sizeof(head), " pages=");
+            (void)appendU64Dec(head, sizeof(head), static_cast<QC::u64>(table->pages.size()));
+            ctx.writeLine(head);
+
+            QC::u64 emitted = 0;
+            for (QC::usize p = 0; p < table->pages.size() && emitted < limit; ++p)
+            {
+                QCQL::Page page{};
+                const QCQL::Status loadSt = QCQL::Engine::instance().loadPage(g_csqlSession.database, table->pages[p], page);
+                if (loadSt != QCQL::Status::Success)
+                    continue;
+
+                for (QC::usize r = 0; r < page.rowOffsets.size() && emitted < limit; ++r)
+                {
+                    QCQL::Row row{};
+                    const QCQL::Status rowSt = QCQL::Engine::instance().readRow(g_csqlSession.database, page.header.pageId, page.rowOffsets[r], row);
+                    if (rowSt != QCQL::Status::Success || row.tombstone)
+                        continue;
+
+                    char line[320];
+                    QC::String::memset(line, 0, sizeof(line));
+                    QC::u64 len = 0;
+
+                    for (QC::usize c = 0; c < row.cells.size(); ++c)
+                    {
+                        if (c > 0)
+                        {
+                            if (len + 3 < sizeof(line))
+                            {
+                                line[len++] = ' ';
+                                line[len++] = '|';
+                                line[len++] = ' ';
+                                line[len] = '\0';
+                            }
+                        }
+                        csqlAppendCell(line, sizeof(line), len, row.cells[c]);
+                    }
+
+                    ctx.writeLine(line[0] ? line : "(empty row)");
+                    ++emitted;
+                }
+            }
+
+            if (emitted == 0)
+                ctx.writeLine("csql: no rows found");
+            return true;
+        }
+
+        static bool csqlStartsWithIgnoreCase(const char *text, const char *prefix)
+        {
+            if (!text || !prefix)
+                return false;
+            while (*prefix)
+            {
+                if (*text == '\0')
+                    return false;
+                char a = *text;
+                char b = *prefix;
+                if (a >= 'A' && a <= 'Z')
+                    a = static_cast<char>(a - 'A' + 'a');
+                if (b >= 'A' && b <= 'Z')
+                    b = static_cast<char>(b - 'A' + 'a');
+                if (a != b)
+                    return false;
+                ++text;
+                ++prefix;
+            }
+            return true;
+        }
+
+        static bool csqlIsIdentStart(char ch)
+        {
+            return (ch >= 'A' && ch <= 'Z') ||
+                   (ch >= 'a' && ch <= 'z') ||
+                   ch == '_';
+        }
+
+        static bool csqlIsIdentPart(char ch)
+        {
+            return csqlIsIdentStart(ch) ||
+                   (ch >= '0' && ch <= '9');
+        }
+
+        static bool csqlReadIdentifier(const char *&p, char *out, QC::usize outSize)
+        {
+            if (!out || outSize == 0)
+                return false;
+
+            QC::String::memset(out, 0, outSize);
+            p = p ? skipSpaces(p) : nullptr;
+            if (!p || !csqlIsIdentStart(*p))
+                return false;
+
+            QC::usize i = 0;
+            while (*p && csqlIsIdentPart(*p) && i + 1 < outSize)
+                out[i++] = *p++;
+            out[i] = '\0';
+            return i > 0;
+        }
+
+        static bool csqlConsumeKeyword(const char *&p, const char *keyword)
+        {
+            p = p ? skipSpaces(p) : nullptr;
+            if (!p || !keyword)
+                return false;
+
+            const char *cursor = p;
+            while (*keyword)
+            {
+                if (*cursor == '\0')
+                    return false;
+                char a = *cursor;
+                char b = *keyword;
+                if (a >= 'A' && a <= 'Z')
+                    a = static_cast<char>(a - 'A' + 'a');
+                if (b >= 'A' && b <= 'Z')
+                    b = static_cast<char>(b - 'A' + 'a');
+                if (a != b)
+                    return false;
+                ++cursor;
+                ++keyword;
+            }
+
+            if (*cursor != '\0' && !isSpace(*cursor) && *cursor != '(' && *cursor != ')' && *cursor != ',')
+                return false;
+
+            p = cursor;
+            return true;
+        }
+
+        static bool csqlConsumeChar(const char *&p, char token)
+        {
+            p = p ? skipSpaces(p) : nullptr;
+            if (!p || *p != token)
+                return false;
+            ++p;
+            return true;
+        }
+
+        static bool csqlParseColumnType(const char *&p, QCQL::ColumnType &outType)
+        {
+            char typeName[32];
+            if (!csqlReadIdentifier(p, typeName, sizeof(typeName)))
+                return false;
+
+            if (streqIgnoreCase(typeName, "text") ||
+                streqIgnoreCase(typeName, "varchar") ||
+                streqIgnoreCase(typeName, "char") ||
+                streqIgnoreCase(typeName, "string"))
+            {
+                outType = QCQL::ColumnType::Text;
+            }
+            else if (streqIgnoreCase(typeName, "int") ||
+                     streqIgnoreCase(typeName, "integer") ||
+                     streqIgnoreCase(typeName, "tinyint") ||
+                     streqIgnoreCase(typeName, "smallint") ||
+                     streqIgnoreCase(typeName, "bigint"))
+            {
+                outType = QCQL::ColumnType::Int;
+            }
+            else if (streqIgnoreCase(typeName, "bool") ||
+                     streqIgnoreCase(typeName, "boolean"))
+            {
+                outType = QCQL::ColumnType::Bool;
+            }
+            else if (streqIgnoreCase(typeName, "datetime") ||
+                     streqIgnoreCase(typeName, "timestamp"))
+            {
+                outType = QCQL::ColumnType::DateTime;
+            }
+            else
+            {
+                return false;
+            }
+
+            p = p ? skipSpaces(p) : nullptr;
+            if (p && *p == '(')
+            {
+                ++p;
+                while (*p && *p != ')')
+                    ++p;
+                if (*p != ')')
+                    return false;
+                ++p;
+            }
+
+            return true;
+        }
+
+        static bool csqlParseCreateTableDefinition(const char *definition, QCQL::TableSchema &outSchema)
+        {
+            const char *p = definition ? skipSpaces(definition) : nullptr;
+            if (!p)
+                return false;
+
+            outSchema = QCQL::TableSchema{};
+            if (!csqlReadIdentifier(p, outSchema.tableName, sizeof(outSchema.tableName)))
+                return false;
+            if (!csqlConsumeChar(p, '('))
+                return false;
+
+            QC::u32 pkCount = 0;
+            while (true)
+            {
+                QCQL::Column column{};
+                if (!csqlReadIdentifier(p, column.name, sizeof(column.name)))
+                    return false;
+                if (!csqlParseColumnType(p, column.type))
+                    return false;
+
+                const char *pkCursor = p;
+                if (csqlConsumeKeyword(pkCursor, "PRIMARY"))
+                {
+                    if (!csqlConsumeKeyword(pkCursor, "KEY"))
+                        return false;
+                    column.isPrimaryKey = true;
+                    p = pkCursor;
+                    outSchema.primaryKeyIndex = static_cast<QC::u32>(outSchema.columns.size());
+                    ++pkCount;
+                }
+
+                outSchema.columns.push_back(static_cast<QCQL::Column &&>(column));
+                if (outSchema.columns.size() > QCQL::kMaxColumnsPerTable)
+                    return false;
+
+                p = p ? skipSpaces(p) : nullptr;
+                if (!p)
+                    return false;
+                if (*p == ',')
+                {
+                    ++p;
+                    continue;
+                }
+                if (*p == ')')
+                {
+                    ++p;
+                    break;
+                }
+                return false;
+            }
+
+            p = p ? skipSpaces(p) : nullptr;
+            if (!p || *p != '\0')
+                return false;
+
+            return !outSchema.columns.empty() && pkCount == 1;
+        }
+
+        static bool csqlCreateTableFromDefinition(const char *definition, const QC::Cmd::Context &ctx)
+        {
+            if (!g_csqlSession.open)
+            {
+                ctx.writeLine("csql: no database is open");
+                return true;
+            }
+
+            QCQL::TableSchema schema{};
+            if (!csqlParseCreateTableDefinition(definition, schema))
+            {
+                ctx.writeLine("usage: csql create table <name>(<col> <type> [PRIMARY KEY], ...)");
+                return true;
+            }
+
+            const QCQL::Status st = QCQL::Engine::instance().createTable(g_csqlSession.database, schema);
+            if (st != QCQL::Status::Success)
+            {
+                char line[224];
+                QC::String::memset(line, 0, sizeof(line));
+                (void)appendString(line, sizeof(line), "csql: create table failed (");
+                (void)appendString(line, sizeof(line), qcqlStatusName(st));
+                (void)appendString(line, sizeof(line), ")");
+                ctx.writeLine(line);
+                return true;
+            }
+
+            char line[224];
+            QC::String::memset(line, 0, sizeof(line));
+            (void)appendString(line, sizeof(line), "csql: created table ");
+            (void)appendString(line, sizeof(line), schema.tableName);
+            (void)appendString(line, sizeof(line), " columns=");
+            (void)appendU64Dec(line, sizeof(line), static_cast<QC::u64>(schema.columns.size()));
+            ctx.writeLine(line);
+            return true;
+        }
+
+        static bool csqlCloseIfOpen(const QC::Cmd::Context &ctx)
+        {
+            if (!g_csqlSession.open)
+                return true;
+
+            const QCQL::Status st = QCQL::Engine::instance().closeDatabase(g_csqlSession.database);
+            g_csqlSession.open = false;
+            g_csqlSession.path[0] = '\0';
+            if (st != QCQL::Status::Success)
+            {
+                ctx.writeLine("csql: close warning");
+            }
+            return true;
+        }
+
+        static bool cmdCsql(const char *args, const QC::Cmd::Context &ctx, void *)
+        {
+            char sub[16];
+            QC::String::memset(sub, 0, sizeof(sub));
+            const char *p = args;
+            if (!readToken(p, sub, sizeof(sub)))
+            {
+                ctx.writeLine("usage: csql <status|open|create|close|show|exec> ...");
+                return true;
+            }
+
+            QCQL::Engine::instance().initialize();
+
+            if (streqIgnoreCase(sub, "status"))
+            {
+                char line[224];
+                QC::String::memset(line, 0, sizeof(line));
+                (void)appendString(line, sizeof(line), "csql: open=");
+                (void)appendString(line, sizeof(line), g_csqlSession.open ? "1" : "0");
+                (void)appendString(line, sizeof(line), " path=");
+                (void)appendString(line, sizeof(line), g_csqlSession.open ? g_csqlSession.path : "(none)");
+                (void)appendString(line, sizeof(line), " tables_loaded=");
+                (void)appendU64Dec(line, sizeof(line), g_csqlSession.open ? static_cast<QC::u64>(g_csqlSession.database.tables.size()) : 0);
+                ctx.writeLine(line);
+                return true;
+            }
+
+            if (streqIgnoreCase(sub, "close"))
+            {
+                (void)csqlCloseIfOpen(ctx);
+                ctx.writeLine("csql: closed");
+                return true;
+            }
+
+            if (streqIgnoreCase(sub, "open") || streqIgnoreCase(sub, "create"))
+            {
+                Session *s = sessionFrom();
+                char pathArg[192];
+                QC::String::memset(pathArg, 0, sizeof(pathArg));
+                if (!readToken(p, pathArg, sizeof(pathArg)))
+                {
+                    ctx.writeLine(streqIgnoreCase(sub, "open") ? "usage: csql open <path>" : "usage: csql create <path>");
+                    return true;
+                }
+
+                if (streqIgnoreCase(sub, "create") && streqIgnoreCase(pathArg, "table"))
+                    return csqlCreateTableFromDefinition(p ? skipSpaces(p) : nullptr, ctx);
+
+                // Guard common SQL-looking input that would otherwise be treated as a file path.
+                if (streqIgnoreCase(pathArg, "database"))
+                {
+                    ctx.writeLine("csql: expected database path, not SQL text");
+                    ctx.writeLine("hint: use 'csql create <path>' for DB files or 'csql create table ...' for schemas");
+                    return true;
+                }
+
+                char absPath[192];
+                QC::String::memset(absPath, 0, sizeof(absPath));
+                if (!resolvePath(s, pathArg, absPath, sizeof(absPath)))
+                {
+                    ctx.writeLine("csql: invalid path");
+                    return true;
+                }
+
+                if (!allowWriteToPath(absPath, ctx, "csql"))
+                    return true;
+
+                if (streqIgnoreCase(sub, "create"))
+                {
+                    (void)QFS::VFS::instance().createDir("/system");
+                    (void)QFS::VFS::instance().createDir("/system/db");
+                }
+
+                (void)csqlCloseIfOpen(ctx);
+
+                QCQL::Database db;
+                const QCQL::Status st = streqIgnoreCase(sub, "open")
+                                            ? QCQL::Engine::instance().openDatabase(absPath, db)
+                                            : QCQL::Engine::instance().createDatabase(absPath, db);
+                if (st != QCQL::Status::Success)
+                {
+                    char line[160];
+                    QC::String::memset(line, 0, sizeof(line));
+                    (void)appendString(line, sizeof(line), "csql: ");
+                    (void)appendString(line, sizeof(line), streqIgnoreCase(sub, "open") ? "open" : "create");
+                    (void)appendString(line, sizeof(line), " failed (");
+                    (void)appendString(line, sizeof(line), qcqlStatusName(st));
+                    (void)appendString(line, sizeof(line), ")");
+                    ctx.writeLine(line);
+                    return true;
+                }
+
+                g_csqlSession.database = db;
+                g_csqlSession.open = true;
+                QC::String::strncpy(g_csqlSession.path, absPath, sizeof(g_csqlSession.path) - 1);
+
+                char line[224];
+                QC::String::memset(line, 0, sizeof(line));
+                (void)appendString(line, sizeof(line), "csql: ");
+                (void)appendString(line, sizeof(line), streqIgnoreCase(sub, "open") ? "opened " : "created ");
+                (void)appendString(line, sizeof(line), g_csqlSession.path);
+                (void)appendString(line, sizeof(line), " tables_loaded=");
+                (void)appendU64Dec(line, sizeof(line), static_cast<QC::u64>(g_csqlSession.database.tables.size()));
+                ctx.writeLine(line);
+                return true;
+            }
+
+            if (streqIgnoreCase(sub, "show"))
+            {
+                char noun[16];
+                QC::String::memset(noun, 0, sizeof(noun));
+                if (!readToken(p, noun, sizeof(noun)))
+                {
+                    ctx.writeLine("usage: csql show <tables|schema|rows> ...");
+                    return true;
+                }
+
+                if (streqIgnoreCase(noun, "tables"))
+                    return csqlListTables(ctx);
+
+                if (streqIgnoreCase(noun, "schema"))
+                {
+                    char table[64];
+                    QC::String::memset(table, 0, sizeof(table));
+                    if (!readToken(p, table, sizeof(table)))
+                    {
+                        ctx.writeLine("usage: csql show schema <table>");
+                        return true;
+                    }
+                    return csqlDescribeTable(table, ctx);
+                }
+
+                if (streqIgnoreCase(noun, "rows"))
+                {
+                    char table[64];
+                    QC::String::memset(table, 0, sizeof(table));
+                    if (!readToken(p, table, sizeof(table)))
+                    {
+                        ctx.writeLine("usage: csql show rows <table> [limit]");
+                        return true;
+                    }
+
+                    QC::u64 limit = 25;
+                    const char *tail = p ? skipSpaces(p) : nullptr;
+                    if (tail && *tail)
+                        (void)csqlParseU64(tail, limit);
+                    return csqlDumpRows(table, limit, ctx);
+                }
+
+                ctx.writeLine("usage: csql show <tables|schema|rows> ...");
+                return true;
+            }
+
+            if (streqIgnoreCase(sub, "exec"))
+            {
+                const char *query = p ? skipSpaces(p) : nullptr;
+                if (!query || *query == '\0')
+                {
+                    ctx.writeLine("usage: csql exec \"SHOW TABLES\" | \"DESCRIBE <table>\" | \"SELECT * FROM <table> [LIMIT N]\"");
+                    return true;
+                }
+
+                if (streqIgnoreCase(query, "SHOW TABLES") || streqIgnoreCase(query, "DUMP TABLES_LOADED"))
+                    return csqlListTables(ctx);
+
+                if (csqlStartsWithIgnoreCase(query, "CREATE TABLE "))
+                    return csqlCreateTableFromDefinition(query + 13, ctx);
+
+                if (csqlStartsWithIgnoreCase(query, "DESCRIBE "))
+                {
+                    const char *name = skipSpaces(query + 9);
+                    if (!name || *name == '\0')
+                    {
+                        ctx.writeLine("usage: csql exec \"DESCRIBE <table>\"");
+                        return true;
+                    }
+
+                    char table[64];
+                    QC::String::memset(table, 0, sizeof(table));
+                    const char *cursor = name;
+                    QC::usize i = 0;
+                    while (*cursor && !isSpace(*cursor) && i + 1 < sizeof(table))
+                        table[i++] = *cursor++;
+                    table[i] = '\0';
+                    return csqlDescribeTable(table, ctx);
+                }
+
+                if (csqlStartsWithIgnoreCase(query, "SELECT * FROM "))
+                {
+                    const char *name = skipSpaces(query + 14);
+                    if (!name || *name == '\0')
+                    {
+                        ctx.writeLine("usage: csql exec \"SELECT * FROM <table> [LIMIT N]\"");
+                        return true;
+                    }
+
+                    char table[64];
+                    QC::String::memset(table, 0, sizeof(table));
+                    const char *cursor = name;
+                    QC::usize i = 0;
+                    while (*cursor && !isSpace(*cursor) && i + 1 < sizeof(table))
+                        table[i++] = *cursor++;
+                    table[i] = '\0';
+
+                    QC::u64 limit = 25;
+                    const char *tail = skipSpaces(cursor);
+                    if (tail && *tail)
+                    {
+                        if (csqlStartsWithIgnoreCase(tail, "LIMIT "))
+                        {
+                            const char *n = skipSpaces(tail + 6);
+                            (void)csqlParseU64(n, limit);
+                        }
+                    }
+
+                    return csqlDumpRows(table, limit, ctx);
+                }
+
+                if (csqlStartsWithIgnoreCase(query, "SHOW COLUMNS FROM "))
+                {
+                    const char *name = skipSpaces(query + 18);
+                    if (!name || *name == '\0')
+                    {
+                        ctx.writeLine("usage: csql exec \"SHOW COLUMNS FROM <table>\"");
+                        return true;
+                    }
+
+                    char table[64];
+                    QC::String::memset(table, 0, sizeof(table));
+                    const char *cursor = name;
+                    QC::usize i = 0;
+                    while (*cursor && !isSpace(*cursor) && i + 1 < sizeof(table))
+                        table[i++] = *cursor++;
+                    table[i] = '\0';
+                    return csqlDescribeTable(table, ctx);
+                }
+
+                ctx.writeLine("csql: supported exec forms are CREATE TABLE <name>(...), SHOW TABLES, DESCRIBE <table>, SHOW COLUMNS FROM <table>, SELECT * FROM <table> [LIMIT N]");
+                return true;
+            }
+
+            ctx.writeLine("usage: csql <status|open|create|close|show|exec> ...");
             return true;
         }
 
@@ -4621,16 +5609,207 @@ namespace QK::CmdCenter
 
         static bool cmdPorts(const char *args, const QC::Cmd::Context &ctx, void *)
         {
+            auto startsWithTokenIgnoreCase = [](const char *s, const char *token, const char **outTail) -> bool {
+                if (!s || !token)
+                    return false;
+
+                QC::usize i = 0;
+                for (;; ++i)
+                {
+                    char tc = token[i];
+                    if (tc == '\0')
+                        break;
+
+                    char sc = s[i];
+                    if (sc == '\0')
+                        return false;
+                    if (sc >= 'A' && sc <= 'Z')
+                        sc = static_cast<char>(sc - 'A' + 'a');
+                    if (tc >= 'A' && tc <= 'Z')
+                        tc = static_cast<char>(tc - 'A' + 'a');
+                    if (sc != tc)
+                        return false;
+                }
+
+                if (s[i] != '\0' && !isSpace(s[i]))
+                    return false;
+                if (outTail)
+                    *outTail = skipSpaces(s + i);
+                return true;
+            };
+
             const char *p = args ? skipSpaces(args) : nullptr;
             if (!p || *p == '\0' || streqIgnoreCase(p, "status"))
             {
-                ctx.writeLine("ports: usage: ports close-unused");
+                ctx.writeLine("ports: usage: ports <list|audit|ratelimit|close-unused>");
+                return true;
+            }
+
+            if (streqIgnoreCase(p, "list"))
+            {
+                QK::Runtime::PortRecord recs[64] = {};
+                const QC::usize n = QK::Runtime::Registries::instance().copyPortRecords(recs, sizeof(recs) / sizeof(recs[0]));
+                if (n == 0)
+                {
+                    ctx.writeLine("ports: none open");
+                    return true;
+                }
+
+                auto protoName = [](QK::Runtime::PortProtocol proto) -> const char * {
+                    switch (proto)
+                    {
+                    case QK::Runtime::PortProtocol::TCP:
+                        return "TCP";
+                    case QK::Runtime::PortProtocol::UDP:
+                        return "UDP";
+                    default:
+                        return "UNK";
+                    }
+                };
+
+                auto stateName = [](QK::Runtime::PortState st) -> const char * {
+                    switch (st)
+                    {
+                    case QK::Runtime::PortState::Closed:
+                        return "Closed";
+                    case QK::Runtime::PortState::Opening:
+                        return "Opening";
+                    case QK::Runtime::PortState::Open:
+                        return "Open";
+                    case QK::Runtime::PortState::Closing:
+                        return "Closing";
+                    default:
+                        return "Unknown";
+                    }
+                };
+
+                for (QC::usize i = 0; i < n; ++i)
+                {
+                    char line[200];
+                    QC::String::memset(line, 0, sizeof(line));
+                    (void)appendString(line, sizeof(line), protoName(recs[i].protocol));
+                    (void)appendString(line, sizeof(line), " port=");
+                    (void)appendU64Dec(line, sizeof(line), recs[i].port);
+                    (void)appendString(line, sizeof(line), " owner=");
+                    (void)appendU64Dec(line, sizeof(line), recs[i].ownerPid);
+                    (void)appendString(line, sizeof(line), " state=");
+                    (void)appendString(line, sizeof(line), stateName(recs[i].state));
+                    ctx.writeLine(line);
+                }
+                return true;
+            }
+
+            if (streqIgnoreCase(p, "audit"))
+            {
+                QNet::Stack::instance().initialize();
+                QNet::PortAuditEvent ev[64] = {};
+                const QC::usize n = QNet::Stack::instance().copyPortAuditEvents(ev, sizeof(ev) / sizeof(ev[0]));
+                if (n == 0)
+                {
+                    ctx.writeLine("ports: audit empty");
+                    return true;
+                }
+
+                auto codeName = [](QC::u64 c) -> const char * {
+                    switch (c)
+                    {
+                    case 0x504F504EULL:
+                        return "OPEN";
+                    case 0x504F434CULL:
+                        return "CLOSE";
+                    case 0x504F524AULL:
+                        return "REJECT";
+                    case 0x504F4155ULL:
+                        return "AUTOCLOSE";
+                    default:
+                        return "EVENT";
+                    }
+                };
+
+                auto protoName = [](QNet::Protocol proto) -> const char * {
+                    switch (proto)
+                    {
+                    case QNet::Protocol::TCP:
+                        return "TCP";
+                    case QNet::Protocol::UDP:
+                        return "UDP";
+                    default:
+                        return "SYS";
+                    }
+                };
+
+                for (QC::usize i = 0; i < n; ++i)
+                {
+                    char line[220];
+                    QC::String::memset(line, 0, sizeof(line));
+                    (void)appendU64Dec(line, sizeof(line), ev[i].t_ms);
+                    (void)appendString(line, sizeof(line), " ");
+                    (void)appendString(line, sizeof(line), codeName(ev[i].code));
+                    (void)appendString(line, sizeof(line), " proto=");
+                    (void)appendString(line, sizeof(line), protoName(ev[i].protocol));
+                    (void)appendString(line, sizeof(line), " port=");
+                    (void)appendU64Dec(line, sizeof(line), ev[i].port);
+                    (void)appendString(line, sizeof(line), " owner=");
+                    (void)appendU64Dec(line, sizeof(line), ev[i].ownerPid);
+                    ctx.writeLine(line);
+                }
+                return true;
+            }
+
+            const char *ratelimitArg = nullptr;
+            if (startsWithTokenIgnoreCase(p, "ratelimit", &ratelimitArg))
+            {
+                QNet::Stack::instance().initialize();
+                auto *ip = QNet::Stack::instance().ip();
+                if (!ip)
+                {
+                    ctx.writeLine("ports: ip unavailable");
+                    return true;
+                }
+
+                if (ratelimitArg && *ratelimitArg)
+                {
+                    if (!streqIgnoreCase(ratelimitArg, "reset"))
+                    {
+                        ctx.writeLine("ports: usage: ports ratelimit [reset]");
+                        return true;
+                    }
+
+                    ip->resetIngressGuardStats();
+                    ctx.writeLine("ports: ratelimit counters reset");
+                    return true;
+                }
+
+                const QNet::IP::IngressGuardStats st = ip->ingressGuardStats();
+                char line[220];
+
+                QC::String::memset(line, 0, sizeof(line));
+                (void)appendString(line, sizeof(line), "ratelimit tcp accepted=");
+                (void)appendU64Dec(line, sizeof(line), st.tcpAccepted);
+                (void)appendString(line, sizeof(line), " boundary_drop=");
+                (void)appendU64Dec(line, sizeof(line), st.tcpBoundaryDrops);
+                (void)appendString(line, sizeof(line), " malformed_drop=");
+                (void)appendU64Dec(line, sizeof(line), st.tcpMalformedDrops);
+                (void)appendString(line, sizeof(line), " rate_drop=");
+                (void)appendU64Dec(line, sizeof(line), st.tcpRateDrops);
+                ctx.writeLine(line);
+
+                QC::String::memset(line, 0, sizeof(line));
+                (void)appendString(line, sizeof(line), "ratelimit udp accepted=");
+                (void)appendU64Dec(line, sizeof(line), st.udpAccepted);
+                (void)appendString(line, sizeof(line), " boundary_drop=");
+                (void)appendU64Dec(line, sizeof(line), st.udpBoundaryDrops);
+                (void)appendString(line, sizeof(line), " malformed_drop=");
+                (void)appendU64Dec(line, sizeof(line), st.udpMalformedDrops);
+                (void)appendString(line, sizeof(line), " rate_drop=");
+                (void)appendU64Dec(line, sizeof(line), st.udpRateDrops);
+                ctx.writeLine(line);
                 return true;
             }
 
             if (!streqIgnoreCase(p, "close-unused"))
             {
-                ctx.writeLine("ports: unknown arg (use close-unused)");
+                ctx.writeLine("ports: unknown arg (use list|audit|ratelimit|close-unused)");
                 return true;
             }
 
@@ -6720,10 +7899,20 @@ namespace QK::CmdCenter
         // Ensure the MVP has a working directory even if callers never create a per-terminal session.
         (void)sessionFrom();
 
+        // Split scaffolds keep this registrar as the central wiring point.
+        QK::CmdCenter::Auth::touch();
+        QK::CmdCenter::Parse::touch();
+        QK::CmdCenter::PathFs::touch();
+        QK::CmdCenter::Builtins::touch();
+        QK::CmdCenter::DebugTest::touch();
+        QK::CmdCenter::Net::touch();
+
         auto &reg = QC::Cmd::Registry::instance();
         (void)reg.registerCommandExAccess("help", QC::Cmd::AccessLevel::Everyone, &cmdHelp, nullptr, "Show available commands (help [cmd])");
+        (void)reg.registerCommandExAccess("video", QC::Cmd::AccessLevel::User, &cmdVideo, nullptr, "Show or reset video/compositor stats (video <stats|reset>)");
         (void)reg.registerCommandExAccess("whoami", QC::Cmd::AccessLevel::Everyone, &cmdWhoami, nullptr, "Show current access role");
         (void)reg.registerCommandExAccess("echo", QC::Cmd::AccessLevel::User, &cmdEcho, nullptr, "Echo text (redirection requires admin)");
+        (void)reg.registerCommandExAccess("clear", QC::Cmd::AccessLevel::User, &cmdClear, nullptr, "Clear terminal output");
         (void)reg.registerCommandExAccess("pwd", QC::Cmd::AccessLevel::User, &cmdPwd, nullptr, "Print working directory");
         (void)reg.registerCommandExAccess("cd", QC::Cmd::AccessLevel::User, &cmdCd, nullptr, "Change working directory (cd <path>)");
         (void)reg.registerCommandExAccess("ls", QC::Cmd::AccessLevel::User, &cmdLs, nullptr, "List directory contents (ls [path])");
@@ -6756,6 +7945,7 @@ namespace QK::CmdCenter
         (void)reg.registerCommandExAccess("reboot", QC::Cmd::AccessLevel::System, &cmdReboot, nullptr, "Reboot immediately (reboot now)");
         (void)reg.registerCommandExAccess("showmode", QC::Cmd::AccessLevel::User, &cmdShowMode, nullptr, "Show active startup mode (showmode)");
         (void)reg.registerCommandExAccess("setmode", QC::Cmd::AccessLevel::Admin, &cmdSetMode, nullptr, "Persist startup mode to startup.cfg (setmode <DESKTOP|TERMINAL|SAFE>)");
+        (void)reg.registerCommandExAccess("startx", QC::Cmd::AccessLevel::Admin, &cmdStartx, nullptr, "Set desktop startup mode for next boot (startx)");
         (void)reg.registerCommandExAccess("stopx", QC::Cmd::AccessLevel::Admin, &cmdStopx, nullptr, "Stop desktop and return to console-only mode");
         (void)reg.registerCommandExAccess("bootlog", QC::Cmd::AccessLevel::User, &cmdBootLog, nullptr, "Dump captured boot log output (bootlog [tail [lines]])");
         (void)reg.registerCommandExAccess("bootmodules", QC::Cmd::AccessLevel::Admin, &cmdBootModules, nullptr, "Dump early module trust metadata (role/status/hash/signature)");
@@ -6783,6 +7973,7 @@ namespace QK::CmdCenter
         (void)reg.registerCommandExAccess("sys_user_lock", QC::Cmd::AccessLevel::User, &cmdSysUserLock, nullptr, "Lock Owner session (sys_user_lock)");
         (void)reg.registerCommandExAccess("sys_vault_request", QC::Cmd::AccessLevel::SysAdmin, &cmdSysVaultRequest, nullptr, "Submit SC vault request (sys_vault_request <request_text>)");
         (void)reg.registerCommandExAccess("db", QC::Cmd::AccessLevel::Admin, &cmdDb, nullptr, "Simple persistent key/value database (db <op> ...)");
+        (void)reg.registerCommandExAccess("csql", QC::Cmd::AccessLevel::Admin, &cmdCsql, nullptr, "CQL database shell (tables/schema/rows introspection)");
         (void)reg.registerCommandEx("regdump", &cmdRegdump, nullptr, "Dump runtime registries snapshot (counts + windows + boot seed)");
 
         // Networking helpers (for subsystem testing).
@@ -6794,7 +7985,7 @@ namespace QK::CmdCenter
         (void)reg.registerCommandExAccess("tcpconnect", QC::Cmd::AccessLevel::User, &cmdTcpConnect, nullptr, "Test TCP connect (tcpconnect <ip|host> <port> [timeout_ms])");
         (void)reg.registerCommandExAccess("httpget", QC::Cmd::AccessLevel::User, &cmdHttpGet, nullptr, "Minimal HTTP GET over TCP (httpget <host> <path> [timeout_ms])");
         (void)reg.registerCommandExAccess("tcpdrop", QC::Cmd::AccessLevel::Admin, &cmdTcpDrop, nullptr, "Drop TCP connection by local port (tcpdrop <local_port>)");
-        (void)reg.registerCommandExAccess("ports", QC::Cmd::AccessLevel::Admin, &cmdPorts, nullptr, "Port hygiene tools (ports close-unused)");
+        (void)reg.registerCommandExAccess("ports", QC::Cmd::AccessLevel::Admin, &cmdPorts, nullptr, "Port manager tools (ports list|audit|ratelimit|close-unused)");
         (void)reg.registerCommandExAccess("tcplog", QC::Cmd::AccessLevel::User, &cmdTcpLog, nullptr, "Dump recent TCP TX/RX events (tcplog)");
         (void)reg.registerCommandExAccess("netlog", QC::Cmd::AccessLevel::User, &cmdNetLog, nullptr, "Dump net state (ip + arp + tcplog)");
         (void)reg.registerCommandExAccess("tcpstate", QC::Cmd::AccessLevel::User, &cmdTcpState, nullptr, "Dump active TCP connections (tcpstate)");
@@ -6811,12 +8002,16 @@ namespace QK::CmdCenter
         (void)reg.setCommandMetadata("sys_update_verify", "sys_update_verify [payload]", "payload?:string", 0, 16, true);
         (void)reg.setCommandMetadata("sys_vault_request", "sys_vault_request <request_text>", "request:string", 1, 16, true);
         (void)reg.setCommandMetadata("db", "db <status|list|get|set|del|save|reload> ...", "op:string key?:string value?:string", 1, 16, true);
-        (void)reg.setCommandMetadata("ports", "ports close-unused", "op:string", 1, 1, true);
+        (void)reg.setCommandMetadata("csql", "csql <status|open|create|close|show|exec> ...", "op:string arg1?:string arg2?:string arg3?:string", 1, 16, true);
+        (void)reg.setCommandMetadata("video", "video <stats|reset>", "op:string", 1, 1, true);
+        (void)reg.setCommandMetadata("ports", "ports <list|audit|ratelimit|close-unused>", "op:string", 1, 1, true);
         (void)reg.setCommandMetadata("sync", "sync", "none", 0, 0, true);
+        (void)reg.setCommandMetadata("clear", "clear", "none", 0, 0, true);
         (void)reg.setCommandMetadata("mount", "mount [list|all|volume]", "op?:string", 0, 1, true);
         (void)reg.setCommandMetadata("umount", "umount <volume|mount_path>", "target:string", 1, 1, true);
         (void)reg.setCommandMetadata("fstab", "fstab <list|apply|add|del> [volume]", "op:string volume?:string", 1, 2, true);
         (void)reg.setCommandMetadata("todoadd", "todoadd <note text>", "note:string", 1, 32, true);
+        (void)reg.setCommandMetadata("startx", "startx", "none", 0, 0, true);
 
         // Best-effort alias map restore; empty/missing file is allowed.
         (void)loadAliasMap(nullptr, false);

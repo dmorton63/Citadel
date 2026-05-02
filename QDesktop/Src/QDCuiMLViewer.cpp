@@ -1702,6 +1702,7 @@ namespace QD
                     }
 
                     auto *btn = new QW::Controls::Button(window, textAttr, {x, y, static_cast<QC::u32>(w), static_cast<QC::u32>(h)});
+                    btn->setContentMode(QW::ButtonContentMode::Text);
 
                     if (fontScale > 0.0f)
                     {
@@ -1824,6 +1825,7 @@ namespace QD
         const QC::i32 startX = (DIALOG_WIDTH - buttonWidth) / 2;
         QW::Rect okBounds = {startX, baseY, static_cast<QC::u32>(buttonWidth), static_cast<QC::u32>(buttonHeight)};
         m_shutdownDeniedOk = new QW::Controls::Button(m_shutdownDeniedWindow, "OK", okBounds);
+        m_shutdownDeniedOk->setContentMode(QW::ButtonContentMode::Text);
         m_shutdownDeniedOk->setRole(QW::ButtonRole::Default);
         m_shutdownDeniedOk->setClickHandler(&CuiMLViewer::onShutdownDeniedOkClick, this);
         m_shutdownDeniedRoot->addChild(m_shutdownDeniedOk);
@@ -1947,6 +1949,8 @@ namespace QD
             m_controls.push_back(titleLabel);
 
             auto *closeButton = new QW::Controls::Button(m_window, "X", {static_cast<QC::i32>(w - kPad - 20), 2, 20, 20});
+            closeButton->setContentMode(QW::ButtonContentMode::Text);
+            closeButton->setVariant(QW::ButtonVariant::Compact);
             closeButton->setRole(QW::ButtonRole::Destructive);
             closeButton->setClickHandler([](QW::Controls::Button *, void *ud) {
                 auto *self = static_cast<CuiMLViewer *>(ud);

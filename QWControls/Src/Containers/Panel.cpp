@@ -41,9 +41,9 @@ namespace QW
               m_paddingBottom(0),
               m_borderWidth(1),
               m_hasBorderColorOverride(false),
-              m_borderColor(Color(0, 0, 0, 0)),
+              m_borderColor(Color::transparent()),
               m_hasBackgroundOverride(false),
-              m_backgroundColor(Color(0, 0, 0, 0))
+              m_backgroundColor(Color::transparent())
         {
         }
 
@@ -57,9 +57,9 @@ namespace QW
               m_paddingBottom(0),
               m_borderWidth(1),
               m_hasBorderColorOverride(false),
-              m_borderColor(Color(0, 0, 0, 0)),
+              m_borderColor(Color::transparent()),
               m_hasBackgroundOverride(false),
-              m_backgroundColor(Color(0, 0, 0, 0))
+              m_backgroundColor(Color::transparent())
         {
         }
 
