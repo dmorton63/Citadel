@@ -2,7 +2,30 @@
 
 <img width="975" height="645" alt="qaiosDesktop" src="https://github.com/user-attachments/assets/31138a6a-9323-4621-8ea2-d8f82a41f69c" />
 
-A modular x86-64 kernel with unified naming conventions, built with the Limine bootloader.
+A modular x86-64 kernel and desktop environment built with the Limine bootloader.
+
+This README is the short entry point for the repository:
+- build and run the system
+- understand the top-level module layout
+- see a brief snapshot of major working areas
+
+For the full current implementation snapshot, use `CITADEL_CURRENT_STATE.md`.
+For active planning, use `TODO_MAIN.md` and `TODO_INBOX.md`.
+
+Current highlights:
+- Desktop, windowing, and control stack are in active use.
+- Bring-up grade IPv4 networking is working in the current QEMU workflow.
+- QCQL now backs the active CMMS desktop runtime path: desktop documents and theme data are persisted in database tables, runtime rows are used at boot for the active layout, and generated CUI-ML preserves the existing parser/theme pipeline.
+- Security Center, Task_Flow, and data-driven runtime work exist partly in code and partly as forward-looking design/spec material.
+
+## Desktop runtime status
+
+The desktop boot path is currently a hybrid that keeps the existing CUI-ML/control creation stack while sourcing layout data from CMMS/QCQL runtime rows.
+
+- Authoritative desktop layouts still come from desktop documents such as `desktop.json` and the shipped CUI-ML scaffold.
+- CMMS materializes normalized runtime rows for the active layout and the desktop now boots from those runtime rows instead of re-reading the legacy path directly.
+- Runtime-generated CUI-ML includes the shared import, stylesheet, and theme scaffold so CUIMLSS parsing and theme fonts stay consistent with the legacy desktop path.
+- Seasonal overrides from `desktop-overrides.json` still apply after runtime-row load.
 
 ## Networking bring-up (recent)
 
@@ -29,6 +52,13 @@ Useful terminal commands:
 ## A Snapshot of our desktop design as it is at the moment.
 
 The screenshot above reflects the current desktop shell with the latest console-first flow.
+
+## Documentation map
+
+- `CITADEL_CURRENT_STATE.md`: authoritative working-state snapshot
+- `TODO_MAIN.md`: broader subsystem/product backlog
+- `TODO_INBOX.md`: active stabilization queue
+- `docs/`: subsystem specs, plans, and reference documents
 
 ## Screenshots
 
@@ -215,9 +245,50 @@ qemu-system-x86_64 -cdrom build/citadel-limine.iso -serial stdio -display gtk,gr
 - Enable the guest-side auto-mount by setting `IDE_SHARED=1` in `startup.cfg` (this controls the legacy IDE probe at boot).
 - If detected, the kernel registers it as `QFS_SHARED` and mounts it at `/shared`.
 
+### Persistent system volume (QEMU)
+
+- Use `./build.sh -r --system-vol` to attach the persistent FAT32 system disk image at `build/system.qcow2`.
+- In that mode the guest mounts `/system` from the virtual disk instead of relying only on the ramdisk copy, so desktop/runtime data written under `/system` persists across boots.
+- A common development run is `./build.sh -r --tpm --system-vol --relmouse --prod`.
+
 ## Bootable USB (real hardware)
 
 Citadel builds a Limine ISO at `build/citadel-limine.iso`. The easiest way to make a bootable USB stick is to write the ISO to the raw device.
+
+There is also a helper script that builds the ISO, lists likely USB targets, forces an explicit disk choice, and then writes the image:
+
+```bash
+tools/write_bootable_usb.sh --list
+tools/write_bootable_usb.sh --device /dev/sdX
+```
+
+If you are on WSL and only see the USB stick as a mounted Windows drive such as `/mnt/F`, that is not the raw device. You need to attach the physical disk into WSL first, then write to the `/dev/sdX` node that appears:
+
+```powershell
+# Elevated Windows PowerShell example for drive F:
+Set-Disk -Number 2 -IsOffline $true
+wsl.exe --mount \\.\PHYSICALDRIVE2 --bare
+```
+
+```bash
+# Back in WSL
+lsblk
+tools/write_bootable_usb.sh --device /dev/sdX --skip-build
+```
+
+```powershell
+# When finished
+wsl.exe --unmount \\.\PHYSICALDRIVE2
+Set-Disk -Number 2 -IsOffline $false
+```
+
+On removable USB sticks where `Set-Disk -IsOffline` is not supported, the helper script can instead delegate the raw write to Windows directly from WSL:
+
+```bash
+tools/write_bootable_usb.sh --device /mnt/F --skip-build
+```
+
+That path resolves `F:` to its backing `PhysicalDriveN`, dismounts the Windows volume with `mountvol`, and streams the ISO through a Windows raw disk handle. Run the shell from an elevated Windows-hosted terminal if Windows prompts for administrator rights.
 
 ```bash
 ./build.sh
@@ -370,45 +441,3 @@ MIT License
 ## Author
 
 QAIOS Project
-# qaiosplus
-
-# Math library updates:
-  Column-major and right-handed.
-⭐ 1. Column‑major vs row‑major
-You already chose column‑major Mat4f, which is perfect for:
-• 	OpenGL‑style transforms
-• 	GPU‑friendly memory layout
-• 	Composing transforms as 
-• 	Treating vectors as column vectors
-This also matches the mental model of your compositor, where transforms flow down the scene graph.
-If you stick with column‑major everywhere, you get:
-• 	predictable multiplication order
-• 	clean interoperability with future GPU APIs
-• 	no mental gymnastics when composing transforms
-I’d absolutely keep column‑major as the global convention.
-
-⭐ 2. Right‑handed vs left‑handed
-This is the big one.
-Here’s the clean breakdown:
-Right‑handed (RH)
-• 	+Z comes out of the screen
-• 	Used by OpenGL, Vulkan, most math texts
-• 	Cross products behave intuitively
-• 	Camera “lookAt” feels natural
-Left‑handed (LH)
-• 	+Z goes into the screen
-• 	Used by DirectX, D3D11/12, Windows math libraries
-• 	Some people prefer it for UI or 2D‑centric engines
-Since Citadel is:
-• 	column‑major
-• 	compositor‑driven
-• 	2D‑first with future 3D potential
-• 	GPU‑accelerated
-• 	architecturally closer to OpenGL/Vulkan than DirectX
-…I strongly recommend right‑handed.
-It keeps your math consistent with:
-• 	cross products
-• 	camera transforms
-• 	rotation direction
-• 	the majority of graphics literature
-And it avoids the “why is my camera backwards” problem that LH systems often create

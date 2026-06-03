@@ -1,6 +1,7 @@
 add_library(QGfx STATIC
     Src/QGfxBatch.cpp
     Src/QGfxContext.cpp
+    Src/QGfxDisplayInterop.cpp
     Src/QGfxVmwareSVGADriver.cpp
 )
 

@@ -6,6 +6,10 @@
 #include "QKMemTranslator.h"
 #include "QCLogger.h"
 #include "QCString.h"
+#include "QKInputSettings.h"
+#include "QFSFAT32.h"
+#include "QFSFATProbe.h"
+#include "QKStorageRegistry.h"
 #include "PS2/QKDrvPS2Keyboard.h"
 
 // Early page allocator (defined in QKMain.cpp, returns physical address)
@@ -49,9 +53,238 @@ namespace QKDrv
 
         // USB class codes
         constexpr QC::u8 USB_CLASS_HID = 0x03;
+        constexpr QC::u8 USB_CLASS_MASS_STORAGE = 0x08;
+        constexpr QC::u8 USB_SUBCLASS_SCSI = 0x06;
+        constexpr QC::u8 USB_PROTOCOL_BULK_ONLY = 0x50;
         constexpr QC::u8 USB_SUBCLASS_BOOT = 0x01;
         constexpr QC::u8 USB_PROTOCOL_KEYBOARD = 0x01;
         constexpr QC::u8 USB_PROTOCOL_MOUSE = 0x02;
+        constexpr QC::u8 USB_REQ_GET_MAX_LUN = 0xFE;
+
+        constexpr QC::u32 USB_MSC_CBW_SIGNATURE = 0x43425355u;
+        constexpr QC::u32 USB_MSC_CSW_SIGNATURE = 0x53425355u;
+        constexpr QC::u8 USB_MSC_DIR_IN = 0x80;
+
+        struct BulkOnlyCBW
+        {
+            QC::u32 signature;
+            QC::u32 tag;
+            QC::u32 transferLength;
+            QC::u8 flags;
+            QC::u8 lun;
+            QC::u8 cdbLength;
+            QC::u8 cdb[16];
+        } __attribute__((packed));
+
+        struct BulkOnlyCSW
+        {
+            QC::u32 signature;
+            QC::u32 tag;
+            QC::u32 residue;
+            QC::u8 status;
+        } __attribute__((packed));
+
+        struct MbrPartitionEntry
+        {
+            QC::u8 status;
+            QC::u8 chsFirst[3];
+            QC::u8 type;
+            QC::u8 chsLast[3];
+            QC::u32 lbaFirst;
+            QC::u32 lbaCount;
+        } __attribute__((packed));
+
+        class OffsetBlockDevice final : public QFS::BlockDevice
+        {
+        public:
+            OffsetBlockDevice(QFS::BlockDevice *inner, QC::u64 offsetSectors, QC::u64 visibleSectors)
+                : m_inner(inner), m_offset(offsetSectors), m_visible(visibleSectors)
+            {
+            }
+
+            QC::usize sectorSize() const override { return m_inner ? m_inner->sectorSize() : 512; }
+            QC::u64 sectorCount() const override { return m_visible; }
+
+            QC::Status readSector(QC::u64 sector, void *buffer) override
+            {
+                return readSectors(sector, 1, buffer);
+            }
+
+            QC::Status writeSector(QC::u64 sector, const void *buffer) override
+            {
+                return writeSectors(sector, 1, buffer);
+            }
+
+            QC::Status readSectors(QC::u64 sector, QC::usize count, void *buffer) override
+            {
+                if (!m_inner)
+                    return QC::Status::InvalidParam;
+                if (sector + count > m_visible)
+                    return QC::Status::InvalidParam;
+                return m_inner->readSectors(m_offset + sector, count, buffer);
+            }
+
+            QC::Status writeSectors(QC::u64 sector, QC::usize count, const void *buffer) override
+            {
+                if (!m_inner)
+                    return QC::Status::InvalidParam;
+                if (sector + count > m_visible)
+                    return QC::Status::InvalidParam;
+                return m_inner->writeSectors(m_offset + sector, count, buffer);
+            }
+
+        private:
+            QFS::BlockDevice *m_inner;
+            QC::u64 m_offset;
+            QC::u64 m_visible;
+        };
+
+        static bool looksLikeFatBootSector(const QC::u8 sector[512])
+        {
+            QFS::FATProbeResult probe{};
+            if (!QFS::probeFATBootSector(sector, probe))
+                return false;
+            return probe.kind == QFS::FATKind::FAT16 || probe.kind == QFS::FATKind::FAT32;
+        }
+
+        static bool looksLikeMbr(const QC::u8 sector[512])
+        {
+            return sector[510] == 0x55 && sector[511] == 0xAA;
+        }
+
+        static bool mbrHasPartitionTable(const QC::u8 sector[512])
+        {
+            if (!looksLikeMbr(sector))
+                return false;
+
+            const auto *parts = reinterpret_cast<const MbrPartitionEntry *>(&sector[446]);
+            for (int i = 0; i < 4; ++i)
+            {
+                if (parts[i].type != 0 && parts[i].lbaFirst != 0 && parts[i].lbaCount != 0)
+                    return true;
+            }
+            return false;
+        }
+
+        static bool isFatPartitionType(QC::u8 type)
+        {
+            return type == 0x0B || type == 0x0C || type == 0x06 || type == 0x0E || type == 0x01 || type == 0x04;
+        }
+
+        static bool findFatPartition(QFS::BlockDevice *dev, QC::u64 &outOffset, QC::u64 &outSize, QFS::FATKind *outKind = nullptr)
+        {
+            QC::u8 sector0[512];
+            const QC::Status st0 = dev->readSector(0, sector0);
+            if (st0 != QC::Status::Success)
+            {
+                QC_LOG_WARN("xHCI", "findFatPartition: read sector0 failed (status=%d)", static_cast<int>(st0));
+                return false;
+            }
+
+            if (mbrHasPartitionTable(sector0))
+            {
+                const auto *parts = reinterpret_cast<const MbrPartitionEntry *>(&sector0[446]);
+                for (int i = 0; i < 4; ++i)
+                {
+                    if (!isFatPartitionType(parts[i].type))
+                        continue;
+                    if (parts[i].lbaFirst == 0 || parts[i].lbaCount == 0)
+                        continue;
+
+                    QC::u8 bs[512];
+                    const QC::Status st = dev->readSector(parts[i].lbaFirst, bs);
+                    if (st != QC::Status::Success)
+                        continue;
+                    if (!looksLikeFatBootSector(bs))
+                        continue;
+
+                    if (outKind)
+                    {
+                        QFS::FATProbeResult probe{};
+                        if (!QFS::probeFATBootSector(bs, probe))
+                            continue;
+                        *outKind = probe.kind;
+                    }
+
+                    outOffset = parts[i].lbaFirst;
+                    outSize = parts[i].lbaCount;
+                    return true;
+                }
+
+                return false;
+            }
+
+            if (looksLikeFatBootSector(sector0))
+            {
+                if (outKind)
+                {
+                    QFS::FATProbeResult probe{};
+                    if (!QFS::probeFATBootSector(sector0, probe))
+                        return false;
+                    *outKind = probe.kind;
+                }
+
+                outOffset = 0;
+                outSize = dev->sectorCount();
+                return true;
+            }
+
+            return false;
+        }
+
+        class USBMassStorageBlockDevice final : public QFS::BlockDevice
+        {
+        public:
+            USBMassStorageBlockDevice(XHCIControllerImpl *controller,
+                                      QC::u8 slotId,
+                                      QC::u32 blockSize,
+                                      QC::u64 sectorCount)
+                : m_controller(controller),
+                  m_slotId(slotId),
+                  m_blockSize(blockSize),
+                  m_sectorCount(sectorCount)
+            {
+            }
+
+            QC::usize sectorSize() const override { return m_blockSize; }
+            QC::u64 sectorCount() const override { return m_sectorCount; }
+
+            QC::Status readSector(QC::u64 sector, void *buffer) override
+            {
+                return readSectors(sector, 1, buffer);
+            }
+
+            QC::Status writeSector(QC::u64 sector, const void *buffer) override
+            {
+                return writeSectors(sector, 1, buffer);
+            }
+
+            QC::Status readSectors(QC::u64 sector, QC::usize count, void *buffer) override
+            {
+                if (!m_controller || !buffer)
+                    return QC::Status::InvalidParam;
+                DeviceInfo *dev = m_controller->findDevice(m_slotId);
+                if (!dev)
+                    return QC::Status::NotFound;
+                return m_controller->readMassStorageSectors(*dev, sector, count, buffer);
+            }
+
+            QC::Status writeSectors(QC::u64 sector, QC::usize count, const void *buffer) override
+            {
+                if (!m_controller || !buffer)
+                    return QC::Status::InvalidParam;
+                DeviceInfo *dev = m_controller->findDevice(m_slotId);
+                if (!dev)
+                    return QC::Status::NotFound;
+                return m_controller->writeMassStorageSectors(*dev, sector, count, buffer);
+            }
+
+        private:
+            XHCIControllerImpl *m_controller;
+            QC::u8 m_slotId;
+            QC::u32 m_blockSize;
+            QC::u64 m_sectorCount;
+        };
 
         // Extended capability IDs
         constexpr QC::u8 XCAP_LEGACY = 1;
@@ -205,15 +438,16 @@ namespace QKDrv
             // factor so UI hit-testing feels controllable.
             // (Historically this scaling lived in WindowManager; keeping it here ensures
             // cursor rendering and event routing remain 1:1 in absolute coordinates.)
-            static constexpr float kSensitivity = 0.12f;
+            static constexpr float kBaseSensitivity = 0.20f;
+            const float sensitivity = kBaseSensitivity * QKDrv::Input::mouseSensitivityScale();
 
             const QC::i32 oldX = m_x;
             const QC::i32 oldY = m_y;
 
             // Accumulate with fractional precision; do not snap the accumulator to integer
             // each packet or small motions become hard to land (quantization).
-            m_fx += static_cast<float>(dx) * kSensitivity;
-            m_fy += static_cast<float>(dy) * kSensitivity;
+            m_fx += static_cast<float>(dx) * sensitivity;
+            m_fy += static_cast<float>(dy) * sensitivity;
 
             // Clamp the accumulator (not just the integer) so fractions are preserved.
             if (m_fx < static_cast<float>(m_minX))
@@ -230,6 +464,29 @@ namespace QKDrv
             // Use rounding (not truncation) so subpixel motion feels less "sticky".
             m_x = static_cast<QC::i32>(m_fx + 0.5f);
             m_y = static_cast<QC::i32>(m_fy + 0.5f);
+
+            // On some real mice the per-packet deltas are small enough that scaling + rounding
+            // can leave the cursor apparently dead for too long. Ensure any non-zero raw motion
+            // yields at least a visible one-pixel step when the rounded position did not change.
+            if (m_x == oldX && dx != 0)
+            {
+                const QC::i32 nudgedX = oldX + ((dx > 0) ? 1 : -1);
+                if (nudgedX >= m_minX && nudgedX <= m_maxX)
+                {
+                    m_x = nudgedX;
+                    m_fx = static_cast<float>(m_x);
+                }
+            }
+
+            if (m_y == oldY && dy != 0)
+            {
+                const QC::i32 nudgedY = oldY + ((dy > 0) ? 1 : -1);
+                if (nudgedY >= m_minY && nudgedY <= m_maxY)
+                {
+                    m_y = nudgedY;
+                    m_fy = static_cast<float>(m_y);
+                }
+            }
 
             m_buttons = buttons;
 
@@ -587,7 +844,7 @@ namespace QKDrv
         }
 
         XHCIControllerImpl::XHCIControllerImpl(QArch::PCIDevice *pciDevice)
-            : m_pciDevice(pciDevice), m_mmioBase(0), m_capRegs(nullptr), m_opRegs(nullptr), m_doorbells(nullptr), m_portRegs(nullptr), m_interrupter(nullptr), m_portCount(0), m_maxSlots(0), m_maxIntrs(0), m_pageSize(4096), m_contextSize(32), m_dcbaa(nullptr), m_commandRing(nullptr), m_commandEnqueue(0), m_commandCycle(true), m_eventRing(nullptr), m_erst(nullptr), m_eventDequeue(0), m_eventCycle(true), m_inputContext(nullptr), m_deviceCount(0), m_tabletSlot(0), m_mouseSlot(0), m_keyboardSlot(0), m_commandPending(false), m_lastCompletionCode(CompletionCode::Invalid), m_lastSlotId(0), m_transferPending(false), m_transferCompletionCode(CompletionCode::Invalid), m_mouseCallback(nullptr), m_screenWidth(1024), m_screenHeight(768), m_tabletDriver(nullptr), m_mouseDriver(nullptr), m_keyboardDriver(nullptr)
+            : m_pciDevice(pciDevice), m_mmioBase(0), m_capRegs(nullptr), m_opRegs(nullptr), m_doorbells(nullptr), m_portRegs(nullptr), m_interrupter(nullptr), m_portCount(0), m_maxSlots(0), m_maxIntrs(0), m_pageSize(4096), m_contextSize(32), m_dcbaa(nullptr), m_commandRing(nullptr), m_commandEnqueue(0), m_commandCycle(true), m_eventRing(nullptr), m_erst(nullptr), m_eventDequeue(0), m_eventCycle(true), m_inputContext(nullptr), m_deviceCount(0), m_tabletSlot(0), m_mouseSlot(0), m_keyboardSlot(0), m_commandPending(false), m_lastCompletionCode(CompletionCode::Invalid), m_lastSlotId(0), m_transferPending(false), m_transferPendingSlot(0), m_transferPendingEndpoint(0), m_transferCompletionCode(CompletionCode::Invalid), m_mouseCallback(nullptr), m_screenWidth(1024), m_screenHeight(768), m_tabletDriver(nullptr), m_mouseDriver(nullptr), m_keyboardDriver(nullptr), m_storageIoBuffer(nullptr), m_storageIoBufferPhys(0), m_bulkTagCounter(1), m_usbStorageCount(0)
         {
             QC_LOG_INFO("xHCI", "Constructor body entered");
 
@@ -694,6 +951,11 @@ namespace QKDrv
             m_inputContext = reinterpret_cast<QC::u8 *>(inputPage.virt);
             m_inputContextPhys = inputPage.phys;
             QC::String::memset(m_inputContext, 0, 4096);
+
+            DMAPage storageIoPage = allocateDMAPage();
+            m_storageIoBuffer = reinterpret_cast<QC::u8 *>(storageIoPage.virt);
+            m_storageIoBufferPhys = storageIoPage.phys;
+            QC::String::memset(m_storageIoBuffer, 0, 4096);
 
             // Configure max slots
             m_opRegs->config = m_maxSlots;
@@ -1001,6 +1263,103 @@ namespace QKDrv
             return true;
         }
 
+        HIDDeviceKind XHCIControllerImpl::inspectHIDPointerKind(QC::u8 slotId, QC::u8 interfaceNumber,
+                                                                QC::u16 reportLength, QC::u32 &logicalMaxX,
+                                                                QC::u32 &logicalMaxY)
+        {
+            if (reportLength == 0)
+                return HIDDeviceKind::Tablet;
+
+            static constexpr QC::u16 MaxReportDescriptor = 512;
+            QC::u16 readLength = reportLength;
+            if (readLength > MaxReportDescriptor)
+                readLength = MaxReportDescriptor;
+
+            alignas(64) static QC::u8 reportBuffer[MaxReportDescriptor];
+            QC::String::memset(reportBuffer, 0, readLength);
+
+            if (!controlTransfer(slotId,
+                                 0x81,
+                                 USB_REQ_GET_DESCRIPTOR,
+                                 static_cast<QC::u16>(USB_DESC_HID_REPORT << 8),
+                                 interfaceNumber,
+                                 reportBuffer,
+                                 readLength))
+            {
+                QC_LOG_WARN("xHCI", "Failed to read HID report descriptor for slot %u", slotId);
+                return HIDDeviceKind::Tablet;
+            }
+
+            parseHIDLogicalRanges(reportBuffer, readLength, logicalMaxX, logicalMaxY);
+
+            QC::u32 usagePage = 0;
+            bool sawX = false;
+            bool sawY = false;
+
+            for (QC::u16 idx = 0; idx < readLength;)
+            {
+                QC::u8 prefix = reportBuffer[idx++];
+
+                if (prefix == 0xFE)
+                {
+                    if (idx + 1 >= readLength)
+                        break;
+                    QC::u8 size = reportBuffer[idx];
+                    idx += static_cast<QC::u16>(size) + 2;
+                    continue;
+                }
+
+                QC::u8 sizeCode = prefix & 0x3;
+                QC::u8 dataSize = (sizeCode == 3) ? 4 : sizeCode;
+                QC::u8 type = (prefix >> 2) & 0x3;
+                QC::u8 tag = (prefix >> 4) & 0xF;
+
+                if (idx + dataSize > readLength)
+                    break;
+
+                QC::u32 value = 0;
+                for (QC::u8 i = 0; i < dataSize; ++i)
+                    value |= static_cast<QC::u32>(reportBuffer[idx + i]) << (8 * i);
+                idx += dataSize;
+
+                if (type == 1)
+                {
+                    if (tag == 0x0)
+                        usagePage = value;
+                    continue;
+                }
+
+                if (type == 2)
+                {
+                    if (tag == 0x0 && usagePage == 0x01)
+                    {
+                        if (value == 0x30)
+                            sawX = true;
+                        else if (value == 0x31)
+                            sawY = true;
+                    }
+                    continue;
+                }
+
+                if (type == 0)
+                {
+                    if (tag == 0x8 && sawX && sawY)
+                    {
+                        const bool isRelative = (value & 0x04u) != 0;
+                        return isRelative ? HIDDeviceKind::Mouse : HIDDeviceKind::Tablet;
+                    }
+
+                    if (tag == 0x8 || tag == 0x9 || tag == 0xB)
+                    {
+                        sawX = false;
+                        sawY = false;
+                    }
+                }
+            }
+
+            return HIDDeviceKind::Tablet;
+        }
+
         void XHCIControllerImpl::parseHIDLogicalRanges(const QC::u8 *descriptor, QC::u16 length,
                                                        QC::u32 &logicalMaxX, QC::u32 &logicalMaxY)
         {
@@ -1192,6 +1551,13 @@ namespace QKDrv
                 return;
             }
 
+            if (m_transferPending && slotId == m_transferPendingSlot && epId == m_transferPendingEndpoint)
+            {
+                m_transferCompletionCode = code;
+                m_transferPending = false;
+                return;
+            }
+
             // Find device for interrupt transfers
             for (QC::usize i = 0; i < m_deviceCount; ++i)
             {
@@ -1244,6 +1610,14 @@ namespace QKDrv
                                     y = static_cast<QC::i32>((static_cast<QC::u64>(absY) * heightRange) /
                                                              logicalMaxY);
                                 }
+
+                                // Some real USB pointer devices classified as tablet-like HID report
+                                // absolute coordinates with the opposite screen origin from the desktop.
+                                // Invert both axes here so physical motion matches on-screen motion.
+                                if (widthRange)
+                                    x = static_cast<QC::i32>(widthRange) - x;
+                                if (heightRange)
+                                    y = static_cast<QC::i32>(heightRange) - y;
 
                                 m_tabletDriver->updatePosition(x, y, wheel, buttons);
                             }
@@ -1524,40 +1898,80 @@ namespace QKDrv
                                                 QC::PhysAddr buffer, QC::u32 length,
                                                 QC::u32 trbFlags)
         {
-            if (!dev.transferRing)
+            if (endpointId >= 32)
+            {
+                QC_LOG_WARN("xHCI", "submitTransfer: invalid endpoint %u for slot %u", endpointId, dev.slotId);
+                return false;
+            }
+
+            EndpointTransferState &epState = dev.endpointStates[endpointId];
+            if (!epState.ring)
             {
                 QC_LOG_WARN("xHCI", "submitTransfer: no transfer ring for slot %u", dev.slotId);
                 return false;
             }
 
-            TRB *ring = dev.transferRing;
-            QC::usize idx = dev.transferEnqueue;
+            TRB *ring = epState.ring;
+            QC::usize idx = epState.enqueue;
 
             ring[idx].parameter = buffer;
             ring[idx].status = length;
 
             QC::u32 controlFlags = trbFlags & ~TRB_CYCLE;
-            if (dev.transferCycle)
+            if (epState.cycle)
             {
                 controlFlags |= TRB_CYCLE;
             }
             ring[idx].control = makeTRBControl(TRBType::Normal, controlFlags);
 
-            dev.transferEnqueue++;
-            if (dev.transferEnqueue >= RING_SIZE - 1)
+            epState.enqueue++;
+            if (epState.enqueue >= RING_SIZE - 1)
             {
                 QC::u32 linkFlags = ring[RING_SIZE - 1].control & ~TRB_CYCLE;
-                if (dev.transferCycle)
+                if (epState.cycle)
                 {
                     linkFlags |= TRB_CYCLE;
                 }
                 ring[RING_SIZE - 1].control = linkFlags;
-                dev.transferEnqueue = 0;
-                dev.transferCycle = !dev.transferCycle;
+                epState.enqueue = 0;
+                epState.cycle = !epState.cycle;
             }
 
             ringDoorbell(dev.slotId, endpointId);
             return true;
+        }
+
+        bool XHCIControllerImpl::submitTransferAndWait(DeviceInfo &dev, QC::u8 endpointId,
+                                                       QC::PhysAddr buffer, QC::u32 length,
+                                                       QC::u32 trbFlags, QC::u32 timeoutMs)
+        {
+            m_transferPending = true;
+            m_transferPendingSlot = dev.slotId;
+            m_transferPendingEndpoint = endpointId;
+            m_transferCompletionCode = CompletionCode::Invalid;
+
+            if (!submitTransfer(dev, endpointId, buffer, length, trbFlags | TRB_IOC))
+            {
+                m_transferPending = false;
+                return false;
+            }
+
+            for (QC::u32 i = 0; i < timeoutMs && m_transferPending; ++i)
+            {
+                processEvents();
+                for (int j = 0; j < 1000; ++j)
+                    cpu_relax();
+            }
+
+            if (m_transferPending)
+            {
+                QC_LOG_WARN("xHCI", "Transfer timeout: slot=%u ep=%u", dev.slotId, endpointId);
+                m_transferPending = false;
+                return false;
+            }
+
+            return m_transferCompletionCode == CompletionCode::Success ||
+                   m_transferCompletionCode == CompletionCode::ShortPacket;
         }
 
         bool XHCIControllerImpl::setConfiguration(QC::u8 slotId, QC::u8 configValue)
@@ -1640,12 +2054,19 @@ namespace QKDrv
                 {
                     if (m_devices[i].slotId == slotId)
                     {
+                        m_devices[i].endpointStates[dci].ring = ring;
+                        m_devices[i].endpointStates[dci].ringPhys = ringPage.phys;
+                        m_devices[i].endpointStates[dci].enqueue = 0;
+                        m_devices[i].endpointStates[dci].cycle = true;
                         m_devices[i].transferRing = ring;
                         m_devices[i].transferRingPhys = ringPage.phys;
                         m_devices[i].transferEnqueue = 0;
                         m_devices[i].transferCycle = true;
-                        m_devices[i].hidEndpoint = dci;
-                        m_devices[i].hidMaxPacket = epCtx->maxPacketSize;
+                        if (epCtx->epType == static_cast<QC::u8>(EndpointType::InterruptIn))
+                        {
+                            m_devices[i].hidEndpoint = dci;
+                            m_devices[i].hidMaxPacket = epCtx->maxPacketSize;
+                        }
                         break;
                     }
                 }
@@ -1657,7 +2078,14 @@ namespace QKDrv
 
         bool XHCIControllerImpl::scheduleInterruptIn(DeviceInfo &dev)
         {
-            if (!dev.transferRing)
+            if (dev.hidEndpoint >= 32)
+            {
+                QC_LOG_WARN("xHCI", "scheduleInterruptIn: invalid HID endpoint for slot %u", dev.slotId);
+                return false;
+            }
+
+            EndpointTransferState &epState = dev.endpointStates[dev.hidEndpoint];
+            if (!epState.ring)
             {
                 QC_LOG_WARN("xHCI", "scheduleInterruptIn: no transfer ring for slot %u", dev.slotId);
                 return false;
@@ -1683,25 +2111,25 @@ namespace QKDrv
                 QC::String::memset(dev.hidBuffer, 0, clearLen);
             }
 
-            TRB *ring = dev.transferRing;
-            QC::usize idx = dev.transferEnqueue;
+            TRB *ring = epState.ring;
+            QC::usize idx = epState.enqueue;
 
             // Normal TRB for interrupt IN - use physical address for DMA
             ring[idx].parameter = dev.hidBufferPhys;
             ring[idx].status = dev.hidMaxPacket;
-            ring[idx].control = makeTRBControl(TRBType::Normal, TRB_IOC | (dev.transferCycle ? TRB_CYCLE : 0));
+            ring[idx].control = makeTRBControl(TRBType::Normal, TRB_IOC | (epState.cycle ? TRB_CYCLE : 0));
 
             QC_LOG_DEBUG("xHCI", "Scheduled interrupt IN: slot=%u ep=%u idx=%lu", dev.slotId, dev.hidEndpoint, idx);
 
             // Advance
-            dev.transferEnqueue++;
-            if (dev.transferEnqueue >= RING_SIZE - 1)
+            epState.enqueue++;
+            if (epState.enqueue >= RING_SIZE - 1)
             {
                 ring[RING_SIZE - 1].control =
                     (ring[RING_SIZE - 1].control & ~TRB_CYCLE) |
-                    (dev.transferCycle ? TRB_CYCLE : 0);
-                dev.transferEnqueue = 0;
-                dev.transferCycle = !dev.transferCycle;
+                    (epState.cycle ? TRB_CYCLE : 0);
+                epState.enqueue = 0;
+                epState.cycle = !epState.cycle;
             }
 
             // Ring doorbell
@@ -1799,6 +2227,12 @@ namespace QKDrv
             dev.isTablet = false;
             dev.isMouse = false;
             dev.isKeyboard = false;
+            dev.isMassStorage = false;
+            dev.interfaceNumber = 0;
+            dev.bulkInEndpoint = 0;
+            dev.bulkOutEndpoint = 0;
+            dev.storageBlockSize = 0;
+            dev.storageSectorCount = 0;
             dev.transferRing = nullptr;
             dev.hidBuffer = nullptr;
             dev.hidBufferPhys = 0;
@@ -1811,6 +2245,8 @@ namespace QKDrv
             dev.isTablet = hidKind == HIDDeviceKind::Tablet;
             dev.isMouse = hidKind == HIDDeviceKind::Mouse;
             dev.isKeyboard = hidKind == HIDDeviceKind::Keyboard;
+            if (!dev.isHID)
+                dev.isMassStorage = identifyMassStorage(slotId, dev, configData, 256);
 
             if (dev.isTablet)
             {
@@ -1845,6 +2281,10 @@ namespace QKDrv
                 {
                     QC_LOG_WARN("xHCI", "Additional USB keyboard on slot %u ignored", slotId);
                 }
+            }
+            else if (dev.isMassStorage)
+            {
+                registerMassStorageVolume(dev);
             }
 
             // Clear enumeration flag
@@ -1921,6 +2361,7 @@ namespace QKDrv
                                          (hidIface->bInterfaceProtocol == USB_PROTOCOL_MOUSE);
                 const bool isBootKeyboard = (hidIface->bInterfaceSubClass == USB_SUBCLASS_BOOT) &&
                                             (hidIface->bInterfaceProtocol == USB_PROTOCOL_KEYBOARD);
+                HIDDeviceKind detectedPointerKind = isBootMouse ? HIDDeviceKind::Mouse : HIDDeviceKind::Tablet;
 
                 if (hidDesc)
                 {
@@ -1930,21 +2371,16 @@ namespace QKDrv
                     // Only tablet-style absolute devices need X/Y logical ranges.
                     if (!isBootMouse && !isBootKeyboard)
                     {
-                        if (fetchHIDLogicalRanges(slotId,
-                                                  hidIface->bInterfaceNumber,
-                                                  hidDesc->wDescriptorLength,
-                                                  logicalMaxX,
-                                                  logicalMaxY))
-                        {
-                            dev.logicalMaxX = logicalMaxX;
-                            dev.logicalMaxY = logicalMaxY;
-                            QC_LOG_INFO("xHCI", "HID logical range: X=%u Y=%u",
-                                        dev.logicalMaxX, dev.logicalMaxY);
-                        }
-                        else
-                        {
-                            QC_LOG_WARN("xHCI", "Using default HID logical range");
-                        }
+                        const HIDDeviceKind pointerKind = inspectHIDPointerKind(slotId,
+                                                                                hidIface->bInterfaceNumber,
+                                                                                hidDesc->wDescriptorLength,
+                                                                                logicalMaxX,
+                                                                                logicalMaxY);
+                        detectedPointerKind = pointerKind;
+                        dev.logicalMaxX = logicalMaxX;
+                        dev.logicalMaxY = logicalMaxY;
+                        QC_LOG_INFO("xHCI", "HID logical range: X=%u Y=%u",
+                                    dev.logicalMaxX, dev.logicalMaxY);
                     }
                 }
 
@@ -1971,10 +2407,333 @@ namespace QKDrv
                     return HIDDeviceKind::Keyboard;
                 }
 
-                return isBootMouse ? HIDDeviceKind::Mouse : HIDDeviceKind::Tablet;
+                return detectedPointerKind;
             }
 
             return HIDDeviceKind::None;
+        }
+
+        bool XHCIControllerImpl::identifyMassStorage(QC::u8 slotId, DeviceInfo &dev, const QC::u8 *configData, QC::u16 length)
+        {
+            USBConfigDescriptor *config = reinterpret_cast<USBConfigDescriptor *>(const_cast<QC::u8 *>(configData));
+            if (config->bDescriptorType != USB_DESC_CONFIG)
+                return false;
+
+            QC::u16 totalLen = config->wTotalLength;
+            if (totalLen > length)
+                totalLen = length;
+
+            QC::u16 offset = config->bLength;
+            USBInterfaceDescriptor *mscIface = nullptr;
+            USBEndpointDescriptor *bulkInEp = nullptr;
+            USBEndpointDescriptor *bulkOutEp = nullptr;
+
+            while (offset + 2 <= totalLen)
+            {
+                const QC::u8 descLen = configData[offset];
+                const QC::u8 descType = configData[offset + 1];
+                if (descLen == 0)
+                    break;
+
+                if (descType == USB_DESC_INTERFACE)
+                {
+                    USBInterfaceDescriptor *iface = reinterpret_cast<USBInterfaceDescriptor *>(const_cast<QC::u8 *>(&configData[offset]));
+                    if (iface->bInterfaceClass == USB_CLASS_MASS_STORAGE &&
+                        iface->bInterfaceSubClass == USB_SUBCLASS_SCSI &&
+                        iface->bInterfaceProtocol == USB_PROTOCOL_BULK_ONLY)
+                    {
+                        mscIface = iface;
+                        bulkInEp = nullptr;
+                        bulkOutEp = nullptr;
+                        QC_LOG_INFO("xHCI", "Found USB mass-storage interface %u on slot %u", iface->bInterfaceNumber, slotId);
+                    }
+                    else
+                    {
+                        mscIface = nullptr;
+                        bulkInEp = nullptr;
+                        bulkOutEp = nullptr;
+                    }
+                }
+                else if (descType == USB_DESC_ENDPOINT && mscIface)
+                {
+                    USBEndpointDescriptor *ep = reinterpret_cast<USBEndpointDescriptor *>(const_cast<QC::u8 *>(&configData[offset]));
+                    if ((ep->bmAttributes & 0x03) == 0x02)
+                    {
+                        if (ep->bEndpointAddress & 0x80)
+                            bulkInEp = ep;
+                        else
+                            bulkOutEp = ep;
+                    }
+                }
+
+                offset += descLen;
+            }
+
+            if (!mscIface || !bulkInEp || !bulkOutEp)
+                return false;
+
+            setConfiguration(slotId, config->bConfigurationValue);
+            if (!configureEndpoint(slotId, *bulkInEp) || !configureEndpoint(slotId, *bulkOutEp))
+                return false;
+
+            dev.interfaceNumber = mscIface->bInterfaceNumber;
+            dev.bulkInEndpoint = static_cast<QC::u8>((bulkInEp->bEndpointAddress & 0x0F) * 2 + 1);
+            dev.bulkOutEndpoint = static_cast<QC::u8>((bulkOutEp->bEndpointAddress & 0x0F) * 2);
+
+            QC::u8 maxLun = 0;
+            (void)controlTransfer(slotId, 0xA1, USB_REQ_GET_MAX_LUN, 0, dev.interfaceNumber, &maxLun, sizeof(maxLun));
+            QC_LOG_INFO("xHCI", "USB mass-storage detected on slot %u (bulkIn=%u bulkOut=%u maxLun=%u)",
+                        slotId, dev.bulkInEndpoint, dev.bulkOutEndpoint, static_cast<unsigned>(maxLun));
+            return true;
+        }
+
+        DeviceInfo *XHCIControllerImpl::findDevice(QC::u8 slotId)
+        {
+            for (QC::usize i = 0; i < m_deviceCount; ++i)
+            {
+                if (m_devices[i].slotId == slotId)
+                    return &m_devices[i];
+            }
+            return nullptr;
+        }
+
+        bool XHCIControllerImpl::bulkOnlyTransfer(DeviceInfo &dev, const QC::u8 *cdb, QC::u8 cdbLen,
+                                                  void *data, QC::u32 dataLen, bool dataIn)
+        {
+            if (!m_storageIoBuffer || !cdb || cdbLen == 0 || cdbLen > 16 || dataLen > 4096u)
+                return false;
+            if (dev.bulkInEndpoint == 0 || dev.bulkOutEndpoint == 0)
+                return false;
+
+            BulkOnlyCBW cbw{};
+            cbw.signature = USB_MSC_CBW_SIGNATURE;
+            cbw.tag = m_bulkTagCounter++;
+            cbw.transferLength = dataLen;
+            cbw.flags = dataIn ? USB_MSC_DIR_IN : 0;
+            cbw.lun = 0;
+            cbw.cdbLength = cdbLen;
+            QC::String::memcpy(cbw.cdb, cdb, cdbLen);
+
+            QC::String::memset(m_storageIoBuffer, 0, 4096);
+            QC::String::memcpy(m_storageIoBuffer, &cbw, sizeof(cbw));
+            if (!submitTransferAndWait(dev, dev.bulkOutEndpoint, m_storageIoBufferPhys, sizeof(cbw), 0, 5000))
+                return false;
+
+            if (dataLen > 0)
+            {
+                if (dataIn)
+                {
+                    QC::String::memset(m_storageIoBuffer, 0, 4096);
+                    if (!submitTransferAndWait(dev, dev.bulkInEndpoint, m_storageIoBufferPhys, dataLen, 0, 10000))
+                        return false;
+                    if (data)
+                        QC::String::memcpy(data, m_storageIoBuffer, dataLen);
+                }
+                else
+                {
+                    if (data)
+                        QC::String::memcpy(m_storageIoBuffer, data, dataLen);
+                    if (!submitTransferAndWait(dev, dev.bulkOutEndpoint, m_storageIoBufferPhys, dataLen, 0, 10000))
+                        return false;
+                }
+            }
+
+            QC::String::memset(m_storageIoBuffer, 0, 4096);
+            if (!submitTransferAndWait(dev, dev.bulkInEndpoint, m_storageIoBufferPhys, sizeof(BulkOnlyCSW), 0, 5000))
+                return false;
+
+            BulkOnlyCSW csw{};
+            QC::String::memcpy(&csw, m_storageIoBuffer, sizeof(csw));
+            if (csw.signature != USB_MSC_CSW_SIGNATURE || csw.tag != cbw.tag || csw.status != 0)
+            {
+                QC_LOG_WARN("xHCI", "USB MSC CSW failed: sig=%08x tag=%08x status=%u residue=%u",
+                            static_cast<unsigned>(csw.signature),
+                            static_cast<unsigned>(csw.tag),
+                            static_cast<unsigned>(csw.status),
+                            static_cast<unsigned>(csw.residue));
+                return false;
+            }
+
+            return true;
+        }
+
+        bool XHCIControllerImpl::queryMassStorageCapacity(DeviceInfo &dev, QC::u32 &blockSize, QC::u64 &sectorCount)
+        {
+            QC::u8 testUnitReady[6] = {0x00, 0, 0, 0, 0, 0};
+            (void)bulkOnlyTransfer(dev, testUnitReady, sizeof(testUnitReady), nullptr, 0, true);
+
+            QC::u8 readCapacity[10] = {0x25, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+            QC::u8 resp[8] = {0};
+            if (!bulkOnlyTransfer(dev, readCapacity, sizeof(readCapacity), resp, sizeof(resp), true))
+                return false;
+
+            const QC::u32 lastLba = (static_cast<QC::u32>(resp[0]) << 24) |
+                                    (static_cast<QC::u32>(resp[1]) << 16) |
+                                    (static_cast<QC::u32>(resp[2]) << 8) |
+                                    static_cast<QC::u32>(resp[3]);
+            blockSize = (static_cast<QC::u32>(resp[4]) << 24) |
+                        (static_cast<QC::u32>(resp[5]) << 16) |
+                        (static_cast<QC::u32>(resp[6]) << 8) |
+                        static_cast<QC::u32>(resp[7]);
+            sectorCount = static_cast<QC::u64>(lastLba) + 1ULL;
+            return blockSize != 0 && sectorCount != 0;
+        }
+
+        QC::Status XHCIControllerImpl::readMassStorageSectors(DeviceInfo &dev, QC::u64 lba, QC::usize count, void *buffer)
+        {
+            if (!buffer || count == 0 || dev.storageBlockSize == 0)
+                return QC::Status::InvalidParam;
+            if (lba + count > dev.storageSectorCount)
+                return QC::Status::InvalidParam;
+
+            QC::u8 *out = reinterpret_cast<QC::u8 *>(buffer);
+            const QC::usize maxPerTransfer = 4096u / dev.storageBlockSize;
+            QC::u64 curLba = lba;
+            QC::usize remaining = count;
+            while (remaining > 0)
+            {
+                const QC::usize chunk = (remaining > maxPerTransfer) ? maxPerTransfer : remaining;
+                QC::u8 cdb[10] = {
+                    0x28,
+                    0,
+                    static_cast<QC::u8>((curLba >> 24) & 0xFF),
+                    static_cast<QC::u8>((curLba >> 16) & 0xFF),
+                    static_cast<QC::u8>((curLba >> 8) & 0xFF),
+                    static_cast<QC::u8>(curLba & 0xFF),
+                    0,
+                    static_cast<QC::u8>((chunk >> 8) & 0xFF),
+                    static_cast<QC::u8>(chunk & 0xFF),
+                    0,
+                };
+                const QC::u32 bytes = static_cast<QC::u32>(chunk * dev.storageBlockSize);
+                if (!bulkOnlyTransfer(dev, cdb, sizeof(cdb), out, bytes, true))
+                    return QC::Status::Error;
+                out += bytes;
+                curLba += chunk;
+                remaining -= chunk;
+            }
+
+            return QC::Status::Success;
+        }
+
+        QC::Status XHCIControllerImpl::writeMassStorageSectors(DeviceInfo &dev, QC::u64 lba, QC::usize count, const void *buffer)
+        {
+            if (!buffer || count == 0 || dev.storageBlockSize == 0)
+                return QC::Status::InvalidParam;
+            if (lba + count > dev.storageSectorCount)
+                return QC::Status::InvalidParam;
+
+            const QC::u8 *in = reinterpret_cast<const QC::u8 *>(buffer);
+            const QC::usize maxPerTransfer = 4096u / dev.storageBlockSize;
+            QC::u64 curLba = lba;
+            QC::usize remaining = count;
+            while (remaining > 0)
+            {
+                const QC::usize chunk = (remaining > maxPerTransfer) ? maxPerTransfer : remaining;
+                QC::u8 cdb[10] = {
+                    0x2A,
+                    0,
+                    static_cast<QC::u8>((curLba >> 24) & 0xFF),
+                    static_cast<QC::u8>((curLba >> 16) & 0xFF),
+                    static_cast<QC::u8>((curLba >> 8) & 0xFF),
+                    static_cast<QC::u8>(curLba & 0xFF),
+                    0,
+                    static_cast<QC::u8>((chunk >> 8) & 0xFF),
+                    static_cast<QC::u8>(chunk & 0xFF),
+                    0,
+                };
+                const QC::u32 bytes = static_cast<QC::u32>(chunk * dev.storageBlockSize);
+                if (!bulkOnlyTransfer(dev, cdb, sizeof(cdb), const_cast<QC::u8 *>(in), bytes, false))
+                    return QC::Status::Error;
+                in += bytes;
+                curLba += chunk;
+                remaining -= chunk;
+            }
+
+            return QC::Status::Success;
+        }
+
+        bool XHCIControllerImpl::registerMassStorageVolume(DeviceInfo &dev)
+        {
+            QC::u32 blockSize = 0;
+            QC::u64 sectorCount = 0;
+            if (!queryMassStorageCapacity(dev, blockSize, sectorCount))
+            {
+                QC_LOG_WARN("xHCI", "USB mass-storage capacity query failed on slot %u", dev.slotId);
+                return false;
+            }
+
+            dev.storageBlockSize = blockSize;
+            dev.storageSectorCount = sectorCount;
+
+            if (blockSize != 512)
+            {
+                QC_LOG_WARN("xHCI", "USB mass-storage block size %u unsupported on slot %u", blockSize, dev.slotId);
+                return false;
+            }
+
+            auto *rawDev = new USBMassStorageBlockDevice(this, dev.slotId, blockSize, sectorCount);
+
+            QC::u64 offset = 0;
+            QC::u64 size = 0;
+            QFS::FATKind fatKind = QFS::FATKind::Unknown;
+            if (!findFatPartition(rawDev, offset, size, &fatKind))
+            {
+                QC_LOG_INFO("xHCI", "USB mass-storage slot %u present but no FAT volume found", dev.slotId);
+                return false;
+            }
+
+            QFS::BlockDevice *mountDev = rawDev;
+            if (offset != 0 || size != rawDev->sectorCount())
+                mountDev = new OffsetBlockDevice(rawDev, offset, size);
+
+            char volName[32];
+            char mountPath[32];
+            QC::String::memset(volName, 0, sizeof(volName));
+            QC::String::memset(mountPath, 0, sizeof(mountPath));
+            QC::String::strncpy(volName, "QFS_USB", sizeof(volName) - 1);
+            QC::String::strncpy(mountPath, "/mnt/usb", sizeof(mountPath) - 1);
+            const char suffix = static_cast<char>('0' + (m_usbStorageCount % 10));
+            const QC::usize vn = QC::String::strlen(volName);
+            const QC::usize mp = QC::String::strlen(mountPath);
+            if (vn + 1 < sizeof(volName))
+            {
+                volName[vn] = suffix;
+                volName[vn + 1] = '\0';
+            }
+            if (mp + 1 < sizeof(mountPath))
+            {
+                mountPath[mp] = suffix;
+                mountPath[mp + 1] = '\0';
+            }
+
+            QKStorage::BlockDeviceRegistration reg{};
+            reg.name = volName;
+            reg.mountPath = mountPath;
+            reg.fsKind = QFS::FileSystemKind::FAT_AUTO;
+            reg.device = mountDev;
+            reg.autoMount = true;
+            reg.sourceKind = "xhci-usb";
+            reg.sourceDetail = "bulk-only storage";
+            reg.persistent = true;
+
+            const QC::Status st = QKStorage::registerBlockDevice(reg);
+            if (st == QC::Status::Success || st == QC::Status::Busy)
+            {
+                ++m_usbStorageCount;
+                QC_LOG_INFO("xHCI", "Registered USB storage volume %s at %s (slot=%u sectors=%llu fatKind=%u)",
+                            volName,
+                            mountPath,
+                            dev.slotId,
+                            static_cast<unsigned long long>(sectorCount),
+                            static_cast<unsigned>(fatKind));
+                return true;
+            }
+
+            QC_LOG_WARN("xHCI", "Failed to register USB storage volume on slot %u (status=%d)",
+                        dev.slotId,
+                        static_cast<int>(st));
+            return false;
         }
 
         void XHCIControllerImpl::poll()

@@ -12,12 +12,14 @@
 
 #include "QKSystemVolumeCommands.h"
 #include "QKDrvManager.h"
+#include "Debug/Serial/QKDebugSerial.h"
 
 #include "Debug/Framebuffer/QKDebugFramebufferText.h"
 
 #include "QKShutdownController.h"
 
 #include "QKBootConfigTier.h"
+#include "QKBootLog.h"
 #include "Boot/Config/QKBootStagedConfig.h"
 #include "Boot/Config/QKBootStartupConfig.h"
 #include "Boot/Desktop/QKBootDesktopSession.h"
@@ -30,12 +32,98 @@ namespace QK
     {
         namespace
         {
+            void print(const char *msg);
+            bool appendString(char *dest, QC::usize destSize, const char *src);
+            bool resolvePath(const char *input, char *out, QC::usize outSize);
 
             static inline char lowerAscii(char c)
             {
                 if (c >= 'A' && c <= 'Z')
                     return static_cast<char>(c + 32);
                 return c;
+            }
+
+            static bool resolveOutputPath(const char *arg, char *path, QC::usize pathCap, const char *defaultPath)
+            {
+                if (!path || pathCap == 0)
+                    return false;
+
+                QC::String::memset(path, 0, pathCap);
+
+                const char *preferredRoot = nullptr;
+                if (QFS::VolumeManager::instance().isMounted("QFS_SYSTEM"))
+                    preferredRoot = "/system";
+                else if (QFS::VolumeManager::instance().isMounted("QFS_SHARED"))
+                    preferredRoot = "/shared";
+
+                if (!arg || !*arg)
+                {
+                    if (preferredRoot)
+                    {
+                        QC::String::strncpy(path, preferredRoot, pathCap - 1);
+                        appendString(path, pathCap, "/");
+                        appendString(path, pathCap, defaultPath);
+                    }
+                    else
+                    {
+                        QC::String::strncpy(path, "/shared/", pathCap - 1);
+                        appendString(path, pathCap, defaultPath);
+                    }
+                    return true;
+                }
+
+                bool hasSlash = false;
+                for (const char *p = arg; *p; ++p)
+                {
+                    if (*p == '/')
+                    {
+                        hasSlash = true;
+                        break;
+                    }
+                }
+
+                if (!hasSlash)
+                {
+                    if (preferredRoot)
+                    {
+                        QC::String::strncpy(path, preferredRoot, pathCap - 1);
+                        appendString(path, pathCap, "/");
+                    }
+                    else
+                    {
+                        QC::String::strncpy(path, "/shared/", pathCap - 1);
+                    }
+                    appendString(path, pathCap, arg);
+                    return true;
+                }
+
+                return resolvePath(arg, path, pathCap);
+            }
+
+            static void printByteCount(QC::isize wrote)
+            {
+                char num[32];
+                QC::String::memset(num, 0, sizeof(num));
+                QC::u64 v = (wrote < 0) ? 0 : static_cast<QC::u64>(wrote);
+                int numIdx = 0;
+                if (v == 0)
+                {
+                    num[numIdx++] = '0';
+                }
+                else
+                {
+                    char tmp[32];
+                    int tmpIdx = 0;
+                    while (v > 0 && tmpIdx < 31)
+                    {
+                        tmp[tmpIdx++] = static_cast<char>('0' + (v % 10));
+                        v /= 10;
+                    }
+                    for (int i = tmpIdx - 1; i >= 0; --i)
+                        num[numIdx++] = tmp[i];
+                }
+                num[numIdx] = '\0';
+                print(num);
             }
 
             static bool streqIgnoreCase(const char *a, const char *b)
@@ -84,6 +172,7 @@ namespace QK
             char g_savetermLastPath[256];
 
             bool g_inputEnabled = true;
+            bool g_safeFallbackEnabled = false;
 
             bool g_warnedAdminEnable = false;
             bool g_warnedSystemEnable = false;
@@ -707,12 +796,6 @@ namespace QK
 
             void handleSaveTerm(int argc, const char *const *argv)
             {
-                if (!QFS::VolumeManager::instance().isMounted("QFS_SHARED"))
-                {
-                    print("saveterm: /shared not mounted\r\n");
-                    return;
-                }
-
                 bool appendMode = false;
                 const char *arg = nullptr;
 
@@ -727,48 +810,17 @@ namespace QK
                 }
 
                 char path[256];
-                QC::String::memset(path, 0, sizeof(path));
 
                 if ((!arg || !*arg) && appendMode && g_savetermHasBaseline && g_savetermLastPath[0])
                 {
                     QC::String::strncpy(path, g_savetermLastPath, sizeof(path) - 1);
                 }
-                else if (!arg || !*arg)
-                {
-                    QC::String::strncpy(path, "/shared/citadel.txt", sizeof(path) - 1);
-                }
                 else
                 {
-                    bool hasSlash = false;
-                    for (const char *p = arg; *p; ++p)
+                    if (!resolveOutputPath(arg, path, sizeof(path), "citadel.txt"))
                     {
-                        if (*p == '/')
-                        {
-                            hasSlash = true;
-                            break;
-                        }
-                    }
-
-                    if (!hasSlash)
-                    {
-                        QC::String::strncpy(path, "/shared/", sizeof(path) - 1);
-                        appendString(path, sizeof(path), arg);
-                    }
-                    else
-                    {
-                        if (!resolvePath(arg, path, sizeof(path)))
-                        {
-                            print("saveterm: invalid path\r\n");
-                            return;
-                        }
-
-                        const char *prefix = "/shared";
-                        const QC::usize prefixLen = QC::String::strlen(prefix);
-                        if (QC::String::memcmp(path, prefix, prefixLen) != 0)
-                        {
-                            print("saveterm: path must be under /shared\r\n");
-                            return;
-                        }
+                        print("saveterm: invalid path\r\n");
+                        return;
                     }
                 }
 
@@ -781,7 +833,7 @@ namespace QK
                 {
                     print("saveterm: cannot open output file: ");
                     print(path);
-                    print(" (is /shared mounted + writable?)\r\n");
+                    print(" (is the target path mounted + writable?)\r\n");
                     return;
                 }
 
@@ -813,28 +865,7 @@ namespace QK
                 QFS::VFS::instance().close(file);
 
                 print("\r\nsaveterm: wrote ");
-                char num[32];
-                QC::String::memset(num, 0, sizeof(num));
-                QC::u64 v = (wrote < 0) ? 0 : static_cast<QC::u64>(wrote);
-                int numIdx = 0;
-                if (v == 0)
-                {
-                    num[numIdx++] = '0';
-                }
-                else
-                {
-                    char tmp[32];
-                    int tmpIdx = 0;
-                    while (v > 0 && tmpIdx < 31)
-                    {
-                        tmp[tmpIdx++] = static_cast<char>('0' + (v % 10));
-                        v /= 10;
-                    }
-                    for (int i = tmpIdx - 1; i >= 0; --i)
-                        num[numIdx++] = tmp[i];
-                }
-                num[numIdx] = '\0';
-                print(num);
+                printByteCount(wrote);
                 print(" bytes to ");
                 print(path);
                 print("\r\n");
@@ -844,6 +875,52 @@ namespace QK
                 g_savetermHasBaseline = true;
                 QC::String::memset(g_savetermLastPath, 0, sizeof(g_savetermLastPath));
                 QC::String::strncpy(g_savetermLastPath, path, sizeof(g_savetermLastPath) - 1);
+            }
+
+            void handleSaveSerial(int argc, const char *const *argv)
+            {
+                const char *arg = (argc >= 2) ? argv[1] : nullptr;
+
+                char path[256];
+                if (!resolveOutputPath(arg, path, sizeof(path), "citadel-serial.txt"))
+                {
+                    print("saveserial: invalid path\r\n");
+                    return;
+                }
+
+                QFS::File *file = QFS::VFS::instance().open(path,
+                                                            QFS::OpenMode::Write |
+                                                                QFS::OpenMode::Create |
+                                                                QFS::OpenMode::Truncate);
+                if (!file)
+                {
+                    print("saveserial: cannot open output file: ");
+                    print(path);
+                    print(" (is the target path mounted + writable?)\r\n");
+                    return;
+                }
+
+                QC::isize wrote = 0;
+                if (QK::Debug::Serial::CaptureTruncated())
+                {
+                    const char *hdr = "[serial capture truncated]\r\n";
+                    wrote += file->write(hdr, QC::String::strlen(hdr));
+                }
+
+                const char *capture = QK::Debug::Serial::CaptureData();
+                const QC::usize captureLen = QK::Debug::Serial::CaptureSize();
+                if (capture && captureLen > 0)
+                {
+                    wrote += file->write(capture, captureLen);
+                }
+
+                QFS::VFS::instance().close(file);
+
+                print("\r\nsaveserial: wrote ");
+                printByteCount(wrote);
+                print(" bytes to ");
+                print(path);
+                print("\r\n");
             }
 
             void handleTier(int, const char *const *)
@@ -953,7 +1030,8 @@ namespace QK
                 addCommandInternal({"cd", handleCd, "Change current directory"});
                 addCommandInternal({"cat", handleCat, "Print file contents"});
                 addCommandInternal({"touch", handleTouch, "Create empty file"});
-                addCommandInternal({"saveterm", handleSaveTerm, "Save console transcript to /shared"});
+                addCommandInternal({"saveterm", handleSaveTerm, "Save console transcript to a writable path (prefers /system)"});
+                addCommandInternal({"saveserial", handleSaveSerial, "Save mirrored serial boot log to a writable path (prefers /system)"});
                 addCommandInternal({"tier", handleTier, "Show active config tier + staged early modules"});
 
                 addCommandInternal({"whoami",
@@ -990,7 +1068,7 @@ namespace QK
                 addCommandInternal({"admin",
                                     [](int argc, const char *const *argv) {
                                         const auto mode = QK::Boot::Config::GetStartupMode();
-                                        if (mode != QK::Boot::Config::StartupMode::Terminal)
+                                        if (mode != QK::Boot::Config::StartupMode::Terminal && !g_safeFallbackEnabled)
                                         {
                                             print("\r\nadmin: only available in TERMINAL startup mode\r\n");
                                             return;
@@ -1140,8 +1218,24 @@ namespace QK
             g_role = QC::Cmd::AccessLevel::User;
             g_warnedAdminEnable = false;
             g_warnedSystemEnable = false;
+
+            const QC::usize bootLogSize = QK::Boot::Log::Size();
+            if (bootLogSize > 0)
+            {
+                char chunk[512];
+                QC::usize offset = 0;
+                while (offset < bootLogSize)
+                {
+                    const QC::usize copied = QK::Boot::Log::CopyOut(offset, chunk, sizeof(chunk) - 1);
+                    if (copied == 0)
+                        break;
+                    chunk[copied] = '\0';
+                    print(chunk);
+                    offset += copied;
+                }
+            }
+
             print("\r\nCITADEL console ready\r\n");
-            printPrompt();
         }
 
         void setRole(QC::Cmd::AccessLevel role)
@@ -1162,6 +1256,16 @@ namespace QK
         bool inputEnabled()
         {
             return g_inputEnabled;
+        }
+
+        void setSafeFallbackEnabled(bool enabled)
+        {
+            g_safeFallbackEnabled = enabled;
+        }
+
+        bool safeFallbackEnabled()
+        {
+            return g_safeFallbackEnabled;
         }
 
         void handleKeyEvent(const QKDrv::PS2::KeyEvent &event)
@@ -1232,6 +1336,11 @@ namespace QK
         void write(const char *msg)
         {
             print(msg);
+        }
+
+        void showPrompt()
+        {
+            printPrompt();
         }
 
         const char *cwd()

@@ -1,4 +1,5 @@
 add_library(QDrivers STATIC
+    Src/QDrvDisplayDevice.cpp
     Src/QDrvTimer.cpp
     Src/QDrvBGA.cpp
     Src/QDrvVmwareSVGA.cpp

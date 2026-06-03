@@ -741,6 +741,22 @@ namespace QD
                 QC::String::memset(msg, 0, sizeof(msg));
                 QC::String::strncpy(msg, "chmode: denied", sizeof(msg) - 1);
 
+                if (!QK::SecurityCenter::instance().ownerIsEnrolled())
+                {
+                    const QC::usize used = QC::String::strlen(msg);
+                    QC::String::strncpy(msg + used, " (no Owner enrolled; use sys_user_enroll)", sizeof(msg) - 1 - used);
+                }
+                else if (QK::SecurityCenter::instance().ownerLockedOut())
+                {
+                    const QC::usize used = QC::String::strlen(msg);
+                    QC::String::strncpy(msg + used, " (Owner unlock backoff active)", sizeof(msg) - 1 - used);
+                }
+                else if (!QK::SecurityCenter::instance().ownerUnlocked())
+                {
+                    const QC::usize used = QC::String::strlen(msg);
+                    QC::String::strncpy(msg + used, " (Owner locked; use sys_user_unlock or valid Owner creds)", sizeof(msg) - 1 - used);
+                }
+
                 const QC::u32 backoff = QK::SecurityCenter::instance().ownerUnlockBackoffMs();
                 if (backoff)
                 {
@@ -1169,11 +1185,6 @@ namespace QD
             }
             else
             {
-                if (!startsWith(arg, "/shared"))
-                {
-                    appendLine("saveterm: path must be under /shared");
-                    return;
-                }
                 QC::String::strncpy(outPath, arg, sizeof(outPath) - 1);
             }
 
@@ -1203,7 +1214,7 @@ namespace QD
             QFS::File *file = QFS::VFS::instance().open(outPath, mode);
             if (!file)
             {
-                appendLine("saveterm: cannot open output file (is /shared mounted + writable?)");
+                appendLine("saveterm: cannot open output file (is the target path mounted + writable?)");
                 return;
             }
 

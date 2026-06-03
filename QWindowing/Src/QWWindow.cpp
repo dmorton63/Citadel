@@ -8,6 +8,15 @@
 namespace QW
 {
 
+    namespace
+    {
+        QC::u32 nextGraphicsSurfaceId()
+        {
+            static QC::u32 s_nextSurfaceId = 1;
+            return s_nextSurfaceId++;
+        }
+    }
+
     Window::Window(const char *title, Rect bounds)
         : m_windowId(0),
           m_bounds(bounds),
@@ -17,12 +26,19 @@ namespace QW
           m_styleRenderer(),
           m_painter(),
           m_surfacePixels(),
+          m_qgfxSurface(),
           m_bufferWidth(0),
           m_bufferHeight(0),
           m_bufferPitchBytes(0)
     {
         std::strncpy(m_title, title ? title : "", sizeof(m_title) - 1);
         m_title[sizeof(m_title) - 1] = '\0';
+
+        m_qgfxSurface.id.value = nextGraphicsSurfaceId();
+        m_qgfxSurface.width = bounds.width;
+        m_qgfxSurface.height = bounds.height;
+        m_qgfxSurface.format = QGfx::PixelFormat::ARGB8888;
+        m_qgfxSurface.usage = QGfx::SurfaceUsage::Dynamic;
 
         // Create root panel
         m_root = new Controls::Panel();
@@ -56,8 +72,11 @@ namespace QW
 
     void Window::setBounds(const Rect &bounds)
     {
+        const bool sizeChanged = (bounds.width != m_bounds.width) ||
+                                 (bounds.height != m_bounds.height);
         m_bounds = bounds;
-        onResize(bounds.width, bounds.height);
+        if (sizeChanged)
+            onResize(bounds.width, bounds.height);
     }
 
     bool Window::isVisible() const
@@ -161,6 +180,22 @@ namespace QW
 
         if (x2 <= x1 || y2 <= y1)
             return;
+
+        // Title-bar controls are painted into the window surface on top of the
+        // chrome background. If a partial repaint touches the title strip, the
+        // chrome redraw can wipe part of a control without repainting the rest
+        // of that control. Expand such updates to the full title bar so close
+        // buttons/title labels stay visually coherent.
+        static constexpr QC::i32 kTitleBarHeight = 24;
+        if ((m_flags & WindowFlags::HasTitle) != 0 && y1 < kTitleBarHeight)
+        {
+            x1 = 0;
+            if (y1 > 0)
+                y1 = 0;
+            x2 = maxW;
+            if (y2 < kTitleBarHeight)
+                y2 = kTitleBarHeight;
+        }
 
         const Rect clipped{ x1, y1,
                             static_cast<QC::u32>(x2 - x1),
@@ -322,6 +357,9 @@ namespace QW
         if (width == 0 || height == 0)
         {
             m_surfacePixels.resize(0);
+            m_qgfxSurface.width = 0;
+            m_qgfxSurface.height = 0;
+            m_qgfxSurface.clearDirtyRegion();
             m_bufferWidth = 0;
             m_bufferHeight = 0;
             m_bufferPitchBytes = 0;
@@ -342,6 +380,11 @@ namespace QW
 
         if (m_surfacePixels.empty())
             return false;
+
+        m_qgfxSurface.width = m_bufferWidth;
+        m_qgfxSurface.height = m_bufferHeight;
+        m_qgfxSurface.format = QGfx::PixelFormat::ARGB8888;
+        m_qgfxSurface.usage = QGfx::SurfaceUsage::Dynamic;
 
         // IMPORTANT: do not rebind the painter/backend every frame.
         // PainterSurface::setSurface() resets the clip rect, which breaks dirty-rect repaint.

@@ -1,4 +1,25 @@
 Summary:
+Current direction:
+- CQL is not just a generic storage engine for Citadel; it is intended to become the durable runtime source for desktop themes, layout specifications, control metadata, and related UI design data.
+- The existing `.json` / `.cml` parsing path is still needed, but primarily as an import/bootstrap and fallback path.
+- Because of that, relational schema support matters earlier than a generic CRUD-only milestone order would suggest: desktop/runtime data needs normalized related tables, stable schema modeling, and foreign-key-style relationship behavior.
+
+Current implementation surfaces in the repo:
+- `QCQL/`: the in-repo engine core. This is the real low-level implementation surface today for file/header layout, schema objects, page allocation/I/O, row serialization, primary-key index rebuild/lookup, table creation, and PK-based row operations.
+- `CQL_Database_Engine/`: the service/runtime bridge and standalone development track. `QCSQLService.cpp` already contains a real message-routed/service-style adapter and a subset text-query parsing path, but this layer is still transitional and not yet the finished Citadel-native runtime boundary.
+- `QDesktop/`: the current consumer integration path. Desktop bring-up already creates/opens `/system/CMMS.QDB`, imports built-in themes into `Themes`/`ThemeTokens`, seeds desktop document tables/chunk tables, and can load theme state from QCQL during normal startup.
+
+Practical breakdown for implementation review:
+- Engine core: `QCQL`
+- Service/runtime boundary: `CQL_Database_Engine`
+- Desktop integration: `QDesktop`
+
+What is still missing across those surfaces:
+- normalized relational modeling for desktop objects
+- foreign-key / relationship metadata and enforcement
+- a settled Citadel-native runtime service boundary
+- full database-first desktop boot that no longer depends on file-shaped source data as the long-term model
+
 1. Core data structures and file format
 Goal: Get a minimal engine that can open a file, read/write pages, and store rows.
 - Define structs:
@@ -15,10 +36,18 @@ Milestone: You can create a DB file, allocate a page, and round‑trip a dummy r
 Goal: Make the engine understand tables and schemas.
 - Load table directory into Database::tables.
 - Load schemas into TableSchema for each table.
-- Validate schemas (one PK, unique names, valid types).
+- Validate schemas (one PK, unique names, valid types, and room for relationship metadata).
 - Wire Table objects:
 - name, schema, rootPage, pages.
 Milestone: Engine can open an existing DB and list tables/columns.
+
+2a. Relational modeling and relationships
+Goal: Make CQL capable of expressing Citadel runtime data that is relational, not just flat.
+- Define relationship metadata in schema structures.
+- Add foreign-key/reference descriptors and validation rules.
+- Decide initial parent/child update-delete behavior for v1.
+- Enforce relationship integrity in insert/update/delete paths.
+Milestone: CQL can model desktop/theme/layout/control data using normalized related tables rather than a flat-file-shaped schema.
 
 3. Page allocator and row serialization
 Goal: Be able to insert and read rows deterministically.
@@ -65,6 +94,9 @@ Goal: Make the engine start predictably and guarantee system tables exist.
 - Initialize system tables if missing:
 - Themes
 - ThemeTokens
+- DesktopLayouts
+- DesktopControls
+- DesktopAssets
 - Capabilities
 - Add a “first‑boot” path to create schemas + first pages.
 Milestone: Engine boots into a known‑good state every time.
@@ -90,7 +122,7 @@ Goal: Make CQL a Citadel service with capability‑scoped access.
 - Implement execute(DbHandle&, textQuery, QueryResult&):
 - parse → validate → permission check → engine call.
 - Enforce process binding on handles.
-Milestone: ThemeService, SecurityCenter, PortManager can all talk to CQL through a stable runtime API.
+Milestone: ThemeService, desktop runtime services, SecurityCenter, and PortManager can all talk to CQL through a stable runtime API.
 
 9. Integrate ThemeService first
 Goal: Prove the engine in a real subsystem.
@@ -100,6 +132,14 @@ Goal: Prove the engine in a real subsystem.
 - update tokens on theme edit.
 - Replace any ad‑hoc theme storage with CQL.
 Milestone: Citadel boots, loads themes from CQL, and live theme changes persist.
+
+9a. Integrate desktop runtime data next
+Goal: Move desktop/runtime design data out of external asset files and into CQL-backed schemas.
+- Define normalized tables for layouts, control instances, hierarchy, theme bindings, and asset references.
+- Keep the existing parser as the import/bootstrap path for initial `.json` / `.cml` assets.
+- Materialize imported desktop definitions into CQL tables.
+- Make normal boots prefer CQL-backed desktop data, with file import reserved for provisioning, recovery, or migration.
+Milestone: Citadel can import desktop definitions once, persist them relationally, and build the desktop from CQL on normal boots.
 
 10. v1+ durability (when you’re ready)
 Goal: Add safety, not change architecture.
@@ -1908,7 +1948,8 @@ Section 9 - Integration with Citadel RunTime (CQL V0)
 SECTION 9 — INTEGRATION WITH CITADEL RUNTIME
 
 1. ThemeService Integration
-ThemeService is the first real consumer of CQL.
+ThemeService is the first real consumer of CQL, but it is not the end goal.
+It is the proving ground for the larger desktop-runtime move.
 It uses CQL for:
 - theme discovery
 - theme metadata
@@ -1959,14 +2000,31 @@ ThemeService then:
 - broadcasts a theme‑changed event
 - UI updates instantly
 F. Why CQL is perfect for themes
-- No more JSON files
-- No more parsing
+- No more file-backed theme truth at runtime
+- Less repeated parse/materialize work on normal boots
 - No more duplicated logic
 - No more brittle theme switching
 - Full introspection
 - Full editability
 - Full versioning
 This is the first subsystem that truly proves the value of CQL.
+
+1a. Desktop Runtime Integration After ThemeService
+After ThemeService is stable, the next consumer is the desktop runtime itself.
+The intended direction is:
+- external `.json` / `.cml` files remain as import/bootstrap assets
+- imported layout/control/theme-binding data is materialized into CQL tables
+- normal desktop boot reads those tables first
+
+That means the database model must be able to express:
+- layout regions
+- control hierarchy
+- theme-token bindings
+- asset references
+- relationships between desktop objects
+
+This is why relational support is not optional polish for Citadel.
+For the desktop/runtime use case, it is part of the core engine shape.
 
 2. SecurityCenter Integration
 SecurityCenter uses CQL for:

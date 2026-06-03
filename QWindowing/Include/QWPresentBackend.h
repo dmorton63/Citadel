@@ -5,6 +5,8 @@
 
 #include "QCTypes.h"
 #include "QCGeometry.h"
+#include "QGfxBatch.h"
+#include "QGfxSurface.h"
 
 namespace QW
 {
@@ -24,6 +26,14 @@ namespace QW
         QC::u32 qgfxRectCopyOps = 0;
     };
 
+    struct WindowSurfaceBlit
+    {
+        const QGfx::Surface *surface = nullptr;
+        const QC::u32 *pixels = nullptr;
+        QC::u32 stridePixels = 0;
+        QC::Rect dirtyRect{0, 0, 0, 0};
+    };
+
     class PresentBackend
     {
     public:
@@ -39,6 +49,10 @@ namespace QW
         // Optional acceleration hooks (future use)
         virtual bool supportsRectCopy() const { return false; }
         virtual void rectCopy(const QC::Rect & /*src*/, const QC::Rect & /*dst*/) {}
+        virtual bool supportsWindowSurfaceBatches() const { return false; }
+        virtual bool submitWindowSurfaceBatch(const QGfx::Batch & /*batch*/,
+                                              const WindowSurfaceBlit * /*blits*/,
+                                              QC::usize /*blitCount*/) { return false; }
         virtual const PresentAccelerationStats &accelerationStats() const
         {
             static PresentAccelerationStats s_empty;

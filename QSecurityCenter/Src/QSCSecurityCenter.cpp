@@ -540,7 +540,7 @@ namespace QSC
             return QC::Status::Error;
         QC::u8 newSst[32];
         st = m_randProvider.fillRandom(m_randProvider.user, newSst, sizeof(newSst));
-        if (st != QC::Status::Success)
+        if (st != QC::Status::Success && st != QC::Status::Busy)
         {
             secureZero(newSst, sizeof(newSst));
             return st;
@@ -572,7 +572,7 @@ namespace QSC
         }
 
         st = m_randProvider.fillRandom(m_randProvider.user, wrapped.nonce, sizeof(wrapped.nonce));
-        if (st != QC::Status::Success)
+        if (st != QC::Status::Success && st != QC::Status::Busy)
         {
             secureZero(newSst, sizeof(newSst));
             return st;
@@ -693,7 +693,7 @@ namespace QSC
             // Provision first SST.
             QC::u8 sst[32];
             st = m_randProvider.fillRandom(m_randProvider.user, sst, sizeof(sst));
-            if (st != QC::Status::Success)
+            if (st != QC::Status::Success && st != QC::Status::Busy)
             {
                 secureZero(sst, sizeof(sst));
                 return st;
@@ -712,7 +712,7 @@ namespace QSC
             wrapped.version = kWrappedSstVersion;
             wrapped.generation = 1;
             st = m_randProvider.fillRandom(m_randProvider.user, wrapped.nonce, sizeof(wrapped.nonce));
-            if (st != QC::Status::Success)
+            if (st != QC::Status::Success && st != QC::Status::Busy)
             {
                 secureZero(sst, sizeof(sst));
                 return st;

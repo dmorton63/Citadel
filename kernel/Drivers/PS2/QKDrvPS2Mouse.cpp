@@ -2,6 +2,7 @@
 // Namespace: QKDrv::PS2
 
 #include "QKDrvPS2Mouse.h"
+#include "QKInputSettings.h"
 #include "QArchPort.h"
 #include "QKInterrupts.h"
 #include "QCLogger.h"
@@ -24,7 +25,7 @@ namespace QKDrv
         }
 
         Mouse::Mouse()
-            : m_callback(nullptr), m_x(0), m_y(0), m_minX(0), m_minY(0), m_maxX(1024), m_maxY(768), m_buttons(0), m_packetIndex(0), m_hasScrollWheel(false)
+            : m_callback(nullptr), m_x(0), m_y(0), m_fx(0.0f), m_fy(0.0f), m_minX(0), m_minY(0), m_maxX(1024), m_maxY(768), m_buttons(0), m_packetIndex(0), m_hasScrollWheel(false)
         {
             QC::String::memset(m_packetBuffer, 0, sizeof(m_packetBuffer));
         }
@@ -134,6 +135,8 @@ namespace QKDrv
             // Center the mouse cursor when bounds are set
             m_x = (minX + maxX) / 2;
             m_y = (minY + maxY) / 2;
+            m_fx = static_cast<float>(m_x);
+            m_fy = static_cast<float>(m_y);
         }
 
         void Mouse::handleInterrupt()
@@ -143,6 +146,13 @@ namespace QKDrv
                 return; // Not mouse data
 
             QC::u8 data = QArch::inb(MOUSE_DATA_PORT);
+
+            // PS/2 mouse packets always start with bit 3 set. If we ever lose a byte,
+            // resynchronize on the next valid header instead of treating movement bytes
+            // as a fresh packet and generating a huge cursor jump.
+            if (m_packetIndex == 0 && (data & 0x08u) == 0)
+                return;
+
             m_packetBuffer[m_packetIndex++] = data;
 
             QC::usize expectedSize = m_hasScrollWheel ? 4 : 3;
@@ -150,6 +160,11 @@ namespace QKDrv
                 return;
 
             m_packetIndex = 0;
+
+            // Drop packets that report X/Y overflow rather than converting them into a
+            // saturated movement step on screen.
+            if (m_packetBuffer[0] & 0xC0u)
+                return;
 
             // Parse packet
             QC::i32 deltaX = m_packetBuffer[1];
@@ -166,9 +181,50 @@ namespace QKDrv
                 deltaZ = static_cast<QC::i8>(m_packetBuffer[3]);
             }
 
-            // Update position
-            m_x -= deltaX;
-            m_y += deltaY;
+            const QC::i32 oldX = m_x;
+            const QC::i32 oldY = m_y;
+
+            // Apply the same modest sensitivity model as the USB relative path so
+            // real-hardware PS/2 motion is controllable instead of jumping in large steps.
+            static constexpr float kBaseSensitivity = 0.50f;
+            const float sensitivity = kBaseSensitivity * QKDrv::Input::mouseSensitivityScale();
+
+            // PS/2 movement uses +X to the right and +Y upward.
+            // Screen space is +X to the right and +Y downward, so invert Y only.
+            m_fx += static_cast<float>(deltaX) * sensitivity;
+            m_fy -= static_cast<float>(deltaY) * sensitivity;
+
+            if (m_fx < static_cast<float>(m_minX))
+                m_fx = static_cast<float>(m_minX);
+            if (m_fx > static_cast<float>(m_maxX))
+                m_fx = static_cast<float>(m_maxX);
+            if (m_fy < static_cast<float>(m_minY))
+                m_fy = static_cast<float>(m_minY);
+            if (m_fy > static_cast<float>(m_maxY))
+                m_fy = static_cast<float>(m_maxY);
+
+            m_x = static_cast<QC::i32>(m_fx + 0.5f);
+            m_y = static_cast<QC::i32>(m_fy + 0.5f);
+
+            if (m_x == oldX && deltaX != 0)
+            {
+                const QC::i32 nudgedX = oldX + ((deltaX > 0) ? 1 : -1);
+                if (nudgedX >= m_minX && nudgedX <= m_maxX)
+                {
+                    m_x = nudgedX;
+                    m_fx = static_cast<float>(m_x);
+                }
+            }
+
+            if (m_y == oldY && deltaY != 0)
+            {
+                const QC::i32 nudgedY = oldY + ((deltaY < 0) ? 1 : -1);
+                if (nudgedY >= m_minY && nudgedY <= m_maxY)
+                {
+                    m_y = nudgedY;
+                    m_fy = static_cast<float>(m_y);
+                }
+            }
 
             // Clamp to bounds
             if (m_x < m_minX)
@@ -186,8 +242,10 @@ namespace QKDrv
             if (m_callback)
             {
                 MouseReport report;
-                report.x = deltaX;
-                report.y = deltaY;
+                report.x = m_x;
+                report.y = m_y;
+                report.deltaX = (m_x - oldX);
+                report.deltaY = (m_y - oldY);
                 report.wheel = deltaZ;
                 report.buttons = m_buttons;
                 report.isAbsolute = false;

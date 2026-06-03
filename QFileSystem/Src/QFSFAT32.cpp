@@ -795,6 +795,23 @@ namespace QFS
 
     QC::Status FAT32::stat(const char *path, FileInfo *info)
     {
+        if (!path || !info)
+            return QC::Status::InvalidParam;
+
+        if (path[0] == '/' && path[1] == '\0')
+        {
+            QC::String::memset(info, 0, sizeof(*info));
+            info->name[0] = '/';
+            info->name[1] = '\0';
+            info->type = FileType::Directory;
+            info->permissions = 0644;
+            info->uid = 0;
+            info->gid = 0;
+            info->roleFlag = static_cast<QC::u32>(RoleFlag::Everyone);
+            info->metadataHash = 0;
+            return QC::Status::Success;
+        }
+
         FAT32DirEntry *entry = findEntry(path);
         if (!entry)
             return QC::Status::NotFound;

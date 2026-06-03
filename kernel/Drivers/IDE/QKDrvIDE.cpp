@@ -348,6 +348,78 @@ namespace
         return sectorCount28FromIdentify(id);
     }
 
+    static void extractModelString(const QC::u16 id[256], char out[41])
+    {
+        if (!out)
+            return;
+
+        QC::String::memset(out, 0, 41);
+
+        QC::usize pos = 0;
+        for (QC::usize word = 27; word <= 46 && pos + 1 < 41; ++word)
+        {
+            const QC::u16 value = id[word];
+            const char hi = static_cast<char>((value >> 8) & 0xFF);
+            const char lo = static_cast<char>(value & 0xFF);
+
+            if (hi != '\0' && pos + 1 < 41)
+                out[pos++] = hi;
+            if (lo != '\0' && pos + 1 < 41)
+                out[pos++] = lo;
+        }
+
+        while (pos > 0 && (out[pos - 1] == ' ' || out[pos - 1] == '\t'))
+            out[--pos] = '\0';
+    }
+
+    struct IdeCandidate
+    {
+        QC::u16 base;
+        QC::u16 ctrl;
+        bool slave;
+        QC::u8 channelIndex;
+    };
+
+    static constexpr IdeCandidate kIdeCandidates[] = {
+        {kPrimaryBase, kPrimaryCtrl, false, 0},
+        {kPrimaryBase, kPrimaryCtrl, true, 0},
+        {kSecondaryBase, kSecondaryCtrl, false, 1},
+        {kSecondaryBase, kSecondaryCtrl, true, 1},
+    };
+
+    static void resolveIdeCandidates(const IdeIoPorts &ports, IdeCandidate out[4])
+    {
+        out[0] = {ports.primaryBase, ports.primaryCtrl, false, 0};
+        out[1] = {ports.primaryBase, ports.primaryCtrl, true, 0};
+        out[2] = {ports.secondaryBase, ports.secondaryCtrl, false, 1};
+        out[3] = {ports.secondaryBase, ports.secondaryCtrl, true, 1};
+    }
+
+    static bool resolveDetectedDeviceIndex(QC::usize deviceIndex, IdeCandidate &outCandidate)
+    {
+        const IdeIoPorts ports = detectIdePortsFromPci();
+        IdeCandidate candidates[4];
+        resolveIdeCandidates(ports, candidates);
+
+        QC::usize detectedIndex = 0;
+        for (const auto &candidate : candidates)
+        {
+            QC::u16 id[256];
+            if (!identify(candidate.base, candidate.ctrl, candidate.slave, id))
+                continue;
+
+            if (detectedIndex == deviceIndex)
+            {
+                outCandidate = candidate;
+                return true;
+            }
+
+            ++detectedIndex;
+        }
+
+        return false;
+    }
+
     class AtaPioBlockDevice final : public QFS::BlockDevice
     {
     public:
@@ -564,7 +636,7 @@ namespace
         return type == 0x0B || type == 0x0C || type == 0x06 || type == 0x0E || type == 0x01 || type == 0x04;
     }
 
-    static bool findFatPartition(QFS::BlockDevice *dev, QC::u64 &outOffset, QC::u64 &outSize)
+    static bool findFatPartition(QFS::BlockDevice *dev, QC::u64 &outOffset, QC::u64 &outSize, QFS::FATKind *outKind = nullptr)
     {
         QC::u8 sector0[512];
         const QC::Status st0 = dev->readSector(0, sector0);
@@ -593,6 +665,14 @@ namespace
                 if (!looksLikeFatBootSector(bs))
                     continue;
 
+                if (outKind)
+                {
+                    QFS::FATProbeResult probe{};
+                    if (!QFS::probeFATBootSector(bs, probe))
+                        continue;
+                    *outKind = probe.kind;
+                }
+
                 outOffset = parts[i].lbaFirst;
                 outSize = parts[i].lbaCount;
                 return true;
@@ -604,6 +684,13 @@ namespace
         // No real partition table found: treat as a superfloppy FAT volume.
         if (looksLikeFatBootSector(sector0))
         {
+            if (outKind)
+            {
+                QFS::FATProbeResult probe{};
+                if (!QFS::probeFATBootSector(sector0, probe))
+                    return false;
+                *outKind = probe.kind;
+            }
             outOffset = 0;
             outSize = dev->sectorCount();
             return true;
@@ -617,7 +704,8 @@ namespace
                                   bool slave,
                                   const char *volumeName,
                                   const char *mountPath,
-                                  IdeBinding *boundOut)
+                                  IdeBinding *boundOut,
+                                  bool requireFat32 = false)
     {
         if (!volumeName || !mountPath)
             return false;
@@ -646,10 +734,18 @@ namespace
 
         QC::u64 offset = 0;
         QC::u64 size = 0;
-        if (!findFatPartition(rawDev, offset, size))
+        QFS::FATKind fatKind = QFS::FATKind::Unknown;
+        if (!findFatPartition(rawDev, offset, size, &fatKind))
         {
             QC_LOG_INFO("QKDrvIDE", "Disk present but no FAT volume found (base=%x ctrl=%x %s)",
                         base, ctrl, slave ? "slave" : "master");
+            return false;
+        }
+
+        if (requireFat32 && fatKind != QFS::FATKind::FAT32)
+        {
+            QC_LOG_INFO("QKDrvIDE", "Disk present but not a FAT32 system volume (base=%x ctrl=%x %s kind=%u)",
+                        base, ctrl, slave ? "slave" : "master", static_cast<unsigned>(fatKind));
             return false;
         }
 
@@ -660,11 +756,21 @@ namespace
         }
 
         QKStorage::BlockDeviceRegistration reg{};
+        const char *sourceDetail = nullptr;
+        if (base == kPrimaryBase)
+            sourceDetail = slave ? "primary slave" : "primary master";
+        else if (base == kSecondaryBase)
+            sourceDetail = slave ? "secondary slave" : "secondary master";
+        else
+            sourceDetail = slave ? "custom slave" : "custom master";
         reg.name = volumeName;
         reg.mountPath = mountPath;
         reg.fsKind = QFS::FileSystemKind::FAT_AUTO;
         reg.device = mountDev;
         reg.autoMount = true;
+        reg.sourceKind = "ide";
+        reg.sourceDetail = sourceDetail;
+        reg.persistent = true;
 
         QC::Status st = QKStorage::registerBlockDevice(reg);
         if (st == QC::Status::Success || st == QC::Status::Busy)
@@ -697,7 +803,7 @@ namespace
 
     static bool tryRegisterAsSystem(QC::u16 base, QC::u16 ctrl, bool slave)
     {
-        return tryRegisterVolume(base, ctrl, slave, "QFS_SYSTEM", "/system", &g_systemBinding);
+        return tryRegisterVolume(base, ctrl, slave, "QFS_SYSTEM", "/system", &g_systemBinding, true);
     }
 
     static QC::Status writeZeroSectors(QFS::BlockDevice *dev, QC::u64 startSector, QC::u32 count)
@@ -954,6 +1060,60 @@ namespace QKDrv
             g_sharedProbeEnabled = enabled;
         }
 
+        QC::usize enumerateDetectedDevices(DetectedDeviceInfo *outDevices, QC::usize capacity)
+        {
+            if (!outDevices || capacity == 0)
+                return 0;
+
+            const IdeIoPorts ports = detectIdePortsFromPci();
+
+            IdeCandidate candidates[4];
+            resolveIdeCandidates(ports, candidates);
+
+            QC::usize written = 0;
+            for (const auto &c : candidates)
+            {
+                if (written >= capacity)
+                    break;
+
+                QC::u16 id[256];
+                if (!identify(c.base, c.ctrl, c.slave, id))
+                    continue;
+
+                auto &info = outDevices[written];
+                info = DetectedDeviceInfo{};
+                info.base = c.base;
+                info.ctrl = c.ctrl;
+                info.channelIndex = c.channelIndex;
+                info.present = true;
+                info.slave = c.slave;
+                info.sectors = sectorCountFromIdentify(id);
+                info.isSystemBinding = g_systemBinding.valid && g_systemBinding.base == c.base && g_systemBinding.ctrl == c.ctrl && g_systemBinding.slave == c.slave;
+                info.isSharedBinding = g_sharedBinding.valid && g_sharedBinding.base == c.base && g_sharedBinding.ctrl == c.ctrl && g_sharedBinding.slave == c.slave;
+                extractModelString(id, info.model);
+
+                if (info.sectors != 0)
+                {
+                    AtaPioBlockDevice dev(c.base, c.ctrl, c.slave, info.sectors);
+                    QC::u8 sector0[512];
+                    if (dev.readSector(0, sector0) == QC::Status::Success)
+                    {
+                        info.hasMbrSignature = looksLikeMbr(sector0);
+                        info.hasPartitionTable = mbrHasPartitionTable(sector0);
+                        info.hasFatBootSector = looksLikeFatBootSector(sector0);
+
+                        QC::u64 offset = 0;
+                        QC::u64 size = 0;
+                        info.mountableFat = findFatPartition(&dev, offset, size, nullptr);
+                    }
+                }
+
+                ++written;
+            }
+
+            return written;
+        }
+
         void probeAndRegisterSharedVolume()
         {
             if (!g_sharedProbeEnabled)
@@ -1097,93 +1257,84 @@ namespace QKDrv
 
         QC::Status formatSystemVolumeFAT32()
         {
-            // Format the first system-disk candidate (same ordering as system probe).
-            struct Candidate
-            {
-                QC::u16 base;
-                QC::u16 ctrl;
-                bool slave;
-            };
-
-            const IdeIoPorts ports = detectIdePortsFromPci();
-
-            const Candidate candidates[] = {
-                {ports.primaryBase, ports.primaryCtrl, false},
-                {ports.primaryBase, ports.primaryCtrl, true},
-                {ports.secondaryBase, ports.secondaryCtrl, false},
-                {ports.secondaryBase, ports.secondaryCtrl, true},
-            };
-
             QC::Status lastError = QC::Status::NotFound;
-            for (const auto &c : candidates)
+            for (QC::usize deviceIndex = 0; deviceIndex < 4; ++deviceIndex)
             {
-                QC::u16 id[256];
-                if (!identify(c.base, c.ctrl, c.slave, id))
-                {
-                    lastError = QC::Status::NotFound;
-                    continue;
-                }
-
-                const QC::u32 sectors = sectorCountFromIdentify(id);
-                if (sectors == 0)
-                {
-                    lastError = QC::Status::NotFound;
-                    continue;
-                }
-
-                AtaPioBlockDevice dev(c.base, c.ctrl, c.slave, sectors);
-
-                QC::u8 sector0[512];
-                QC::Status st = dev.readSector(0, sector0);
-                if (st != QC::Status::Success)
-                {
-                    QC_LOG_WARN("QKDrvIDE", "formatSystemVolumeFAT32: read sector0 failed (status=%d)", static_cast<int>(st));
-                    lastError = st;
-                    continue;
-                }
-
-                // Safety: refuse to clobber a disk that already looks formatted/partitioned.
-                if (mbrHasPartitionTable(sector0) || looksLikeFatBootSector(sector0) || looksLikeMbr(sector0))
-                {
-                    QC_LOG_WARN("QKDrvIDE", "Refusing to format: disk already appears partitioned/formatted");
-                    return QC::Status::Busy;
-                }
-
-                const QC::u64 total = dev.sectorCount();
-                QC::u32 partStart = 2048;
-                if (total <= static_cast<QC::u64>(partStart + 4096))
-                    partStart = 1;
-                if (total <= static_cast<QC::u64>(partStart + 4096))
-                    return QC::Status::InvalidParam;
-
-                const QC::u64 partSectors64 = total - partStart;
-                if (partSectors64 > 0xFFFFFFFFULL)
-                    return QC::Status::NotSupported;
-                const QC::u32 partSectors = static_cast<QC::u32>(partSectors64);
-
-                QC_LOG_INFO("QKDrvIDE", "Formatting system disk as FAT32 (base=%x ctrl=%x %s, lba=%u sectors=%u)",
-                            c.base, c.ctrl, c.slave ? "slave" : "master", partStart, partSectors);
-
-                st = writeMbrSingleFat32(&dev, partStart, partSectors);
-                if (st != QC::Status::Success)
-                {
-                    QC_LOG_WARN("QKDrvIDE", "formatSystemVolumeFAT32: write MBR failed (status=%d)", static_cast<int>(st));
+                const QC::Status st = formatDetectedDeviceFAT32(deviceIndex);
+                if (st == QC::Status::Success || st == QC::Status::Busy)
                     return st;
-                }
-
-                st = formatFat32At(&dev, partStart, partSectors);
-                if (st != QC::Status::Success)
-                {
-                    QC_LOG_WARN("QKDrvIDE", "formatSystemVolumeFAT32: mkfs failed (status=%d)", static_cast<int>(st));
-                    return st;
-                }
-
-                QC_LOG_INFO("QKDrvIDE", "System disk FAT32 format complete");
-                return QC::Status::Success;
+                lastError = st;
             }
 
             QC_LOG_WARN("QKDrvIDE", "formatSystemVolumeFAT32: no suitable disk found");
             return lastError;
+        }
+
+        QC::Status formatDetectedDeviceFAT32(QC::usize deviceIndex)
+        {
+            IdeCandidate candidate{};
+            if (!resolveDetectedDeviceIndex(deviceIndex, candidate))
+            {
+                QC_LOG_WARN("QKDrvIDE", "formatDetectedDeviceFAT32: device index %u not found", static_cast<unsigned>(deviceIndex));
+                return QC::Status::NotFound;
+            }
+
+            QC::u16 id[256];
+            if (!identify(candidate.base, candidate.ctrl, candidate.slave, id))
+                return QC::Status::NotFound;
+
+            const QC::u32 sectors = sectorCountFromIdentify(id);
+            if (sectors == 0)
+                return QC::Status::NotSupported;
+
+            AtaPioBlockDevice dev(candidate.base, candidate.ctrl, candidate.slave, sectors);
+
+            QC::u8 sector0[512];
+            QC::Status st = dev.readSector(0, sector0);
+            if (st != QC::Status::Success)
+            {
+                QC_LOG_WARN("QKDrvIDE", "formatDetectedDeviceFAT32: read sector0 failed (status=%d)", static_cast<int>(st));
+                return st;
+            }
+
+            if (mbrHasPartitionTable(sector0) || looksLikeFatBootSector(sector0) || looksLikeMbr(sector0))
+            {
+                QC_LOG_WARN("QKDrvIDE", "Refusing to format disk%u: device already appears partitioned/formatted", static_cast<unsigned>(deviceIndex));
+                return QC::Status::Busy;
+            }
+
+            const QC::u64 total = dev.sectorCount();
+            QC::u32 partStart = 2048;
+            if (total <= static_cast<QC::u64>(partStart + 4096))
+                partStart = 1;
+            if (total <= static_cast<QC::u64>(partStart + 4096))
+                return QC::Status::InvalidParam;
+
+            const QC::u64 partSectors64 = total - partStart;
+            if (partSectors64 > 0xFFFFFFFFULL)
+                return QC::Status::NotSupported;
+            const QC::u32 partSectors = static_cast<QC::u32>(partSectors64);
+
+            QC_LOG_INFO("QKDrvIDE", "Formatting disk%u as FAT32 (base=%x ctrl=%x %s, lba=%u sectors=%u)",
+                        static_cast<unsigned>(deviceIndex), candidate.base, candidate.ctrl,
+                        candidate.slave ? "slave" : "master", partStart, partSectors);
+
+            st = writeMbrSingleFat32(&dev, partStart, partSectors);
+            if (st != QC::Status::Success)
+            {
+                QC_LOG_WARN("QKDrvIDE", "formatDetectedDeviceFAT32: write MBR failed (status=%d)", static_cast<int>(st));
+                return st;
+            }
+
+            st = formatFat32At(&dev, partStart, partSectors);
+            if (st != QC::Status::Success)
+            {
+                QC_LOG_WARN("QKDrvIDE", "formatDetectedDeviceFAT32: mkfs failed (status=%d)", static_cast<int>(st));
+                return st;
+            }
+
+            QC_LOG_INFO("QKDrvIDE", "disk%u FAT32 format complete", static_cast<unsigned>(deviceIndex));
+            return QC::Status::Success;
         }
     }
 }

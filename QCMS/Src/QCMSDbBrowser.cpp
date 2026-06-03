@@ -100,10 +100,24 @@ namespace QCMS
         m_status = nullptr;
     }
 
+    void DbBrowser::setDatabase(QCQL::Database *database)
+    {
+        m_database = database;
+        reloadTableList();
+        renderCurrentPage();
+        if (m_panel)
+            m_panel->invalidate();
+    }
+
     void DbBrowser::setVisible(bool visible)
     {
         if (m_panel)
             m_panel->setVisible(visible);
+        if (visible)
+        {
+            reloadTableList();
+            renderCurrentPage();
+        }
     }
 
     void DbBrowser::reloadTableList()

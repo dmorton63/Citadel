@@ -1,5 +1,10 @@
 # CQL Database Engine - TODO List
 
+Scope note:
+- This file tracks the standalone `CQL_Database_Engine` Windows/ImGui/service prototype.
+- It is useful for that prototype track, but it is not the canonical Citadel integration backlog.
+- For the primary in-repo implementation order, use `/TODO_LIST_CQL.md`.
+
 ## 0. ImGui Setup and Basic UI
 **Goal:** Set up ImGui for visualization and testing of the CQL engine.
 

@@ -168,9 +168,11 @@ namespace QK
 
         // Owner credentials (minimal v1, single-owner).
         // Persisted via SecureStore sealed blobs; no DB.
-        QC::Status ownerEnroll(const char *username, const char *secret);
-        QC::Status ownerUnlock(const char *username, const char *secret);
+        QC::Status ownerEnroll(const char *username, const char *secret, bool activateSession = true);
+        QC::Status ownerUnlock(const char *username, const char *secret, bool activateSession = true);
         QC::Status ownerUnlockPasskey(const char *username, const char *passkey);
+        QC::Status getEnrolledOwnerUsername(char *outUsername, QC::usize outCap) const;
+        void debugDescribeOwnerRecord(char *outSummary, QC::usize outCap) const;
         void ownerLock();
         bool ownerIsEnrolled() const;
         bool ownerUnlocked() const { return m_ownerUnlocked; }
@@ -268,6 +270,7 @@ namespace QK
         QC::u8 m_ownerUmk[32] = {0};
         QC::u8 m_ownerVrk[32] = {0};
         char m_pendingRecoveryCode[48] = {0};
+        bool m_deferInstallRecoveryCode = false;
         RotationScheduleConfig m_rotationSchedule{};
         QC::u64 m_lastRotationMs = 0;
         QC::u64 m_lastRotationExecCount = 0;

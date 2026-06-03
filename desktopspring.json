@@ -60,9 +60,9 @@
           "shutdown": "/system/icons/svg/power.svg"
         },
         "backgrounds": {
-          "desktopPrimary": "/system/wall/SPRING.PNG",
-          "desktopSecondary": "/system/wall/SPRING.PNG",
-          "lockScreen": "/system/wall/SPRING.PNG"
+          "desktopPrimary": "/WALL/SPRING.PNG",
+          "desktopSecondary": "/WALL/SPRING.PNG",
+          "lockScreen": "/WALL/SPRING.PNG"
         },
         "textures": {
           "glassNoise": "/system/textures/glass_noise.png",
@@ -77,7 +77,7 @@
     },
     "background": {
       "type": "image",
-      "path": "/system/wall/SPRING.PNG",
+      "path": "/WALL/SPRING.PNG",
       "mode": "stretch"
     }
   }

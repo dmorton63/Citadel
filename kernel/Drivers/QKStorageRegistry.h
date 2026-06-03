@@ -15,6 +15,9 @@ namespace QKStorage
         QFS::FileSystemKind fsKind;
         QFS::BlockDevice *device;
         bool autoMount = true;
+        const char *sourceKind = nullptr;   // e.g. ramdisk, ide, ahci, module
+        const char *sourceDetail = nullptr; // short human-readable provenance detail
+        bool persistent = false;
     };
 
     QC::Status registerBlockDevice(const BlockDeviceRegistration &registration);

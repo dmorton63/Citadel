@@ -16,7 +16,7 @@ set(CMAKE_C_STANDARD 17)
 option(CITADEL_PRODUCTION "Enable fail-closed secure boot behavior" OFF)
 option(CITADEL_PAL_USE_QFS_VFS "Enable CitadelPAL QFileSystem VFS integration paths" ON)
 option(CITADEL_QCSQL_USE_QCQL_ENGINE "Enable QCSQL service bindings to QCQL::Engine" OFF)
-option(CITADEL_QCSQL_USE_CQL_ENGINE "Enable QCSQL service bindings to CQL_Database_Engine::Database" OFF)
+option(CITADEL_QCSQL_USE_CQL_ENGINE "Enable QCSQL service bindings to CQL_Database_Engine::Database" ON)
 
 # Freestanding kernel flags (only for C/C++, not assembly)
 set(KERNEL_COMPILE_FLAGS
@@ -55,6 +55,7 @@ add_subdirectory(QUICommon)
 add_subdirectory(QCommand)
 add_subdirectory(QCQL)
 add_subdirectory(QJFunctions)
+add_subdirectory(CQL_Database_Engine)
 
 target_link_libraries(QCommon INTERFACE
     QCCore
@@ -74,6 +75,7 @@ add_subdirectory(QFileSystem)
 add_subdirectory(QNetwork)
 add_subdirectory(QGraphics)
 add_subdirectory(QGfx)
+add_subdirectory(QC3D)
 add_subdirectory(QWindowing)
 add_subdirectory(QWInterfaces)
 add_subdirectory(QWControls)

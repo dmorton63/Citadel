@@ -7,6 +7,7 @@
 #include "UHCI/QKDrvUHCI.h"
 #include "XHCI/xhci.h"
 #include "E1000/QKDrvE1000.h"
+#include "AHCI/QKDrvAHCI.h"
 #include "IDE/QKDrvIDE.h"
 #include "QNetStack.h"
 #include "QArchPCI.h"
@@ -90,7 +91,8 @@ namespace QKDrv
     void Manager::probeStorage()
     {
         // Prefer a persistent system volume if present.
-        IDE::probeAndRegisterSystemVolume();
+        if (!AHCI::probeAndRegisterSystemVolume())
+            IDE::probeAndRegisterSystemVolume();
         IDE::probeAndRegisterSharedVolume();
         IDE::probeAndRegisterDataVolumes();
     }

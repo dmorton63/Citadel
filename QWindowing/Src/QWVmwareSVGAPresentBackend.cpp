@@ -3,10 +3,11 @@
 
 #include "QWVmwareSVGAPresentBackend.h"
 
-#include "QWFramebuffer.h"
-#include "QDrvVmwareSVGA.h"
+#include "QWDisplayBootstrapUtil.h"
 #include "QCLogger.h"
 #include "QCBuiltins.h"
+
+#include <cstring>
 
 namespace QW
 {
@@ -36,12 +37,40 @@ namespace QW
             auto *backend = static_cast<VmwareSVGAPresentBackend *>(userData);
             return backend && backend->uploadScanoutRect(rect, pixels, stridePixels);
         }
+
+        const WindowSurfaceBlit *findWindowSurfaceBlit(const WindowSurfaceBlit *blits,
+                                                       QC::usize blitCount,
+                                                       QGfx::SurfaceId surfaceId)
+        {
+            if (!blits || !surfaceId.isValid())
+                return nullptr;
+
+            for (QC::usize i = 0; i < blitCount; ++i)
+            {
+                if (blits[i].surface && blits[i].surface->id.value == surfaceId.value)
+                    return &blits[i];
+            }
+
+            return nullptr;
+        }
     }
 
     void VmwareSVGAPresentBackend::initialize(Framebuffer *fb)
     {
         m_framebuffer = fb;
-        (void)QDrv::VmwareSVGA::instance().initialize();
+
+        if (m_framebuffer)
+        {
+            const QDrv::Display::cvd_boot_framebuffer_desc_t desc = makeBootFramebufferDesc(m_framebuffer);
+            QDrv::Display::cvd_sync_value_t readyValue = 0;
+            (void)QDrv::Display::cvd_open_boot_swapchain(&desc,
+                                                         &m_device,
+                                                         &m_output,
+                                                         &m_swapchain,
+                                                         &m_presentSurface,
+                                                         &readyValue);
+        }
+
         resetAccelerationStats();
         m_pendingRectCopyBatch.clear();
 
@@ -64,6 +93,15 @@ namespace QW
             return;
 
         m_qgfxReady = m_qgfxContext.createSurface(m_scanoutSurface);
+        if (m_qgfxReady && m_device && m_swapchain && m_presentSurface.isValid())
+        {
+            QGfx::DisplaySurfaceBinding binding{};
+            binding.device = m_device;
+            binding.swapchain = m_swapchain;
+            binding.surface_id = m_presentSurface;
+            binding.ready_value = 0;
+            QGfx::bindDisplaySurface(m_scanoutSurface, binding);
+        }
         m_accelerationStats.qgfxActive = m_qgfxReady;
         m_accelerationStats.qgfxScanoutUploadsActive = m_qgfxReady && m_qgfxDriver.capabilities().supportsScanoutUploads;
         m_accelerationStats.qgfxRectCopyActive = m_qgfxReady && m_qgfxDriver.capabilities().supportsScreenRectCopy;
@@ -94,14 +132,10 @@ namespace QW
         if (!m_framebuffer)
             return;
 
-        // We still swap the whole backbuffer today (rendering path is still full-frame).
-        auto &svga = QDrv::VmwareSVGA::instance();
-        if (!(svga.has2D() || svga.initialize2D()))
-        {
-            m_framebuffer->swap();
+        if (!m_device || !m_swapchain || !m_presentSurface.isValid())
             return;
-        }
 
+        // We still swap the whole backbuffer today (rendering path is still full-frame).
         const QC::u32 fbW = m_framebuffer->width();
         const QC::u32 fbH = m_framebuffer->height();
         const bool useQGfxUploads = m_qgfxReady && m_scanoutSurface.id.isValid();
@@ -136,8 +170,13 @@ namespace QW
                 ++m_accelerationStats.qgfxScanoutUploadFallbacks;
             }
 
-            m_framebuffer->swap();
-            svga.updateRect(0, 0, fbW, fbH);
+            (void)QDrv::Display::cvd_present_regions(m_device,
+                                                     m_swapchain,
+                                                     m_presentSurface,
+                                                     0,
+                                                     nullptr,
+                                                     0,
+                                                     QDrv::Display::CVD_PRESENT_VSYNC);
             return;
         }
 
@@ -145,8 +184,13 @@ namespace QW
         // If we get an excessive number of rects, fall back to fullscreen.
         if (dirtyCount > 128)
         {
-            m_framebuffer->swap();
-            svga.updateRect(0, 0, fbW, fbH);
+            (void)QDrv::Display::cvd_present_regions(m_device,
+                                                     m_swapchain,
+                                                     m_presentSurface,
+                                                     0,
+                                                     nullptr,
+                                                     0,
+                                                     QDrv::Display::CVD_PRESENT_VSYNC);
             return;
         }
 
@@ -199,12 +243,7 @@ namespace QW
                 {
                     qgfxUploadSucceeded = false;
                     ++m_accelerationStats.qgfxScanoutUploadFallbacks;
-                    m_framebuffer->swapRect(clipped);
                 }
-            }
-            else
-            {
-                m_framebuffer->swapRect(clipped);
             }
             clippedRects[clippedCount++] = clipped;
         }
@@ -223,14 +262,13 @@ namespace QW
             ++m_accelerationStats.qgfxScanoutUploadFallbacks;
         }
 
-        if (clippedCount == 1)
-        {
-            const QC::Rect &r = clippedRects[0];
-            svga.updateRect(static_cast<QC::u32>(r.x), static_cast<QC::u32>(r.y), r.width, r.height);
-            return;
-        }
-
-        svga.updateRects(clippedRects, clippedCount);
+        (void)QDrv::Display::cvd_present_regions(m_device,
+                                                 m_swapchain,
+                                                 m_presentSurface,
+                                                 0,
+                                                 clippedRects,
+                                                 clippedCount,
+                                                 QDrv::Display::CVD_PRESENT_VSYNC);
     }
 
     bool VmwareSVGAPresentBackend::supportsRectCopy() const
@@ -258,6 +296,113 @@ namespace QW
         ++m_accelerationStats.qgfxRectCopyOps;
     }
 
+    bool VmwareSVGAPresentBackend::submitWindowSurfaceBatch(const QGfx::Batch &batch,
+                                                            const WindowSurfaceBlit *blits,
+                                                            QC::usize blitCount)
+    {
+        if (!m_framebuffer || !blits)
+            return false;
+
+        const QC::u32 fbW = m_framebuffer->width();
+        const QC::u32 fbH = m_framebuffer->height();
+        bool submittedAny = false;
+
+        for (QC::usize i = 0; i < batch.ops().size(); ++i)
+        {
+            const QGfx::DrawOp &op = batch.ops()[i];
+            const WindowSurfaceBlit *blit = findWindowSurfaceBlit(blits, blitCount, op.srcSurface);
+            if (!blit || !blit->surface || !blit->pixels || blit->stridePixels == 0)
+                return false;
+
+            QC::Rect localRect = blit->dirtyRect;
+            if (localRect.isEmpty())
+                continue;
+
+            if (localRect.x < 0)
+            {
+                const QC::i32 trim = -localRect.x;
+                if (localRect.width <= static_cast<QC::u32>(trim))
+                    continue;
+                localRect.x = 0;
+                localRect.width -= static_cast<QC::u32>(trim);
+            }
+            if (localRect.y < 0)
+            {
+                const QC::i32 trim = -localRect.y;
+                if (localRect.height <= static_cast<QC::u32>(trim))
+                    continue;
+                localRect.y = 0;
+                localRect.height -= static_cast<QC::u32>(trim);
+            }
+
+            if (localRect.right() > static_cast<QC::i32>(blit->surface->width))
+            {
+                const QC::i32 trimmedWidth = static_cast<QC::i32>(blit->surface->width) - localRect.x;
+                if (trimmedWidth <= 0)
+                    continue;
+                localRect.width = static_cast<QC::u32>(trimmedWidth);
+            }
+            if (localRect.bottom() > static_cast<QC::i32>(blit->surface->height))
+            {
+                const QC::i32 trimmedHeight = static_cast<QC::i32>(blit->surface->height) - localRect.y;
+                if (trimmedHeight <= 0)
+                    continue;
+                localRect.height = static_cast<QC::u32>(trimmedHeight);
+            }
+
+            QC::i32 dstX = op.dstRect.x + localRect.x;
+            QC::i32 dstY = op.dstRect.y + localRect.y;
+
+            if (dstX < 0)
+            {
+                const QC::i32 trim = -dstX;
+                if (localRect.width <= static_cast<QC::u32>(trim))
+                    continue;
+                localRect.x += trim;
+                localRect.width -= static_cast<QC::u32>(trim);
+                dstX = 0;
+            }
+            if (dstY < 0)
+            {
+                const QC::i32 trim = -dstY;
+                if (localRect.height <= static_cast<QC::u32>(trim))
+                    continue;
+                localRect.y += trim;
+                localRect.height -= static_cast<QC::u32>(trim);
+                dstY = 0;
+            }
+
+            if (dstX >= static_cast<QC::i32>(fbW) || dstY >= static_cast<QC::i32>(fbH))
+                continue;
+
+            if (dstX + static_cast<QC::i32>(localRect.width) > static_cast<QC::i32>(fbW))
+            {
+                localRect.width = static_cast<QC::u32>(static_cast<QC::i32>(fbW) - dstX);
+            }
+            if (dstY + static_cast<QC::i32>(localRect.height) > static_cast<QC::i32>(fbH))
+            {
+                localRect.height = static_cast<QC::u32>(static_cast<QC::i32>(fbH) - dstY);
+            }
+
+            if (localRect.isEmpty())
+                continue;
+
+            const QC::u32 *srcPixels = blit->pixels +
+                                       static_cast<QC::usize>(localRect.y) * blit->stridePixels +
+                                       static_cast<QC::usize>(localRect.x);
+
+            m_framebuffer->blit(static_cast<QC::u32>(dstX),
+                                static_cast<QC::u32>(dstY),
+                                srcPixels,
+                                localRect.width,
+                                localRect.height,
+                                blit->stridePixels * sizeof(QC::u32));
+            submittedAny = true;
+        }
+
+        return submittedAny;
+    }
+
     bool VmwareSVGAPresentBackend::uploadScanoutRect(const QC::Rect &rect,
                                                      const QC::u32 *pixels,
                                                      QC::u32 stridePixels)
@@ -270,28 +415,63 @@ namespace QW
 
         ++m_accelerationStats.qgfxScanoutUploadCalls;
         ++m_accelerationStats.qgfxScanoutUploadRects;
-        m_framebuffer->swapRect(rect);
+        (void)rect;
+        (void)pixels;
+        (void)stridePixels;
         return true;
     }
 
     bool VmwareSVGAPresentBackend::hasHardwareCursor() const
     {
-        return QDrv::VmwareSVGA::instance().hasHardwareCursor();
+        if (!m_output)
+            return false;
+
+        QDrv::Display::cvd_output_caps_t caps{};
+        return QDrv::Display::cvd_get_output_caps(m_output, &caps) == QDrv::Display::CVD_OK &&
+               (caps.flags & QDrv::Display::CVD_OUTPUT_CAP_HW_CURSOR) != 0;
     }
 
     void VmwareSVGAPresentBackend::setCursorImage(const QC::u32 *pixels, QC::u16 width, QC::u16 height,
                                                   QC::u16 hotspotX, QC::u16 hotspotY)
     {
-        QDrv::VmwareSVGA::instance().setCursorImage(pixels, width, height, hotspotX, hotspotY);
+        if (!pixels || !m_device || !m_output || width == 0 || height == 0)
+            return;
+
+        if (!m_cursorSurface.isValid())
+        {
+            QDrv::Display::cvd_surface_desc_t desc{};
+            desc.size.width = width;
+            desc.size.height = height;
+            desc.format = QDrv::Display::CVD_FORMAT_ARGB8888;
+            desc.flags = QDrv::Display::CVD_SURFACE_CPU_VISIBLE | QDrv::Display::CVD_SURFACE_CURSOR_CAPABLE | QDrv::Display::CVD_SURFACE_LINEAR;
+            if (QDrv::Display::cvd_surface_create(m_device, &desc, &m_cursorSurface) != QDrv::Display::CVD_OK)
+                return;
+        }
+
+        QDrv::Display::cvd_surface_map_t map{};
+        if (QDrv::Display::cvd_surface_map(m_device, m_cursorSurface, QDrv::Display::CVD_MAP_WRITE_DISCARD, &map) != QDrv::Display::CVD_OK)
+            return;
+
+        for (QC::u32 row = 0; row < height; ++row)
+        {
+            QC::u8 *dst = static_cast<QC::u8 *>(map.ptr) + static_cast<QC::usize>(row) * map.pitch;
+            const QC::u8 *src = reinterpret_cast<const QC::u8 *>(pixels + static_cast<QC::usize>(row) * width);
+            memcpy(dst, src, static_cast<QC::usize>(width) * sizeof(QC::u32));
+        }
+
+        (void)QDrv::Display::cvd_surface_unmap(m_device, m_cursorSurface);
+        (void)QDrv::Display::cvd_cursor_set_image(m_output, m_cursorSurface, hotspotX, hotspotY);
     }
 
     void VmwareSVGAPresentBackend::setCursorVisible(bool visible)
     {
-        QDrv::VmwareSVGA::instance().setCursorVisible(visible);
+        if (m_output)
+            (void)QDrv::Display::cvd_cursor_show(m_output, visible);
     }
 
     void VmwareSVGAPresentBackend::setCursorPosition(QC::u16 x, QC::u16 y)
     {
-        QDrv::VmwareSVGA::instance().setCursorPosition(x, y);
+        if (m_output)
+            (void)QDrv::Display::cvd_cursor_set_position(m_output, x, y);
     }
 }

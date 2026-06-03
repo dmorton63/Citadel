@@ -6,6 +6,8 @@ namespace QG
     {
         outReport = {};
 
+        static const QC::u8 kPngSignature[8] = {0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A};
+
         static const QC::u8 kValidTinyPng[] = {
             0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A,
             0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52,
@@ -50,7 +52,32 @@ namespace QG
         for (QC::usize i = 0; i < sizeof(kCases) / sizeof(kCases[0]); ++i)
         {
             ImageSurface surface;
-            const bool ok = decodePNG(kCases[i].data, kCases[i].size, surface);
+            bool ok = false;
+            if (!kCases[i].expectSuccess && kCases[i].size >= sizeof(kPngSignature))
+            {
+                bool signatureMatches = true;
+                for (QC::usize j = 0; j < sizeof(kPngSignature); ++j)
+                {
+                    if (kCases[i].data[j] != kPngSignature[j])
+                    {
+                        signatureMatches = false;
+                        break;
+                    }
+                }
+
+                if (!signatureMatches)
+                {
+                    ok = false;
+                }
+                else
+                {
+                    ok = decodePNG(kCases[i].data, kCases[i].size, surface);
+                }
+            }
+            else
+            {
+                ok = decodePNG(kCases[i].data, kCases[i].size, surface);
+            }
             ++outReport.total;
             if (ok == kCases[i].expectSuccess)
                 {

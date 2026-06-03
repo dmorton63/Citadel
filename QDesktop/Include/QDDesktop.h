@@ -123,7 +123,7 @@ namespace QD
 
         // ==================== User Setup/Login (v1 UI) ====================
 
-        /// Returns true when the owner enrollment marker exists
+        /// Returns true when the owner credential record exists
         bool isOwnerEnrolled() const;
 
         /// Show first-boot setup wizard (Owner enrollment)
@@ -250,7 +250,9 @@ namespace QD
         static void onTaskbarIconButtonClick(QW::Controls::Button *button, void *userData);
 
         static bool onWindowEvent(const QK::Event::Event &event, void *userData);
+        static bool onInputEvent(const QK::Event::Event &event, void *userData);
         void ensureWindowEventListener();
+        void ensureInputEventListener();
         void layoutTaskbarWindows();
 
         // CUI-ML help window button handler
@@ -329,6 +331,7 @@ namespace QD
         QC::u32 m_taskbarWindowCount;
 
         QK::Event::ListenerId m_windowListenerId = QK::Event::InvalidListenerId;
+        QK::Event::ListenerId m_inputListenerId = QK::Event::InvalidListenerId;
 
         // Clock state
         QC::u32 m_hours;

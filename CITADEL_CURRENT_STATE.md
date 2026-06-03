@@ -1,6 +1,6 @@
 # CITADEL — Current Working State (Single Source of Truth)
 
-Generated: 2026-04-01
+Maintained as the authoritative status snapshot for the repository.
 
 This document is intended to be the one place to answer:
 - What is working right now (and at what maturity level)
@@ -11,6 +11,14 @@ This document is intended to be the one place to answer:
 - What the security/access model is today
 - What naming conventions are used
 - Project timeline + authorship notes
+
+Use this file when the question is "what is true today?"
+
+Root documentation roles:
+- `README.md` is the short entry point for build/run/use.
+- `TODO_MAIN.md` is the subsystem roadmap and broader product backlog.
+- `TODO_INBOX.md` is the active near-term stabilization queue.
+- `docs/` contains subsystem specifications, plans, and reference material.
 
 ---
 
@@ -194,7 +202,20 @@ Status labels used below:
 
 ### Desktop / UI
 - Windowing + controls + desktop shell: **Working/Partial** (actively used; still evolving)
-- JSON-driven UI runtime architecture: **Partial** (documented + implemented pieces)
+- Current desktop/theme source path: **Hybrid/Partial** (external `.json` and `.cml` assets still exist as source/import material, but built-in themes and seeded desktop documents are already materialized into QCQL tables during desktop bring-up)
+- Database-backed theme loading: **Partial** (`ThemeService::loadThemeFromDatabase(...)` is real, and desktop boot validates/imports built-in theme rows into QCQL `Themes` and `ThemeTokens` tables before applying them)
+- Database-backed desktop document storage: **Partial** (desktop layout and CUI-ML payloads are seeded into QCQL document/chunk tables such as `DesktopLayouts`, `DesktopLayoutChunks`, `DesktopCuiml`, and `DesktopCuimlChunks`, but they are not yet modeled as a normalized relational desktop schema)
+- Target desktop/theme source path: **CQL-backed/Planned** (Citadel is moving toward storing desktop design specifications, control layout, theme tokens, and related UI metadata in CQL/QCQL tables rather than treating external files as the long-term runtime format)
+- Parser/import path: **Required/Planned** (the existing parser work still matters, but primarily as the ingest/bootstrap path that reads initial theme/layout assets and materializes them into database tables; subsequent boots should read from the CQL data model first, with file import/fallback reserved for provisioning, repair, or migration scenarios)
+- Dependency note: **Desktop-data integration depends on CQL maturity** (before the desktop can fully move to a database-first runtime, CQL still needs more complete relational/schema support and stable service/runtime integration so desktop metadata can be modeled cleanly and loaded predictably at boot)
+
+### CQL / Data Runtime
+- QCQL engine core: **Partial** (implemented pieces include database create/open/close, table creation, page allocation/I/O, row serialization, primary-key index rebuild/lookup, and primary-key-based insert/select/update/remove helpers)
+- QCQL system tables: **Partial** (`initializeSystemTables()` currently bootstraps `Themes`, `ThemeTokens`, and `Capabilities`; desktop code additionally creates/seeds document-style tables for layouts and CUI-ML payloads)
+- Desktop/theme integration with QCQL: **Partial** (desktop bring-up creates/opens `/system/CMMS.QDB`, imports built-in themes, validates theme rows, and can load theme state from QCQL during normal desktop startup)
+- QCQL runtime/query layer: **Partial/Design** (the low-level engine exists, but the broader text-query/parser/runtime-service shape described in the design docs is not fully represented in the `QCQL` module itself yet)
+- Relational modeling and foreign-key behavior: **Planned** (current schemas are still simple and PK-centric; relationship metadata, foreign-key enforcement, and normalized desktop object modeling remain future work)
+- Separate simple database path: **Working** (`QKSimpleDb` still exists as the generic key/value store used by the `db` command path, separate from QCQL)
 
 ### Networking
 - IPv4 bring-up grade stack (DHCP, ARP, ICMP ping, DNS, TCP connect, HTTP GET diagnostics): **Working**
@@ -242,10 +263,13 @@ Protected-path policy applies:
 - `/PROD` requires SysAdmin+
 
 ### System volume
-- `sysformat` (Admin) — partition+format the system disk as FAT32 and mount `/system`
+- `sysdisks` (User) — list legacy IDE disks Citadel can currently see, including size and basic layout state
+- `sysformat [diskN|N]` (Admin) — partition+format the selected detected disk as FAT32 and mount `/system`; without an argument it falls back to the first eligible detected disk
 - `sysmount` (Admin) — probe+mount `/system` without formatting (useful after reboot or for recovery)
 
 Dev workflow note: when running with `--system-vol`, `/system` is backed by `build/system.qcow2` and persists across reboots. You generally only need `sysformat` once; use `sysmount` if `/system` is not mounted.
+
+Boot fallback note: when Security Center enforcement is active and `/system` is unavailable, Citadel now switches into `INSTALLER` mode instead of continuing toward the desktop. From there, use `help`, inspect detected disks with `sysdisks`, elevate with `admin enable` twice, then run `sysmount` or `sysformat`.
 
 ### Boot/config visibility
 - `tier` — show active config tier + staged early modules

@@ -955,23 +955,20 @@ namespace QK
         {
             const char *baseDir = cfg.baseDir ? cfg.baseDir : kDefaultHiddenBaseDir;
             QC::Status st = ensureDirRecursive(baseDir);
-            if (st == QC::Status::NotSupported && isDefaultHiddenBaseDir(baseDir))
+            if (st != QC::Status::Success && isDefaultHiddenBaseDir(baseDir))
             {
                 const QC::Status legacySt = ensureDirRecursive(kLegacyBaseDir);
                 if (legacySt == QC::Status::Success)
                     return QC::Status::Success;
 
-                if (legacySt == QC::Status::NotSupported)
+                QFS::FileInfo info;
+                if (QFS::VFS::instance().stat(kCompatBaseDir, &info) == QC::Status::Success &&
+                    info.type == QFS::FileType::Directory)
                 {
-                    QFS::FileInfo info;
-                    if (QFS::VFS::instance().stat(kCompatBaseDir, &info) == QC::Status::Success &&
-                        info.type == QFS::FileType::Directory)
-                    {
-                        return QC::Status::Success;
-                    }
+                    return QC::Status::Success;
                 }
 
-                return legacySt;
+                return (legacySt == QC::Status::Success) ? legacySt : st;
             }
             return st;
         }

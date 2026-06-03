@@ -22,12 +22,14 @@ namespace QCMS
 
         void build(QW::Window *window, QW::Controls::Panel *parent, QCQL::Database *database, const QW::Rect &bounds);
         void destroy();
+        void setDatabase(QCQL::Database *database);
         void setVisible(bool visible);
         QW::Controls::Panel *panel() const { return m_panel; }
 
     private:
         void executeCurrentQuery();
         void renderIntro();
+        void refreshStatus();
 
         static void onExecuteClicked(QW::Controls::Button *button, void *userData);
         static void onClearClicked(QW::Controls::Button *button, void *userData);

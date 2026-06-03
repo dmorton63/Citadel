@@ -158,6 +158,25 @@ namespace QCMS
                 return true;
             }
 
+            static bool appendDec(char *dst, QC::usize cap, QC::usize &len, QC::u64 value)
+            {
+                char tmp[32] = {};
+                QC::usize digits = 0;
+                if (value == 0)
+                    return appendChar(dst, cap, len, '0');
+                while (value > 0 && digits < sizeof(tmp))
+                {
+                    tmp[digits++] = static_cast<char>('0' + (value % 10));
+                    value /= 10;
+                }
+                while (digits > 0)
+                {
+                    if (!appendChar(dst, cap, len, tmp[--digits]))
+                        return false;
+                }
+                return true;
+            }
+
             static void appendCellText(char *dst, QC::usize cap, QC::usize &len, const QCQL::Cell &cell)
             {
                 if (cell.type == QCQL::ColumnType::Text)
@@ -181,11 +200,21 @@ namespace QCMS
                     return;
                 }
 
-                QC::u32 value = 0;
-                const QC::usize maxBytes = cell.bytes.size() < 4 ? cell.bytes.size() : static_cast<QC::usize>(4);
+                QC::u64 value = 0;
+                const QC::usize maxBytes = cell.bytes.size() < 8 ? cell.bytes.size() : static_cast<QC::usize>(8);
                 for (QC::usize i = 0; i < maxBytes; ++i)
-                    value |= (static_cast<QC::u32>(cell.bytes[i]) << (8 * i));
-                (void)appendU32(dst, cap, len, value);
+                    value |= (static_cast<QC::u64>(cell.bytes[i]) << (8 * i));
+
+                if (cell.type == QCQL::ColumnType::DateTime)
+                    (void)appendText(dst, cap, len, "ts=");
+                (void)appendDec(dst, cap, len, value);
+            }
+
+            static bool appendColumnLabel(char *dst, QC::usize cap, QC::usize &len, const QCQL::Table &table, QC::usize columnIndex)
+            {
+                if (columnIndex < table.schema.columns.size())
+                    return appendText(dst, cap, len, table.schema.columns[columnIndex].name);
+                return appendText(dst, cap, len, "col");
             }
 
             static bool consumeKeyword(const char *&p, const char *keyword)
@@ -448,10 +477,15 @@ namespace QCMS
 
                         if (emitted > 0)
                             (void)appendChar(buffer, sizeof(buffer), len, '\n');
+                        (void)appendText(buffer, sizeof(buffer), len, "row ");
+                        (void)appendU32(buffer, sizeof(buffer), len, emitted + 1);
+                        (void)appendText(buffer, sizeof(buffer), len, ": ");
                         for (QC::usize c = 0; c < row.cells.size(); ++c)
                         {
                             if (c > 0)
-                                (void)appendText(buffer, sizeof(buffer), len, " | ");
+                                (void)appendText(buffer, sizeof(buffer), len, " ; ");
+                            (void)appendColumnLabel(buffer, sizeof(buffer), len, *table, c);
+                            (void)appendChar(buffer, sizeof(buffer), len, '=');
                             appendCellText(buffer, sizeof(buffer), len, row.cells[c]);
                         }
                         ++emitted;
@@ -565,7 +599,7 @@ namespace QCMS
         m_title = new QW::Controls::Label(window, "CSSMS Query Studio", {10, 8, bounds.width - 20, 22});
         m_panel->addChild(m_title);
 
-        m_hint = new QW::Controls::Label(window, "Protocol shape: QCSQL ExecuteSQL. Transport: local QCQL adapter until service registration lands.", {10, 30, bounds.width - 20, 18});
+        m_hint = new QW::Controls::Label(window, "Protocol shape: QCSQL ExecuteSQL. Transport: local QCQL adapter until freestanding service registration lands.", {10, 30, bounds.width - 20, 18});
         m_panel->addChild(m_hint);
 
         m_queryBox = new QW::Controls::TextBox(window, {10, 56, bounds.width - 220, 24});
@@ -609,21 +643,38 @@ namespace QCMS
         m_status = nullptr;
     }
 
+    void QueryStudio::setDatabase(QCQL::Database *database)
+    {
+        m_database = database;
+        refreshStatus();
+        if (m_panel)
+            m_panel->invalidate();
+    }
+
     void QueryStudio::setVisible(bool visible)
     {
         if (m_panel)
             m_panel->setVisible(visible);
+        if (visible)
+            refreshStatus();
     }
 
     void QueryStudio::renderIntro()
     {
-        if (!m_results || !m_status)
+        if (!m_results)
             return;
         m_results->clearItems();
         m_results->addItem("Query Studio MVP", nullptr);
         m_results->addItem("This panel uses QCSQL ExecuteSQL request/response semantics.", nullptr);
         m_results->addItem("Current transport is a local adapter over QCQL::Database.", nullptr);
-        m_results->addItem("When QCSQL is registered, the UI should switch transports without redesign.", nullptr);
+        m_results->addItem("The UI keeps QCSQL request/response semantics so a registered transport can replace it later.", nullptr);
+        refreshStatus();
+    }
+
+    void QueryStudio::refreshStatus()
+    {
+        if (!m_status)
+            return;
         m_status->setText(m_database ? "Ready: local protocol adapter bound to current QCQL database" : "No database bound");
     }
 

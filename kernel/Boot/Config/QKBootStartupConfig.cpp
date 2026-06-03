@@ -5,6 +5,7 @@
 #include "QFSFile.h"
 #include "QFSVFS.h"
 #include "QFSVolumeManager.h"
+#include "QKInputSettings.h"
 #include "QKConsole.h"
 #include "QKShutdownController.h"
 
@@ -188,6 +189,55 @@ namespace QK::Boot::Config
             return defaultValue;
         }
 
+        static bool parseU32Value(const char *value, QC::u32 &out)
+        {
+            out = 0;
+            if (!value || *value == '\0')
+                return false;
+
+            for (const char *p = value; *p; ++p)
+            {
+                if (*p < '0' || *p > '9')
+                    return false;
+                out = out * 10u + static_cast<QC::u32>(*p - '0');
+            }
+
+            return true;
+        }
+
+        static bool appendU32(char *dest, QC::usize destCap, QC::u32 value)
+        {
+            if (!dest || destCap == 0)
+                return false;
+
+            char tmp[16];
+            QC::String::memset(tmp, 0, sizeof(tmp));
+            int idx = 0;
+            if (value == 0)
+            {
+                tmp[idx++] = '0';
+            }
+            else
+            {
+                char rev[16];
+                int ridx = 0;
+                while (value > 0 && ridx < 15)
+                {
+                    rev[ridx++] = static_cast<char>('0' + (value % 10u));
+                    value /= 10u;
+                }
+                while (ridx > 0)
+                    tmp[idx++] = rev[--ridx];
+            }
+            tmp[idx] = '\0';
+
+            const QC::usize used = QC::String::strlen(dest);
+            if (used >= destCap)
+                return false;
+            QC::String::strncpy(dest + used, tmp, destCap - 1 - used);
+            return true;
+        }
+
             static bool devRecoveryCodeOverrideAllowed()
             {
         #if defined(CITADEL_PRODUCTION) && (CITADEL_PRODUCTION != 0)
@@ -298,11 +348,85 @@ namespace QK::Boot::Config
                 return;
             }
 
+            if (equalsIgnoreCase(key, "MOUSE_SENSITIVITY"))
+            {
+                QC::u32 percent = 0;
+                if (parseU32Value(value, percent))
+                    QKDrv::Input::setMouseSensitivityPercent(percent);
+                return;
+            }
+
             if (equalsIgnoreCase(key, "POWEROFF_AFTER_SAVETERM"))
             {
                 g_PowerOffAfterSaveTerm = parseBoolValue(value, false);
                 return;
             }
+        }
+
+        static bool writeAll(QFS::File *file, const char *text)
+        {
+            if (!file || !text)
+                return false;
+
+            const QC::usize total = QC::String::strlen(text);
+            QC::usize off = 0;
+            while (off < total)
+            {
+                const QC::isize n = file->write(text + off, total - off);
+                if (n <= 0)
+                    return false;
+                off += static_cast<QC::usize>(n);
+            }
+            return true;
+        }
+
+        static bool writeKeyValueLine(QFS::File *file, const char *key, const char *value)
+        {
+            char line[320];
+            QC::String::memset(line, 0, sizeof(line));
+            QC::String::strncpy(line, key, sizeof(line) - 1);
+            const QC::usize used = QC::String::strlen(line);
+            if (used + 2 >= sizeof(line))
+                return false;
+            line[used] = ' ';
+            line[used + 1] = '\0';
+            QC::String::strncpy(line + used + 1, value, sizeof(line) - 2 - used);
+            const QC::usize done = QC::String::strlen(line);
+            if (done + 1 >= sizeof(line))
+                return false;
+            line[done] = '\n';
+            line[done + 1] = '\0';
+            return writeAll(file, line);
+        }
+
+        static QC::Status writeStartupConfig(FLogFn Log)
+        {
+            QFS::File *file = QFS::VFS::instance().open("/startup.cfg",
+                                                        QFS::OpenMode::Write | QFS::OpenMode::Create | QFS::OpenMode::Truncate);
+            if (!file)
+                return QC::Status::Error;
+
+            bool ok = writeKeyValueLine(file, "MODE", StartupModeName(g_StartupMode)) &&
+                      writeKeyValueLine(file, "SC_MODE", QK::SecurityCenter::modeName(g_ScMode)) &&
+                      writeKeyValueLine(file, "IDE_SHARED", g_IdeSharedProbeEnabled ? "ON" : "OFF");
+
+            char percent[16];
+            QC::String::memset(percent, 0, sizeof(percent));
+            ok = ok && appendU32(percent, sizeof(percent), QKDrv::Input::mouseSensitivityPercent()) &&
+                 writeKeyValueLine(file, "MOUSE_SENSITIVITY", percent);
+
+            if (ok && g_BootSaveTermValue[0] != '\0')
+                ok = writeKeyValueLine(file, "SAVETERM", g_BootSaveTermValue);
+
+            if (ok)
+                ok = writeKeyValueLine(file, "POWEROFF_AFTER_SAVETERM", g_PowerOffAfterSaveTerm ? "ON" : "OFF");
+
+            QFS::VFS::instance().close(file);
+            if (!ok)
+                return QC::Status::Error;
+
+            LogStr(Log, "startup.cfg updated\r\n");
+            return QC::Status::Success;
         }
     } // namespace
 
@@ -423,6 +547,17 @@ namespace QK::Boot::Config
             LogStr(Log, "- Reboot: reboot now\r\n");
             LogStr(Log, "\r\n");
         }
+        else if (g_StartupMode == StartupMode::Installer)
+        {
+            LogStr(Log, "\r\n=== INSTALLER MODE ===\r\n");
+            LogStr(Log, "Role: user\r\n");
+            LogStr(Log, "- View commands: help\r\n");
+            LogStr(Log, "- Enable admin commands: admin enable (run twice)\r\n");
+            LogStr(Log, "- Probe and mount system volume: sysmount\r\n");
+            LogStr(Log, "- Partition+format a blank system disk: sysformat\r\n");
+            LogStr(Log, "- Reboot after mount/format: reboot now\r\n");
+            LogStr(Log, "\r\n");
+        }
     }
 
     void LoadFromCmdline(FLogFn Log, const char *Cmdline)
@@ -536,45 +671,32 @@ namespace QK::Boot::Config
     void SetStartupMode(StartupMode Mode)
     {
         g_StartupMode = Mode;
+
+        // Runtime transitions (for example, missing /system -> installer) should
+        // not be overridden by a stale cmdline mode later in the boot session.
+        g_HasCmdlineStartupModeOverride = false;
     }
 
     QC::Status PersistStartupMode(StartupMode Mode, FLogFn Log)
     {
         g_StartupMode = Mode;
+        return writeStartupConfig(Log);
+    }
 
-        QFS::File *file = QFS::VFS::instance().open("/startup.cfg",
-                                                    QFS::OpenMode::Write | QFS::OpenMode::Create | QFS::OpenMode::Truncate);
-        if (!file)
-            return QC::Status::Error;
+    QC::u32 GetMouseSensitivityPercent()
+    {
+        return QKDrv::Input::mouseSensitivityPercent();
+    }
 
-        char line[96];
-        QC::String::memset(line, 0, sizeof(line));
-        QC::String::strncpy(line, "MODE ", sizeof(line) - 1);
-        QC::usize used = QC::String::strlen(line);
-        QC::String::strncpy(line + used, StartupModeName(Mode), sizeof(line) - 1 - used);
-        used = QC::String::strlen(line);
-        if (used + 1 < sizeof(line))
-        {
-            line[used++] = '\n';
-            line[used] = '\0';
-        }
+    void SetMouseSensitivityPercent(QC::u32 Percent)
+    {
+        QKDrv::Input::setMouseSensitivityPercent(Percent);
+    }
 
-        const QC::usize total = QC::String::strlen(line);
-        QC::usize off = 0;
-        while (off < total)
-        {
-            const QC::isize n = file->write(line + off, total - off);
-            if (n <= 0)
-            {
-                QFS::VFS::instance().close(file);
-                return QC::Status::Error;
-            }
-            off += static_cast<QC::usize>(n);
-        }
-
-        QFS::VFS::instance().close(file);
-        LogStr(Log, "startup.cfg updated\r\n");
-        return QC::Status::Success;
+    QC::Status PersistMouseSensitivityPercent(QC::u32 Percent, FLogFn Log)
+    {
+        QKDrv::Input::setMouseSensitivityPercent(Percent);
+        return writeStartupConfig(Log);
     }
 
     QK::SecurityCenter::Mode GetSecurityCenterMode()
@@ -620,12 +742,6 @@ namespace QK::Boot::Config
             return;
 
         g_BootSaveTermDone = true;
-
-        if (!QFS::VolumeManager::instance().isMounted("QFS_SHARED"))
-        {
-            LogStr(Log, "SAVETERM: /shared not mounted; skipping\r\n");
-            return;
-        }
 
         char cmd[320];
         QC::String::memset(cmd, 0, sizeof(cmd));

@@ -48,7 +48,7 @@
 
 #include "QWWindowManager.h"
 #include "QWCompositor.h"
-#include "QDrvVmwareSVGA.h"
+#include "QDrvDisplayBootstrap.h"
 
 #include "QSCSecurityCenter.h"
 #include "QKSystemPump.h"
@@ -76,6 +76,9 @@ namespace QK::Boot::Config
     StartupMode GetStartupMode();
     const char *StartupModeName(StartupMode Mode);
     QC::Status PersistStartupMode(StartupMode Mode, void (*Log)(const char *));
+    QC::u32 GetMouseSensitivityPercent();
+    void SetMouseSensitivityPercent(QC::u32 Percent);
+    QC::Status PersistMouseSensitivityPercent(QC::u32 Percent, void (*Log)(const char *));
 }
 
 namespace QK::Boot::Desktop
@@ -1563,11 +1566,10 @@ namespace QK::CmdCenter
 
             auto &wm = QW::WindowManager::instance();
             QW::Compositor *compositor = wm.compositor();
-            auto &svga = QDrv::VmwareSVGA::instance();
-
             if (streqIgnoreCase(sub, "reset"))
             {
-                svga.resetUpdateStats();
+                QDrv::Display::cvd_reset_present_debug_stats();
+                wm.resetInputLatencyStats();
                 if (compositor)
                     compositor->resetStats();
                 ctx.writeLine("video: stats reset");
@@ -1581,18 +1583,22 @@ namespace QK::CmdCenter
             }
 
             ctx.writeLine("Video Stats:");
-            writeKeyValueBool(ctx, "svga_available", svga.isAvailable());
-            writeKeyValueBool(ctx, "svga_2d", svga.has2D());
-            writeKeyValueBool(ctx, "svga_hw_cursor", svga.hasHardwareCursor());
+            QDrv::Display::cvd_present_debug_stats_t presentStats{};
+            (void)QDrv::Display::cvd_get_present_debug_stats(&presentStats);
+            writeKeyValueBool(ctx, "display_accelerated_present", presentStats.accelerated_present);
+            writeKeyValueBool(ctx, "display_accelerated_rect_copy", presentStats.accelerated_rect_copy);
+            writeKeyValueBool(ctx, "display_hardware_cursor", presentStats.hardware_cursor);
 
-            const auto &svgaStats = svga.updateStats();
-            writeKeyValueU32(ctx, "svga_update_rect_calls", svgaStats.updateRectCalls);
-            writeKeyValueU32(ctx, "svga_update_rects_calls", svgaStats.updateRectsCalls);
-            writeKeyValueU32(ctx, "svga_queued_rects", svgaStats.queuedRectCount);
-            writeKeyValueU32(ctx, "svga_last_batch_rects", svgaStats.lastBatchRectCount);
-            writeKeyValueU32(ctx, "svga_fifo_syncs", svgaStats.fifoSyncCount);
-            writeKeyValueU32(ctx, "svga_fifo_drops", svgaStats.fifoDropCount);
-            writeKeyValueU32(ctx, "svga_last_sync_busy", svgaStats.lastSyncBusyValue);
+            const auto &backendStats = presentStats.backend_stats;
+            writeKeyValueU32(ctx, "present_backend_update_rect_calls", backendStats.updateRectCalls);
+            writeKeyValueU32(ctx, "present_backend_update_rects_calls", backendStats.updateRectsCalls);
+            writeKeyValueU32(ctx, "present_backend_queued_rects", backendStats.queuedRectCount);
+            writeKeyValueU32(ctx, "present_backend_last_batch_rects", backendStats.lastBatchRectCount);
+            writeKeyValueU32(ctx, "present_backend_fifo_syncs", backendStats.fifoSyncCount);
+            writeKeyValueU32(ctx, "present_backend_fifo_drops", backendStats.fifoDropCount);
+            writeKeyValueU32(ctx, "present_backend_last_sync_busy", backendStats.lastSyncBusyValue);
+            writeKeyValueU64(ctx, "mouse_event_queue_delay_ms", wm.lastMouseQueueDelayMs());
+            writeKeyValueU64(ctx, "mouse_event_queue_delay_max_ms", wm.maxMouseQueueDelayMs());
 
             if (!compositor)
             {
@@ -1603,6 +1609,10 @@ namespace QK::CmdCenter
             const auto &stats = compositor->stats();
             const auto &accel = compositor->accelerationStats();
             writeKeyValueU64(ctx, "compose_last_ms", stats.lastComposeTimeMs);
+            writeKeyValueU64(ctx, "present_last_ms", stats.lastPresentTimeMs);
+            writeKeyValueU64(ctx, "present_max_ms", stats.maxPresentTimeMs);
+            writeKeyValueU64(ctx, "input_to_present_ms", stats.lastInputToPresentMs);
+            writeKeyValueU64(ctx, "input_to_present_max_ms", stats.maxInputToPresentMs);
             writeKeyValueU32(ctx, "compose_frames", stats.frameCount);
             writeKeyValueU64(ctx, "dirty_area", stats.lastDirtyArea);
             writeKeyValueU32(ctx, "dirty_coverage_pct", stats.lastDirtyCoveragePercent);
@@ -2027,6 +2037,19 @@ namespace QK::CmdCenter
                     (void)appendString(line, sizeof(line), info[i].mounted ? "1" : "0");
                     (void)appendString(line, sizeof(line), " auto=");
                     (void)appendString(line, sizeof(line), info[i].autoMount ? "1" : "0");
+                    (void)appendString(line, sizeof(line), " persistent=");
+                    (void)appendString(line, sizeof(line), info[i].persistent ? "1" : "0");
+                    if (info[i].sourceKind[0])
+                    {
+                        (void)appendString(line, sizeof(line), " src=");
+                        (void)appendString(line, sizeof(line), info[i].sourceKind);
+                    }
+                    if (info[i].sourceDetail[0])
+                    {
+                        (void)appendString(line, sizeof(line), " (");
+                        (void)appendString(line, sizeof(line), info[i].sourceDetail);
+                        (void)appendString(line, sizeof(line), ")");
+                    }
                     ctx.writeLine(line);
                 }
                 return true;
@@ -2964,6 +2987,78 @@ namespace QK::CmdCenter
             (void)appendString(line, sizeof(line), "startup mode: ");
             (void)appendString(line, sizeof(line), QK::Boot::Config::StartupModeName(mode));
             ctx.writeLine(line);
+            return true;
+        }
+
+        static bool cmdMouseSpeed(const char *args, const QC::Cmd::Context &ctx, void *)
+        {
+            auto writeStatus = [&]()
+            {
+                char line[128];
+                QC::String::memset(line, 0, sizeof(line));
+                (void)appendString(line, sizeof(line), "mousespeed: ");
+                (void)appendU64Dec(line, sizeof(line), QK::Boot::Config::GetMouseSensitivityPercent());
+                (void)appendString(line, sizeof(line), "% (default=100, range=10-400)");
+                ctx.writeLine(line);
+            };
+
+            char tok0[32];
+            QC::String::memset(tok0, 0, sizeof(tok0));
+            const char *p = args;
+            if (!readToken(p, tok0, sizeof(tok0)))
+            {
+                writeStatus();
+                return true;
+            }
+
+            if (streqIgnoreCase(tok0, "show") || streqIgnoreCase(tok0, "status"))
+            {
+                writeStatus();
+                return true;
+            }
+
+            bool persist = false;
+            const char *valueText = tok0;
+            char tok1[32];
+            QC::String::memset(tok1, 0, sizeof(tok1));
+            if (streqIgnoreCase(tok0, "persist") || streqIgnoreCase(tok0, "save"))
+            {
+                persist = true;
+                if (!readToken(p, tok1, sizeof(tok1)))
+                {
+                    ctx.writeLine("usage: mousespeed [show|<percent>|persist <percent>]");
+                    return true;
+                }
+                valueText = tok1;
+            }
+
+            QC::u32 percent = 0;
+            if (!parseU32(valueText, percent) || percent < 10 || percent > 400)
+            {
+                ctx.writeLine("mousespeed: percent must be 10..400");
+                return true;
+            }
+
+            if (persist)
+            {
+                if (static_cast<QC::u8>(ctx.callerAccess) < static_cast<QC::u8>(QC::Cmd::AccessLevel::Admin))
+                {
+                    ctx.writeLine("mousespeed: persist requires admin");
+                    return true;
+                }
+
+                const QC::Status st = QK::Boot::Config::PersistMouseSensitivityPercent(percent, nullptr);
+                if (st != QC::Status::Success)
+                {
+                    ctx.writeLine("mousespeed: failed to persist startup.cfg");
+                    return true;
+                }
+                ctx.writeLine("mousespeed: saved to startup.cfg");
+                return true;
+            }
+
+            QK::Boot::Config::SetMouseSensitivityPercent(percent);
+            ctx.writeLine("mousespeed: updated for current session");
             return true;
         }
 
@@ -4103,6 +4198,126 @@ namespace QK::CmdCenter
                 ctx.writeLine("touch: cannot create file");
                 return true;
             }
+            return true;
+        }
+
+        static bool cmdCp(const char *args, const QC::Cmd::Context &ctx, void *)
+        {
+            Session *s = sessionFrom();
+            const char *p = args ? skipSpaces(args) : nullptr;
+            if (!p || *p == '\0')
+            {
+                ctx.writeLine("usage: cp <source> <dest>");
+                return true;
+            }
+
+            char srcArg[256];
+            QC::String::memset(srcArg, 0, sizeof(srcArg));
+            if (!readToken(p, srcArg, sizeof(srcArg)))
+            {
+                ctx.writeLine("usage: cp <source> <dest>");
+                return true;
+            }
+
+            char dstArg[256];
+            QC::String::memset(dstArg, 0, sizeof(dstArg));
+            if (!readToken(p, dstArg, sizeof(dstArg)))
+            {
+                ctx.writeLine("usage: cp <source> <dest>");
+                return true;
+            }
+
+            char extra[8];
+            QC::String::memset(extra, 0, sizeof(extra));
+            if (readToken(p, extra, sizeof(extra)))
+            {
+                ctx.writeLine("usage: cp <source> <dest>");
+                return true;
+            }
+
+            char srcPath[256];
+            char dstPath[256];
+            QC::String::memset(srcPath, 0, sizeof(srcPath));
+            QC::String::memset(dstPath, 0, sizeof(dstPath));
+            if (!resolvePath(s, srcArg, srcPath, sizeof(srcPath)))
+            {
+                ctx.writeLine("cp: invalid source path");
+                return true;
+            }
+            if (!resolvePath(s, dstArg, dstPath, sizeof(dstPath)))
+            {
+                ctx.writeLine("cp: invalid destination path");
+                return true;
+            }
+
+            if (QC::String::strcmp(srcPath, dstPath) == 0)
+            {
+                ctx.writeLine("cp: source and destination are the same");
+                return true;
+            }
+
+            if (!allowWriteToPath(dstPath, ctx, "cp"))
+                return true;
+
+            const QC::usize dstLen = QC::String::strlen(dstPath);
+            if (dstLen == 0 || dstPath[dstLen - 1] == '/')
+            {
+                ctx.writeLine("cp: invalid destination path");
+                return true;
+            }
+
+            QFS::FileInfo srcInfo;
+            QC::String::memset(&srcInfo, 0, sizeof(srcInfo));
+            const QC::Status srcSt = QFS::VFS::instance().stat(srcPath, &srcInfo);
+            if (srcSt != QC::Status::Success || srcInfo.type != QFS::FileType::Regular)
+            {
+                ctx.writeLine("cp: source must be a regular file");
+                return true;
+            }
+
+            if (srcInfo.size > 1024ULL * 1024ULL)
+            {
+                ctx.writeLine("cp: source too large (limit 1 MiB for now)");
+                return true;
+            }
+
+            QC::Vector<QC::u8> buf;
+            const QC::usize srcSize = static_cast<QC::usize>(srcInfo.size);
+            buf.resize(srcSize);
+            if (buf.size() != srcSize)
+            {
+                ctx.writeLine("cp: out of memory");
+                return true;
+            }
+
+            QC::usize bytesRead = 0;
+            const QC::Status readSt = QK::SecurityCenter::instance().secureReadFile(srcPath,
+                                                                                     srcSize ? buf.data() : nullptr,
+                                                                                     srcSize,
+                                                                                     &bytesRead);
+            if (readSt != QC::Status::Success || bytesRead != srcSize)
+            {
+                ctx.writeLine("cp: cannot read source file");
+                return true;
+            }
+
+            const QC::Status writeSt = QK::SecurityCenter::instance().secureWriteFile(dstPath,
+                                                                                       srcSize ? buf.data() : nullptr,
+                                                                                       srcSize,
+                                                                                       false);
+            if (writeSt != QC::Status::Success)
+            {
+                ctx.writeLine("cp: cannot write destination file");
+                return true;
+            }
+
+            char line[320];
+            QC::String::memset(line, 0, sizeof(line));
+            (void)appendString(line, sizeof(line), "cp: copied ");
+            (void)appendString(line, sizeof(line), srcPath);
+            (void)appendString(line, sizeof(line), " -> ");
+            (void)appendString(line, sizeof(line), dstPath);
+            ctx.writeLine(line);
             return true;
         }
 
@@ -7924,6 +8139,7 @@ namespace QK::CmdCenter
         (void)reg.registerCommandExAccess("fstab", QC::Cmd::AccessLevel::Admin, &cmdFstab, nullptr, "Persist auto-mount policy (fstab list|apply|add|del <volume>)");
         (void)reg.registerCommandExAccess("todoadd", QC::Cmd::AccessLevel::Admin, &cmdTodoAdd, nullptr, "Append a catch-all task note (todoadd <text>)");
         (void)reg.registerCommandExAccess("touch", QC::Cmd::AccessLevel::Admin, &cmdTouch, nullptr, "Create empty file (touch <path>)");
+        (void)reg.registerCommandExAccess("cp", QC::Cmd::AccessLevel::Admin, &cmdCp, nullptr, "Copy a file (cp <source> <dest>)");
         (void)reg.registerCommandExAccess("mkdir", QC::Cmd::AccessLevel::Admin, &cmdMkdir, nullptr, "Create directory (mkdir <path>)");
         (void)reg.registerCommandExAccess("rm", QC::Cmd::AccessLevel::Admin, &cmdRm, nullptr, "Remove file or directory (rm [-r] <path>)");
         (void)reg.registerCommandExAccess("del", QC::Cmd::AccessLevel::Admin, &cmdDel, nullptr, "Delete files by pattern (del *.ext | name.* | *.*)");
@@ -7944,6 +8160,7 @@ namespace QK::CmdCenter
         (void)reg.registerCommandExAccess("validate", QC::Cmd::AccessLevel::User, &cmdValidate, nullptr, "Validate key configs (validate [all|config|desktop|services])");
         (void)reg.registerCommandExAccess("reboot", QC::Cmd::AccessLevel::System, &cmdReboot, nullptr, "Reboot immediately (reboot now)");
         (void)reg.registerCommandExAccess("showmode", QC::Cmd::AccessLevel::User, &cmdShowMode, nullptr, "Show active startup mode (showmode)");
+        (void)reg.registerCommandExAccess("mousespeed", QC::Cmd::AccessLevel::User, &cmdMouseSpeed, nullptr, "Show/set mouse sensitivity percent (mousespeed [show|<percent>|persist <percent>])");
         (void)reg.registerCommandExAccess("setmode", QC::Cmd::AccessLevel::Admin, &cmdSetMode, nullptr, "Persist startup mode to startup.cfg (setmode <DESKTOP|TERMINAL|SAFE>)");
         (void)reg.registerCommandExAccess("startx", QC::Cmd::AccessLevel::Admin, &cmdStartx, nullptr, "Set desktop startup mode for next boot (startx)");
         (void)reg.registerCommandExAccess("stopx", QC::Cmd::AccessLevel::Admin, &cmdStopx, nullptr, "Stop desktop and return to console-only mode");
@@ -8011,6 +8228,8 @@ namespace QK::CmdCenter
         (void)reg.setCommandMetadata("umount", "umount <volume|mount_path>", "target:string", 1, 1, true);
         (void)reg.setCommandMetadata("fstab", "fstab <list|apply|add|del> [volume]", "op:string volume?:string", 1, 2, true);
         (void)reg.setCommandMetadata("todoadd", "todoadd <note text>", "note:string", 1, 32, true);
+        (void)reg.setCommandMetadata("cp", "cp <source> <dest>", "source:string dest:string", 2, 2, true);
+        (void)reg.setCommandMetadata("mousespeed", "mousespeed [show|<percent>|persist <percent>]", "op?:string percent?:u32", 0, 2, true);
         (void)reg.setCommandMetadata("startx", "startx", "none", 0, 0, true);
 
         // Best-effort alias map restore; empty/missing file is allowed.

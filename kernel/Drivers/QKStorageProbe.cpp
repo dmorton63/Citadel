@@ -161,6 +161,9 @@ namespace QKStorage
             registration.mountPath = descriptor.mountPath;
             registration.fsKind = descriptor.fsKind;
             registration.device = device;
+            registration.sourceKind = "module";
+            registration.sourceDetail = module->cmdline ? module->cmdline : "limine module";
+            registration.persistent = false;
 
             QC::Status status = registerBlockDevice(registration);
             if (status == QC::Status::Success)

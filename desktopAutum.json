@@ -60,9 +60,9 @@
           "shutdown": "/system/icons/svg/power.svg"
         },
         "backgrounds": {
-          "desktopPrimary": "/system/wall/AUTUMN.PNG",
-          "desktopSecondary": "/system/wall/AUTUMN.PNG",
-          "lockScreen": "/system/wall/AUTUMN.PNG"
+          "desktopPrimary": "/WALL/AUTUMN.PNG",
+          "desktopSecondary": "/WALL/AUTUMN.PNG",
+          "lockScreen": "/WALL/AUTUMN.PNG"
         },
         "textures": {
           "glassNoise": "/system/textures/glass_noise.png",
@@ -77,7 +77,7 @@
     },
     "background": {
       "type": "image",
-      "path": "/system/wall/AUTUMN.PNG",
+      "path": "/WALL/AUTUMN.PNG",
       "mode": "stretch"
     }
   }

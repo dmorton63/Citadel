@@ -16,7 +16,7 @@ namespace QCQL
         void initialize();
 
         Status createDatabase(const char *path, Database &outDatabase);
-        Status openDatabase(const char *path, Database &outDatabase);
+        Status openDatabase(const char *path, Database &outDatabase, OpenStats *outStats = nullptr);
         Status closeDatabase(Database &database);
         Status createTable(Database &database, const TableSchema &schema);
 
@@ -29,7 +29,7 @@ namespace QCQL
                  QC::u32 *outPageId, QC::u16 *outRowOffset = nullptr);
         Status insertRow(Database &database, QC::u32 pageId, const Row &row, QC::u16 *outRowOffset = nullptr);
         Status readRow(const Database &database, QC::u32 pageId, QC::u16 rowOffset, Row &outRow);
-        Status rebuildPrimaryKeyIndex(Database &database, QC::u32 tableId);
+        Status rebuildPrimaryKeyIndex(Database &database, QC::u32 tableId, OpenStats *outStats = nullptr);
         Status findByPrimaryKey(const Database &database, QC::u32 tableId,
                     const QC::Vector<QC::u8> &key,
                     QC::u32 &outPageId,
@@ -75,7 +75,7 @@ namespace QCQL
 
         Status initializeDatabaseHeader(Database &database) const;
         Status persistMetadata(const Database &database) const;
-        Status loadMetadata(Database &database) const;
+        Status loadMetadata(Database &database, OpenStats *outStats = nullptr) const;
         static bool copyPath(const char *path, char *outPath, QC::usize outLen);
         static QC::u64 pageOffset(const Database &database, QC::u32 pageId);
     };

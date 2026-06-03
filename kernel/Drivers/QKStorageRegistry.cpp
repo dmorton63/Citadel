@@ -44,6 +44,9 @@ namespace QKStorage
         def.fsKind = registration.fsKind;
         def.device = registration.device;
         def.autoMount = registration.autoMount;
+        def.sourceKind = registration.sourceKind;
+        def.sourceDetail = registration.sourceDetail;
+        def.persistent = registration.persistent;
 
         QC::Status status = QFS::VolumeManager::instance().registerVolume(def);
         if (status != QC::Status::Success)

@@ -55,12 +55,6 @@ namespace QW
                 else
                     memcpy_stream64(rowDst, rowSrc, rowBytes);
             }
-
-            if (!frontbufferIsMMIO)
-            {
-                // Cacheable framebuffer mappings need explicit writeback so scanout sees changes.
-                QC::wbinvd();
-            }
         }
     }
 
@@ -135,35 +129,36 @@ namespace QW
         }
 
         // Map the physical framebuffer.
-        // NOTE: Even if Limine provides a higher-half direct-map (HHDM-looking) pointer, that
-        // mapping may be cacheable. For device VRAM this can lead to writes not reaching scanout
-        // (blank screen) depending on paging attributes/emulation. Prefer an explicit MMIO mapping
-        // when possible and keep Limine's pointer as a fallback.
+        // Prefer Limine's existing HHDM mapping when available so software presents can use
+        // normal cached memory semantics plus streaming stores instead of forcing uncached MMIO
+        // writes on every cursor update. Fall back to an explicit MMIO mapping only when we do
+        // not already have a usable higher-half pointer.
         const QC::usize bufferSize = m_pitch * m_height;
-        const QC::VirtAddr fbVirt = QK::Memory::Translator::instance().mapMMIO(
-            static_cast<QC::PhysAddr>(m_physicalAddress),
-            bufferSize);
-        if (fbVirt)
+        if (hhdmVirtPtr)
         {
-            m_buffer = reinterpret_cast<void *>(fbVirt);
-            m_frontbufferIsMMIO = true;
-        }
-        else if (hhdmVirtPtr)
-        {
-            QC_LOG_WARN("QWFramebuffer", "Framebuffer MMIO map failed; falling back to Limine pointer (virt=0x%llX)",
-                        static_cast<unsigned long long>(reinterpret_cast<QC::uptr>(hhdmVirtPtr)));
             m_buffer = hhdmVirtPtr;
             m_frontbufferIsMMIO = false;
         }
         else
         {
-            QC_LOG_WARN("QWFramebuffer", "Failed to map framebuffer MMIO (phys=0x%llX size=0x%llX)",
-                        static_cast<unsigned long long>(m_physicalAddress),
-                        static_cast<unsigned long long>(bufferSize));
+            const QC::VirtAddr fbVirt = QK::Memory::Translator::instance().mapMMIO(
+                static_cast<QC::PhysAddr>(m_physicalAddress),
+                bufferSize);
+            if (fbVirt)
+            {
+                m_buffer = reinterpret_cast<void *>(fbVirt);
+                m_frontbufferIsMMIO = true;
+            }
+            else
+            {
+                QC_LOG_WARN("QWFramebuffer", "Failed to map framebuffer MMIO (phys=0x%llX size=0x%llX)",
+                            static_cast<unsigned long long>(m_physicalAddress),
+                            static_cast<unsigned long long>(bufferSize));
 
-            // Last resort: legacy physical-as-pointer.
-            m_buffer = reinterpret_cast<void *>(m_physicalAddress);
-            m_frontbufferIsMMIO = false;
+                // Last resort: legacy physical-as-pointer.
+                m_buffer = reinterpret_cast<void *>(m_physicalAddress);
+                m_frontbufferIsMMIO = false;
+            }
         }
 
         QC_LOG_INFO("QWFramebuffer", "Framebuffer mapped (phys=0x%llX virt=0x%llX size=0x%llX)",

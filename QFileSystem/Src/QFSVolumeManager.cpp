@@ -157,11 +157,16 @@ namespace QFS
         QC::String::memset(&record, 0, sizeof(record));
         QC::String::strncpy(record.name, definition.name, sizeof(record.name) - 1);
         QC::String::strncpy(record.mountPath, definition.mountPath, sizeof(record.mountPath) - 1);
+        if (definition.sourceKind)
+            QC::String::strncpy(record.sourceKind, definition.sourceKind, sizeof(record.sourceKind) - 1);
+        if (definition.sourceDetail)
+            QC::String::strncpy(record.sourceDetail, definition.sourceDetail, sizeof(record.sourceDetail) - 1);
         record.fsKind = definition.fsKind;
         record.device = definition.device;
         record.fs = nullptr;
         record.mounted = false;
         record.autoMount = definition.autoMount;
+        record.persistent = definition.persistent;
         record.mountFailed = false;
         record.mountFailCount = 0;
 
@@ -311,9 +316,12 @@ namespace QFS
             QC::String::memset(&dst, 0, sizeof(dst));
             QC::String::strncpy(dst.name, record.name, sizeof(dst.name) - 1);
             QC::String::strncpy(dst.mountPath, record.mountPath, sizeof(dst.mountPath) - 1);
+            QC::String::strncpy(dst.sourceKind, record.sourceKind, sizeof(dst.sourceKind) - 1);
+            QC::String::strncpy(dst.sourceDetail, record.sourceDetail, sizeof(dst.sourceDetail) - 1);
             dst.fsKind = record.fsKind;
             dst.mounted = record.mounted;
             dst.autoMount = record.autoMount;
+            dst.persistent = record.persistent;
             dst.mountFailed = record.mountFailed;
             dst.mountFailCount = record.mountFailCount;
         }

@@ -77,6 +77,11 @@ namespace QW
         // Input timing (updated on each routed mouse event)
         QC::u64 lastInputTimestamp() const { return m_lastInputTimestamp; }
         QC::u64 lastInputMs() const { return m_lastInputMs; }
+        void noteMouseEventPosted(QC::u64 postedMs) { m_lastMouseEventPostedMs = postedMs; }
+        QC::u64 lastMouseEventPostedMs() const { return m_lastMouseEventPostedMs; }
+        QC::u64 lastMouseQueueDelayMs() const { return m_lastMouseQueueDelayMs; }
+        QC::u64 maxMouseQueueDelayMs() const { return m_maxMouseQueueDelayMs; }
+        void resetInputLatencyStats();
 
         // Window access for compositor
         QC::usize windowCount() const { return m_windows.size(); }
@@ -95,6 +100,11 @@ namespace QW
         void routeKeyEvent(const QK::Event::KeyEventData &key);
         void postWindowEvent(QK::Event::Type type, Window *window);
         void applyStyleToWindow(Window *window, const StyleSnapshot &snapshot);
+        void dumpDragReleaseBuffers(const char *phase,
+                        QC::u32 sequence,
+                        Window *window,
+                        const Rect &windowBounds,
+                        const Rect &decoratedBounds);
 
         struct PendingDestroy
         {
@@ -114,6 +124,9 @@ namespace QW
         Point m_mousePos;
         QC::u64 m_lastInputTimestamp = 0;
         QC::u64 m_lastInputMs = 0;
+        QC::u64 m_lastMouseEventPostedMs = 0;
+        QC::u64 m_lastMouseQueueDelayMs = 0;
+        QC::u64 m_maxMouseQueueDelayMs = 0;
         QK::Event::ListenerId m_listenerId;
 
         // Window drag/move state (title bar)
@@ -129,6 +142,18 @@ namespace QW
 
         QC::u32 m_dispatchDepth = 0;
         QC::Vector<PendingDestroy> m_pendingDestroy;
+
+        struct PendingDragDump
+        {
+            bool active = false;
+            QC::u32 sequence = 0;
+            QC::u32 windowId = 0;
+            Rect windowBounds{0, 0, 0, 0};
+            Rect decoratedBounds{0, 0, 0, 0};
+        };
+
+        QC::u32 m_nextDragDumpSequence = 0;
+        PendingDragDump m_pendingDragDump;
 
         bool m_needsRender = true;
     };

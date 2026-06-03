@@ -10,6 +10,7 @@
 #include "QFSVFS.h"
 #include "QFSVolumeManager.h"
 #include "QKMemoryBlockDevice.h"
+#include "QKSecurityCenter.h"
 #include "QKStorageRegistry.h"
 
 #include "IDE/QKDrvIDE.h"
@@ -124,8 +125,26 @@ namespace QK::Boot::Ramdisk
         {
             QKDrv::IDE::setSharedProbeEnabled(QK::Boot::Config::GetIdeSharedProbeEnabled());
 
+            auto &securityCenter = QK::SecurityCenter::instance();
+            const auto startupScMode = QK::Boot::Config::GetSecurityCenterMode();
+            if (securityCenter.initialized() && securityCenter.mode() != startupScMode)
+            {
+                securityCenter.setFlowEnforcementEnabled(startupScMode == QK::SecurityCenter::Mode::Enforce);
+                LogStr(Log, "Security Center mode applied from STARTUP.CFG\r\n");
+            }
+
             // Leave SAVETERM policy available, but do not auto-run it here.
             (void)Log;
+        }
+
+        static void EnsureWritableRootDirs(QFS::VFS *vfs, FLogFn Log)
+        {
+            if (!vfs)
+                return;
+
+            const QC::Status sharedSt = vfs->createDir("/shared");
+            if (sharedSt == QC::Status::Success)
+                LogStr(Log, "Ramdisk: created /shared\r\n");
         }
 
         static bool MountRamdiskVolume(QFS::VFS *vfs, QC::u64 ModuleRequest[], FLogFn Log, const InitOptions &Options)
@@ -162,6 +181,9 @@ namespace QK::Boot::Ramdisk
             ramdiskReg.mountPath = "/";
             ramdiskReg.fsKind = QFS::FileSystemKind::FAT32;
             ramdiskReg.device = g_RamdiskDevice;
+            ramdiskReg.sourceKind = "ramdisk";
+            ramdiskReg.sourceDetail = "limine ramdisk module";
+            ramdiskReg.persistent = false;
 
             QC::Status registerStatus = QKStorage::registerBlockDevice(ramdiskReg);
             if (registerStatus != QC::Status::Success && registerStatus != QC::Status::Busy)
@@ -181,6 +203,7 @@ namespace QK::Boot::Ramdisk
             }
 
             LogStr(Log, "Ramdisk mounted at /\r\n");
+            EnsureWritableRootDirs(vfs, Log);
 
             if (Options.runDemos)
             {
@@ -205,6 +228,7 @@ namespace QK::Boot::Ramdisk
 
         if (volumeManager.isMounted(kRamdiskVolumeName))
         {
+            EnsureWritableRootDirs(vfs, Log);
             if (Options.loadStartupConfig)
             {
                 QK::Boot::Config::LoadFromVfs(Log);

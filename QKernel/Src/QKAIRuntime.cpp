@@ -3,6 +3,7 @@
 #include "QCString.h"
 #include "QCVector.h"
 
+#include "QFSVolumeManager.h"
 #include "QKSecureStore.h"
 
 #include "QQExecutor.h"
@@ -26,20 +27,31 @@ namespace QK
                 QC::u16 flags;
                 QC::u32 allowCount;
             };
+
+            bool secureStoreReady()
+            {
+                return QFS::VolumeManager::instance().isMounted("QFS_SYSTEM");
+            }
         }
 
         bool hasPersistentState()
         {
+            if (!secureStoreReady())
+                return false;
             return QK::SecureStore::exists(kRuntimeStateKey);
         }
 
         QC::Status clearPersistentState()
         {
+            if (!secureStoreReady())
+                return QC::Status::NotFound;
             return QK::SecureStore::removeBlob(kRuntimeStateKey);
         }
 
         QC::Status savePersistentState()
         {
+            if (!secureStoreReady())
+                return QC::Status::NotFound;
             auto &ex = QQ::Executor::instance();
 
             const QC::usize allowCount = ex.memoizationAllowlistCount();
@@ -74,6 +86,8 @@ namespace QK
 
         QC::Status loadPersistentState()
         {
+            if (!secureStoreReady())
+                return QC::Status::NotFound;
             QC::Vector<QC::u8> blob;
             QC::Status st = QK::SecureStore::readSealedBlob(kRuntimeStateKey, blob);
             if (st != QC::Status::Success)

@@ -12,6 +12,10 @@ namespace QCQL
     static constexpr QC::u32 kPageSizeDefault = 4096;
     static constexpr QC::u32 kMaxTables = 64;
     static constexpr QC::u32 kMaxColumnsPerTable = 16;
+    static constexpr QC::u32 kMaxForeignKeysPerTable = 8;
+    static constexpr QC::u32 kFileVersion1 = 1;
+    static constexpr QC::u32 kFileVersion2 = 2;
+    static constexpr QC::u32 kCurrentFileVersion = kFileVersion2;
 
     enum class Status : QC::i32
     {
@@ -23,7 +27,8 @@ namespace QCQL
         AlreadyExists = -5,
         OutOfMemory = -6,
         NotSupported = -7,
-        Corrupt = -8
+        Corrupt = -8,
+        ConstraintViolation = -9
     };
 
     enum class ColumnType : QC::u8
@@ -37,7 +42,7 @@ namespace QCQL
     struct FileHeader
     {
         char magic[8] = {'C', 'Q', 'L', 'D', 'B', '\0', '\0', '\0'};
-        QC::u32 version = 1;
+        QC::u32 version = kCurrentFileVersion;
         QC::u32 pageSize = kPageSizeDefault;
         QC::u32 tableCount = 0;
         QC::u64 tableDirOffset = 0;
@@ -63,13 +68,35 @@ namespace QCQL
         QC::u8 reserved[14] = {};
     };
 
-    struct TableSchemaDisk
+    struct TableSchemaDiskV1
     {
         char tableName[48] = {};
         QC::u32 tableId = 0;
         QC::u32 columnCount = 0;
         QC::u32 primaryKeyIndex = 0;
         ColumnDef columns[kMaxColumnsPerTable] = {};
+    };
+
+    struct ForeignKeyDef
+    {
+        char columnName[48] = {};
+        char referencedTable[48] = {};
+        char referencedColumn[48] = {};
+        QC::u8 onDelete = 0;
+        QC::u8 onUpdate = 0;
+        QC::u8 reserved[14] = {};
+    };
+
+    struct TableSchemaDisk
+    {
+        char tableName[48] = {};
+        QC::u32 tableId = 0;
+        QC::u32 columnCount = 0;
+        QC::u32 primaryKeyIndex = 0;
+        QC::u32 foreignKeyCount = 0;
+        QC::u8 reserved[12] = {};
+        ColumnDef columns[kMaxColumnsPerTable] = {};
+        ForeignKeyDef foreignKeys[kMaxForeignKeysPerTable] = {};
     };
 
     struct PageHeader
@@ -117,10 +144,25 @@ namespace QCQL
         bool isPrimaryKey = false;
     };
 
+    enum class ReferentialAction : QC::u8
+    {
+        Restrict = 0
+    };
+
+    struct ForeignKey
+    {
+        char columnName[48] = {};
+        char referencedTable[48] = {};
+        char referencedColumn[48] = {};
+        ReferentialAction onDelete = ReferentialAction::Restrict;
+        ReferentialAction onUpdate = ReferentialAction::Restrict;
+    };
+
     struct TableSchema
     {
         char tableName[48] = {};
         QC::Vector<Column> columns;
+        QC::Vector<ForeignKey> foreignKeys;
         QC::u32 primaryKeyIndex = 0;
     };
 
@@ -162,6 +204,16 @@ namespace QCQL
         QC::Vector<Table> tables;
         QC::u32 pageSize = kPageSizeDefault;
         QC::u32 nextPageId = 1;
+    };
+
+    struct OpenStats
+    {
+        QC::u32 metadataTablesLoaded = 0;
+        QC::u32 metadataPageHeadersScanned = 0;
+        QC::u32 pkTablesRebuilt = 0;
+        QC::u32 pkPagesLoaded = 0;
+        QC::u32 pkRowsScanned = 0;
+        QC::u32 pkRowsIndexed = 0;
     };
 
 } // namespace QCQL

@@ -1,6 +1,5 @@
 // QWindowing Compositor - Window compositing implementation
 // Namespace: QW
-
 #include "QWCompositor.h"
 #include "QWWindow.h"
 #include "QWFramebuffer.h"
@@ -13,10 +12,10 @@
 #include "QWPresentBackend.h"
 #include "QWFramebufferPresentBackend.h"
 #include "QWVmwareSVGAPresentBackend.h"
-
-#include "QDrvVmwareSVGA.h"
+#include "QWDisplayBootstrapUtil.h"
 
 #include "QG/CameraRH.h"
+
 
 namespace QW
 {
@@ -26,6 +25,93 @@ namespace QW
         // Off by default: set to 1 when you want to visually validate camera/projection math.
         static constexpr bool QAIOS_DEBUG_CAMERA_OVERLAY = false;
         static constexpr bool QAIOS_MOUSE_INFO_LOGS = false;
+
+        Rect unionRect(const Rect &a, const Rect &b)
+        {
+            if (a.isEmpty())
+                return b;
+            if (b.isEmpty())
+                return a;
+
+            const QC::i32 left = (a.x < b.x) ? a.x : b.x;
+            const QC::i32 top = (a.y < b.y) ? a.y : b.y;
+            const QC::i32 right = (a.right() > b.right()) ? a.right() : b.right();
+            const QC::i32 bottom = (a.bottom() > b.bottom()) ? a.bottom() : b.bottom();
+            return Rect{left,
+                        top,
+                        static_cast<QC::u32>(right - left),
+                        static_cast<QC::u32>(bottom - top)};
+        }
+
+        Rect intersectRect(const Rect &a, const Rect &b)
+        {
+            const QC::i32 left = (a.x > b.x) ? a.x : b.x;
+            const QC::i32 top = (a.y > b.y) ? a.y : b.y;
+            const QC::i32 right = (a.right() < b.right()) ? a.right() : b.right();
+            const QC::i32 bottom = (a.bottom() < b.bottom()) ? a.bottom() : b.bottom();
+
+            if (right <= left || bottom <= top)
+                return Rect{0, 0, 0, 0};
+
+            return Rect{left,
+                        top,
+                        static_cast<QC::u32>(right - left),
+                        static_cast<QC::u32>(bottom - top)};
+        }
+
+        Rect dirtyRectForWindow(const QC::Vector<DirtyRegion> &dirtyRegions,
+                                const Rect &windowBounds,
+                                QC::u32 bufferWidth,
+                                QC::u32 bufferHeight)
+        {
+            if (bufferWidth == 0 || bufferHeight == 0)
+                return Rect{0, 0, 0, 0};
+
+            if (dirtyRegions.empty())
+                return Rect{0, 0, bufferWidth, bufferHeight};
+
+            Rect localDirty{0, 0, 0, 0};
+            bool hasDirty = false;
+
+            for (QC::usize i = 0; i < dirtyRegions.size(); ++i)
+            {
+                const Rect overlap = intersectRect(windowBounds, dirtyRegions[i].rect);
+                if (overlap.isEmpty())
+                    continue;
+
+                Rect localRect{overlap.x - windowBounds.x,
+                               overlap.y - windowBounds.y,
+                               overlap.width,
+                               overlap.height};
+
+                if (!hasDirty)
+                {
+                    localDirty = localRect;
+                    hasDirty = true;
+                }
+                else
+                {
+                    localDirty = unionRect(localDirty, localRect);
+                }
+            }
+
+            return hasDirty ? localDirty : Rect{0, 0, 0, 0};
+        }
+
+        void blitWindowToBackBuffer(Renderer *renderer, Window *window)
+        {
+            if (!renderer || !window || !window->buffer())
+                return;
+
+            const Rect bounds = window->bounds();
+            renderer->blit(bounds.x,
+                           bounds.y,
+                           window->buffer(),
+                           window->bufferWidth(),
+                           window->bufferHeight(),
+                           window->bufferPitchBytes());
+        }
+
     }
 
     Compositor::Compositor(Framebuffer *fb)
@@ -100,8 +186,8 @@ namespace QW
     void Compositor::initialize()
     {
         // Select presentation backend.
-        // Default is software framebuffer swap; VMware SVGA backend is used when available.
-        if (QDrv::VmwareSVGA::instance().initialize() && QDrv::VmwareSVGA::instance().isAvailable())
+        // Default is software framebuffer swap; accelerated present is surfaced through CVD.
+        if (QDrv::Display::cvd_has_accelerated_present())
         {
             m_presentBackend = new VmwareSVGAPresentBackend();
         }
@@ -340,6 +426,7 @@ namespace QW
         const QC::u64 composeStartMs = QDrv::Timer::instance().milliseconds();
 
         const bool hasHwCursor = (m_presentBackend && m_presentBackend->hasHardwareCursor());
+        const bool useWindowSurfaceBatches = (m_presentBackend && m_presentBackend->supportsWindowSurfaceBatches());
         m_stats.hardwareCursorActive = hasHwCursor;
         m_stats.dirtyRegionCount = m_dirtyRegions.size();
 
@@ -408,7 +495,6 @@ namespace QW
         {
             // Draw desktop background
             drawDesktop();
-
             if (QAIOS_DEBUG_CAMERA_OVERLAY)
             {
                 // Minimal integration demo: use the UI ortho camera to transform a simple box.
@@ -435,7 +521,15 @@ namespace QW
                 Window *window = wm.windowAtIndex(i);
                 if (window && window->isVisible())
                 {
-                    composeWindow(window);
+                    if (window->flags() & WindowFlags::HasBorder)
+                    {
+                        drawWindowDecorations(window);
+                    }
+
+                    if (!useWindowSurfaceBatches)
+                    {
+                        blitWindowToBackBuffer(m_renderer, window);
+                    }
                 }
             }
         };
@@ -466,6 +560,76 @@ namespace QW
         else
         {
             drawCursor(mousePos.x, mousePos.y);
+        }
+
+        if (useWindowSurfaceBatches)
+        {
+            QGfx::Batch frameBatch;
+            QC::Vector<WindowSurfaceBlit> frameBlits;
+
+            Rect batchDirtyRegion{0, 0, 0, 0};
+            bool hasBatchDirtyRegion = false;
+
+            for (QC::usize i = 0; i < wm.windowCount(); ++i)
+            {
+                Window *window = wm.windowAtIndex(i);
+                if (!window || !window->isVisible() || !window->buffer())
+                    continue;
+
+                const Rect bounds = window->bounds();
+                const Rect localDirty = dirtyRectForWindow(m_dirtyRegions,
+                                                           bounds,
+                                                           window->bufferWidth(),
+                                                           window->bufferHeight());
+                if (localDirty.isEmpty())
+                    continue;
+
+                WindowSurfaceBlit blit;
+                blit.surface = &window->graphicsSurface();
+                blit.pixels = window->buffer();
+                blit.stridePixels = window->bufferPitchBytes() / sizeof(QC::u32);
+                blit.dirtyRect = localDirty;
+                frameBlits.push_back(blit);
+
+                QGfx::DrawOp op;
+                op.srcSurface = window->graphicsSurface().id;
+                op.srcRect = Rect{0, 0, window->bufferWidth(), window->bufferHeight()};
+                op.dstRect = bounds;
+                op.zOrder = static_cast<QC::i32>(i);
+                frameBatch.addOp(op);
+
+                const Rect screenDirty{bounds.x + localDirty.x,
+                                       bounds.y + localDirty.y,
+                                       localDirty.width,
+                                       localDirty.height};
+                if (!hasBatchDirtyRegion)
+                {
+                    batchDirtyRegion = screenDirty;
+                    hasBatchDirtyRegion = true;
+                }
+                else
+                {
+                    batchDirtyRegion = unionRect(batchDirtyRegion, screenDirty);
+                }
+            }
+
+            if (hasBatchDirtyRegion)
+            {
+                frameBatch.setDirtyRegion(batchDirtyRegion);
+            }
+
+            if (!frameBatch.ops().empty() &&
+                !m_presentBackend->submitWindowSurfaceBatch(frameBatch, frameBlits.data(), frameBlits.size()))
+            {
+                for (QC::usize i = 0; i < wm.windowCount(); ++i)
+                {
+                    Window *window = wm.windowAtIndex(i);
+                    if (window && window->isVisible())
+                    {
+                        blitWindowToBackBuffer(m_renderer, window);
+                    }
+                }
+            }
         }
 
         // Present frame
@@ -515,6 +679,9 @@ namespace QW
         const QC::u64 composeEndMs = QDrv::Timer::instance().milliseconds();
         m_lastComposeTime = (composeEndMs >= composeStartMs) ? (composeEndMs - composeStartMs) : 0;
         m_stats.lastComposeTimeMs = m_lastComposeTime;
+        m_stats.lastPresentTimeMs = (composeEndMs >= presentStartMs) ? (composeEndMs - presentStartMs) : 0;
+        if (m_stats.lastPresentTimeMs > m_stats.maxPresentTimeMs)
+            m_stats.maxPresentTimeMs = m_stats.lastPresentTimeMs;
 
         // Low-noise latency instrumentation: measure time from last input dispatch to this present.
         // This helps distinguish "event backlog" vs "render/present" lag.
@@ -526,6 +693,9 @@ namespace QW
             {
                 const QC::u64 inputMs = wm.lastInputMs();
                 const QC::u64 sinceInputMs = (composeEndMs >= inputMs) ? (composeEndMs - inputMs) : 0;
+                m_stats.lastInputToPresentMs = sinceInputMs;
+                if (sinceInputMs > m_stats.maxInputToPresentMs)
+                    m_stats.maxInputToPresentMs = sinceInputMs;
 
                 // Only log when latency is noticeable.
                 if (QAIOS_MOUSE_INFO_LOGS && sinceInputMs >= 100)
@@ -894,6 +1064,22 @@ namespace QW
                 }
             }
         }
+    }
+
+    bool Compositor::hasHardwareCursor() const
+    {
+        return m_presentBackend && m_presentBackend->hasHardwareCursor();
+    }
+
+    Rect Compositor::cursorBoundsAt(QC::i32 x, QC::i32 y) const
+    {
+        if (!m_cursorPixels || m_cursorWidth == 0 || m_cursorHeight == 0)
+            return Rect{0, 0, 0, 0};
+
+        return Rect{x - m_cursorHotspotX,
+                    y - m_cursorHotspotY,
+                    m_cursorWidth,
+                    m_cursorHeight};
     }
 
     void Compositor::drawCursor(QC::i32 x, QC::i32 y)

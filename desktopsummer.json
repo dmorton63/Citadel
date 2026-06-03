@@ -60,9 +60,9 @@
           "shutdown": "/system/icons/svg/power.svg"
         },
         "backgrounds": {
-          "desktopPrimary": "/system/wall/SUMMER.PNG",
-          "desktopSecondary": "/system/wall/SUMMER.PNG",
-          "lockScreen": "/system/wall/SUMMER.PNG"
+          "desktopPrimary": "/WALL/SUMMER.PNG",
+          "desktopSecondary": "/WALL/SUMMER.PNG",
+          "lockScreen": "/WALL/SUMMER.PNG"
         },
         "textures": {
           "glassNoise": "/system/textures/glass_noise.png",
@@ -77,7 +77,7 @@
     },
     "background": {
       "type": "image",
-      "path": "/system/wall/SUMMER.PNG",
+      "path": "/WALL/SUMMER.PNG",
       "mode": "stretch"
     }
   }

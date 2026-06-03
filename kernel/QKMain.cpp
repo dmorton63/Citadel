@@ -238,7 +238,7 @@ extern "C" void kernel_main()
     const auto earlyHeap = QK::Boot::Memory::GetEarlyHeap();
     QK::Memory::Heap::instance().initialize(earlyHeap.Buffer, earlyHeap.Size);
 
-    QK::Console::initialize(QK::Debug::Serial::Write);
+    QK::Console::initialize(QK::Debug::Serial::WriteMirrored);
     // Limine already clears BSS for us.
     QK::Debug::Serial::Write("BSS (skipped - Limine does it)\r\n");
 

@@ -10,5 +10,10 @@ namespace QK::Debug::Serial
     void SetMirror(FMirrorCallback MirrorCallback);
 
     void Write(const char *Message);
+    void WriteMirrored(const char *Message);
     void WriteInt(QC::i32 Value);
+
+    const char *CaptureData();
+    QC::usize CaptureSize();
+    bool CaptureTruncated();
 }

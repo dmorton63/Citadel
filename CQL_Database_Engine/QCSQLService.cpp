@@ -8,6 +8,8 @@
 
 #include "QCSQLService.h"
 #include "CitadelPAL.h"
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <cctype>
 #include <string>
@@ -133,12 +135,681 @@ const char* EngineStatusToText(QCQL::Status status) {
         default: return "Engine error";
     }
 }
+
+struct QCQLEngineAdapter {
+    static bool EqualsIgnoreCase(const char* a, const char* b) {
+        if (!a || !b) {
+            return false;
+        }
+        while (*a && *b) {
+            if (std::tolower(static_cast<unsigned char>(*a)) !=
+                std::tolower(static_cast<unsigned char>(*b))) {
+                return false;
+            }
+            ++a;
+            ++b;
+        }
+        return *a == '\0' && *b == '\0';
+    }
+
+    static bool IsSpace(char ch) {
+        return ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r';
+    }
+
+    static const char* SkipSpaces(const char* text) {
+        while (text && IsSpace(*text)) {
+            ++text;
+        }
+        return text;
+    }
+
+    static bool ReadIdentifier(const char*& p, char* out, size_t outCap) {
+        if (!out || outCap == 0) {
+            return false;
+        }
+
+        out[0] = '\0';
+        p = SkipSpaces(p);
+        if (!p || *p == '\0') {
+            return false;
+        }
+
+        const char first = *p;
+        if (!std::isalpha(static_cast<unsigned char>(first)) && first != '_') {
+            return false;
+        }
+
+        size_t i = 0;
+        while (*p) {
+            const unsigned char ch = static_cast<unsigned char>(*p);
+            if (!std::isalnum(ch) && ch != '_') {
+                break;
+            }
+            if (i + 1 >= outCap) {
+                return false;
+            }
+            out[i++] = *p++;
+        }
+        out[i] = '\0';
+        return i > 0;
+    }
+
+    static bool ConsumeKeyword(const char*& p, const char* keyword) {
+        p = SkipSpaces(p);
+        if (!p || !keyword) {
+            return false;
+        }
+
+        const char* cursor = p;
+        while (*keyword) {
+            if (*cursor == '\0') {
+                return false;
+            }
+            if (std::tolower(static_cast<unsigned char>(*cursor)) !=
+                std::tolower(static_cast<unsigned char>(*keyword))) {
+                return false;
+            }
+            ++cursor;
+            ++keyword;
+        }
+
+        if (*cursor != '\0' && !IsSpace(*cursor) && *cursor != '(' && *cursor != ')' && *cursor != ',' && *cursor != '=') {
+            return false;
+        }
+
+        p = cursor;
+        return true;
+    }
+
+    static bool ConsumeChar(const char*& p, char token) {
+        p = SkipSpaces(p);
+        if (!p || *p != token) {
+            return false;
+        }
+        ++p;
+        return true;
+    }
+
+    static void SetError(ExecuteSQLResponse* resp, const char* message) {
+        resp->success = false;
+        resp->rowsAffected = 0;
+        resp->resultLength = 0;
+        Citadel::PAL::String::Copy(resp->result, "", MaxResultLength);
+        Citadel::PAL::String::Copy(resp->errorMessage, message ? message : "Error", MaxErrorLength);
+    }
+
+    static void SetSuccess(ExecuteSQLResponse* resp, const std::string& text, uint32_t rowsAffected) {
+        resp->success = true;
+        resp->rowsAffected = rowsAffected;
+        Citadel::PAL::String::Copy(resp->errorMessage, "", MaxErrorLength);
+        Citadel::PAL::String::Copy(resp->result, text.c_str(), MaxResultLength);
+        resp->resultLength = static_cast<uint32_t>(Citadel::PAL::String::Length(resp->result));
+    }
+
+    static const QCQL::Table* FindTable(QCQL::Database* database, const char* name) {
+        if (!database || !name) {
+            return nullptr;
+        }
+        for (size_t i = 0; i < database->tables.size(); ++i) {
+            if (EqualsIgnoreCase(database->tables[i].name, name)) {
+                return &database->tables[i];
+            }
+        }
+        return nullptr;
+    }
+
+    static std::string FormatCell(const QCQL::Cell& cell) {
+        if (cell.type == QCQL::ColumnType::Text) {
+            std::string out;
+            out.reserve(cell.bytes.size());
+            for (size_t i = 0; i < cell.bytes.size(); ++i) {
+                char ch = static_cast<char>(cell.bytes[i]);
+                if (ch == '\0') {
+                    continue;
+                }
+                if (ch < 32 || ch > 126) {
+                    ch = ' ';
+                }
+                out.push_back(ch);
+            }
+            return out;
+        }
+
+        if (cell.type == QCQL::ColumnType::Bool) {
+            return (!cell.bytes.empty() && cell.bytes[0] != 0) ? "true" : "false";
+        }
+
+        uint32_t value = 0;
+        const size_t maxBytes = cell.bytes.size() < 4 ? cell.bytes.size() : 4;
+        for (size_t i = 0; i < maxBytes; ++i) {
+            value |= static_cast<uint32_t>(cell.bytes[i]) << (8 * i);
+        }
+        return std::to_string(value);
+    }
+
+    static bool ParseColumnType(const char*& p, QCQL::ColumnType& outType) {
+        char typeName[32] = {};
+        if (!ReadIdentifier(p, typeName, sizeof(typeName))) {
+            return false;
+        }
+
+        if (EqualsIgnoreCase(typeName, "text") || EqualsIgnoreCase(typeName, "varchar") ||
+            EqualsIgnoreCase(typeName, "char") || EqualsIgnoreCase(typeName, "string")) {
+            outType = QCQL::ColumnType::Text;
+        } else if (EqualsIgnoreCase(typeName, "int") || EqualsIgnoreCase(typeName, "integer") ||
+                   EqualsIgnoreCase(typeName, "tinyint") || EqualsIgnoreCase(typeName, "smallint") ||
+                   EqualsIgnoreCase(typeName, "bigint")) {
+            outType = QCQL::ColumnType::Int;
+        } else if (EqualsIgnoreCase(typeName, "bool") || EqualsIgnoreCase(typeName, "boolean")) {
+            outType = QCQL::ColumnType::Bool;
+        } else if (EqualsIgnoreCase(typeName, "datetime") || EqualsIgnoreCase(typeName, "timestamp")) {
+            outType = QCQL::ColumnType::DateTime;
+        } else {
+            return false;
+        }
+
+        p = SkipSpaces(p);
+        if (p && *p == '(') {
+            ++p;
+            while (*p && *p != ')') {
+                ++p;
+            }
+            if (*p != ')') {
+                return false;
+            }
+            ++p;
+        }
+
+        return true;
+    }
+
+    static bool ParseCreateTable(const char* definition, QCQL::TableSchema& outSchema) {
+        const char* p = SkipSpaces(definition);
+        if (!p) {
+            return false;
+        }
+
+        outSchema = QCQL::TableSchema{};
+        if (!ReadIdentifier(p, outSchema.tableName, sizeof(outSchema.tableName))) {
+            return false;
+        }
+        if (!ConsumeChar(p, '(')) {
+            return false;
+        }
+
+        uint32_t pkCount = 0;
+        while (true) {
+            QCQL::Column column{};
+            if (!ReadIdentifier(p, column.name, sizeof(column.name))) {
+                return false;
+            }
+            if (!ParseColumnType(p, column.type)) {
+                return false;
+            }
+
+            const char* pkCursor = p;
+            if (ConsumeKeyword(pkCursor, "PRIMARY")) {
+                if (!ConsumeKeyword(pkCursor, "KEY")) {
+                    return false;
+                }
+                column.isPrimaryKey = true;
+                p = pkCursor;
+                outSchema.primaryKeyIndex = static_cast<uint32_t>(outSchema.columns.size());
+                ++pkCount;
+            }
+
+            outSchema.columns.push_back(static_cast<QCQL::Column&&>(column));
+            if (outSchema.columns.size() > QCQL::kMaxColumnsPerTable) {
+                return false;
+            }
+
+            p = SkipSpaces(p);
+            if (!p) {
+                return false;
+            }
+            if (*p == ',') {
+                ++p;
+                continue;
+            }
+            if (*p == ')') {
+                ++p;
+                break;
+            }
+            return false;
+        }
+
+        p = SkipSpaces(p);
+        return p && *p == '\0' && !outSchema.columns.empty() && pkCount == 1;
+    }
+
+    static bool ParseLimitSuffix(const char* text, uint32_t& outLimit) {
+        const char* p = SkipSpaces(text);
+        if (!p || *p == '\0') {
+            return true;
+        }
+        if (!ConsumeKeyword(p, "LIMIT")) {
+            return false;
+        }
+        p = SkipSpaces(p);
+        if (!p || !std::isdigit(static_cast<unsigned char>(*p))) {
+            return false;
+        }
+
+        uint32_t value = 0;
+        while (*p && std::isdigit(static_cast<unsigned char>(*p))) {
+            value = (value * 10u) + static_cast<uint32_t>(*p - '0');
+            ++p;
+        }
+        p = SkipSpaces(p);
+        if (*p != '\0') {
+            return false;
+        }
+
+        outLimit = value;
+        return true;
+    }
+
+    static bool ParseQuotedString(const char*& p, std::string& out) {
+        p = SkipSpaces(p);
+        if (!p || (*p != '\'' && *p != '"')) {
+            return false;
+        }
+
+        const char quote = *p++;
+        out.clear();
+        while (*p && *p != quote) {
+            if (*p == '\\' && p[1] != '\0') {
+                ++p;
+            }
+            out.push_back(*p++);
+        }
+        if (*p != quote) {
+            return false;
+        }
+        ++p;
+        return true;
+    }
+
+    static bool ParseSignedInteger(const char*& p, int64_t& outValue) {
+        p = SkipSpaces(p);
+        if (!p || *p == '\0') {
+            return false;
+        }
+
+        char* end = nullptr;
+        const long long value = std::strtoll(p, &end, 10);
+        if (end == p) {
+            return false;
+        }
+        outValue = static_cast<int64_t>(value);
+        p = end;
+        return true;
+    }
+
+    static bool ParseBool(const char*& p, bool& outValue) {
+        p = SkipSpaces(p);
+        if (!p || *p == '\0') {
+            return false;
+        }
+        if (StartsWithIgnoreCase(p, "true")) {
+            const char tail = p[4];
+            if (tail == '\0' || IsSpace(tail) || tail == ',' || tail == ')') {
+                p += 4;
+                outValue = true;
+                return true;
+            }
+        }
+        if (StartsWithIgnoreCase(p, "false")) {
+            const char tail = p[5];
+            if (tail == '\0' || IsSpace(tail) || tail == ',' || tail == ')') {
+                p += 5;
+                outValue = false;
+                return true;
+            }
+        }
+
+        int64_t numeric = 0;
+        if (!ParseSignedInteger(p, numeric)) {
+            return false;
+        }
+        outValue = (numeric != 0);
+        return true;
+    }
+
+    static bool ParseCellValue(const char*& p, QCQL::ColumnType type, QCQL::Cell& outCell) {
+        outCell = QCQL::Cell{};
+        outCell.type = type;
+
+        if (type == QCQL::ColumnType::Text) {
+            std::string text;
+            if (ParseQuotedString(p, text)) {
+                outCell.bytes.resize(text.size());
+                for (size_t i = 0; i < text.size(); ++i) {
+                    outCell.bytes[i] = static_cast<QC::u8>(text[i]);
+                }
+                return true;
+            }
+
+            char identifier[128] = {};
+            if (!ReadIdentifier(p, identifier, sizeof(identifier))) {
+                return false;
+            }
+            const size_t len = std::strlen(identifier);
+            outCell.bytes.resize(len);
+            for (size_t i = 0; i < len; ++i) {
+                outCell.bytes[i] = static_cast<QC::u8>(identifier[i]);
+            }
+            return true;
+        }
+
+        if (type == QCQL::ColumnType::Bool) {
+            bool value = false;
+            if (!ParseBool(p, value)) {
+                return false;
+            }
+            outCell.bytes.resize(1);
+            outCell.bytes[0] = value ? 1u : 0u;
+            return true;
+        }
+
+        int64_t value = 0;
+        if (!ParseSignedInteger(p, value)) {
+            return false;
+        }
+        outCell.bytes.resize(4);
+        const uint32_t encoded = static_cast<uint32_t>(value);
+        outCell.bytes[0] = static_cast<QC::u8>(encoded & 0xFFu);
+        outCell.bytes[1] = static_cast<QC::u8>((encoded >> 8) & 0xFFu);
+        outCell.bytes[2] = static_cast<QC::u8>((encoded >> 16) & 0xFFu);
+        outCell.bytes[3] = static_cast<QC::u8>((encoded >> 24) & 0xFFu);
+        return true;
+    }
+
+    static void ExecShowTables(QCQL::Database* database, ExecuteSQLResponse* resp) {
+        std::string result;
+        for (size_t i = 0; i < database->tables.size(); ++i) {
+            if (!result.empty()) {
+                result += '\n';
+            }
+            result += std::to_string(i + 1);
+            result += ") ";
+            result += database->tables[i].name;
+            result += " columns=";
+            result += std::to_string(database->tables[i].schema.columns.size());
+        }
+        if (result.empty()) {
+            result = "No tables found";
+        }
+        SetSuccess(resp, result, static_cast<uint32_t>(database->tables.size()));
+    }
+
+    static void ExecDescribe(QCQL::Database* database, const char* name, ExecuteSQLResponse* resp) {
+        const QCQL::Table* table = FindTable(database, name);
+        if (!table) {
+            SetError(resp, "Table not found");
+            return;
+        }
+
+        std::string result;
+        for (size_t i = 0; i < table->schema.columns.size(); ++i) {
+            const QCQL::Column& col = table->schema.columns[i];
+            if (!result.empty()) {
+                result += '\n';
+            }
+            result += std::to_string(i + 1);
+            result += ") ";
+            result += col.name;
+            result += " type=";
+            switch (col.type) {
+                case QCQL::ColumnType::Text: result += "text"; break;
+                case QCQL::ColumnType::Int: result += "int"; break;
+                case QCQL::ColumnType::Bool: result += "bool"; break;
+                case QCQL::ColumnType::DateTime: result += "datetime"; break;
+            }
+            if (col.isPrimaryKey) {
+                result += " pk=1";
+            }
+        }
+
+        SetSuccess(resp, result, static_cast<uint32_t>(table->schema.columns.size()));
+    }
+
+    static void ExecSelect(QCQL::Database* database, const char* text, ExecuteSQLResponse* resp) {
+        const char* p = text ? text : "";
+        if (!ConsumeKeyword(p, "SELECT") || !ConsumeChar(p, '*') || !ConsumeKeyword(p, "FROM")) {
+            SetError(resp, "Only SELECT * FROM <table> [LIMIT N] is supported");
+            return;
+        }
+
+        char tableName[64] = {};
+        if (!ReadIdentifier(p, tableName, sizeof(tableName))) {
+            SetError(resp, "Missing table name");
+            return;
+        }
+
+        uint32_t limit = 25;
+        if (!ParseLimitSuffix(p, limit)) {
+            SetError(resp, "Bad LIMIT clause");
+            return;
+        }
+
+        const QCQL::Table* table = FindTable(database, tableName);
+        if (!table) {
+            SetError(resp, "Table not found");
+            return;
+        }
+
+        std::string result;
+        uint32_t emitted = 0;
+        for (size_t pageIndex = 0; pageIndex < table->pages.size() && emitted < limit; ++pageIndex) {
+            QCQL::Page page{};
+            if (QCQL::Engine::instance().loadPage(*database, table->pages[pageIndex], page) != QCQL::Status::Success) {
+                continue;
+            }
+
+            for (size_t rowIndex = 0; rowIndex < page.rowOffsets.size() && emitted < limit; ++rowIndex) {
+                QCQL::Row row{};
+                if (QCQL::Engine::instance().readRow(*database, page.header.pageId, page.rowOffsets[rowIndex], row) != QCQL::Status::Success) {
+                    continue;
+                }
+                if (row.tombstone) {
+                    continue;
+                }
+
+                if (!result.empty()) {
+                    result += '\n';
+                }
+                for (size_t c = 0; c < row.cells.size(); ++c) {
+                    if (c > 0) {
+                        result += " | ";
+                    }
+                    result += FormatCell(row.cells[c]);
+                }
+                ++emitted;
+            }
+        }
+
+        if (emitted == 0) {
+            result = "No rows found";
+        }
+        SetSuccess(resp, result, emitted);
+    }
+
+    static void ExecCreateTable(QCQL::Database* database, const char* definition, ExecuteSQLResponse* resp) {
+        QCQL::TableSchema schema{};
+        if (!ParseCreateTable(definition, schema)) {
+            SetError(resp, "Bad CREATE TABLE syntax");
+            return;
+        }
+
+        const QCQL::Status status = QCQL::Engine::instance().createTable(*database, schema);
+        if (status != QCQL::Status::Success) {
+            switch (status) {
+                case QCQL::Status::AlreadyExists: SetError(resp, "Table already exists"); break;
+                case QCQL::Status::InvalidParam: SetError(resp, "Invalid schema"); break;
+                default: SetError(resp, "Create table failed"); break;
+            }
+            return;
+        }
+
+        std::string result = "Created table ";
+        result += schema.tableName;
+        result += " columns=";
+        result += std::to_string(schema.columns.size());
+        SetSuccess(resp, result, 0);
+    }
+
+    static void ExecInsert(QCQL::Database* database, const char* text, ExecuteSQLResponse* resp) {
+        const char* p = text ? text : "";
+        if (!ConsumeKeyword(p, "INSERT") || !ConsumeKeyword(p, "INTO")) {
+            SetError(resp, "Bad INSERT syntax");
+            return;
+        }
+
+        char tableName[64] = {};
+        if (!ReadIdentifier(p, tableName, sizeof(tableName))) {
+            SetError(resp, "Missing table name");
+            return;
+        }
+        if (!ConsumeKeyword(p, "VALUES") || !ConsumeChar(p, '(')) {
+            SetError(resp, "Bad INSERT syntax");
+            return;
+        }
+
+        const QCQL::Table* table = FindTable(database, tableName);
+        if (!table) {
+            SetError(resp, "Table not found");
+            return;
+        }
+
+        QCQL::Row row{};
+        for (size_t i = 0; i < table->schema.columns.size(); ++i) {
+            QCQL::Cell cell{};
+            if (!ParseCellValue(p, table->schema.columns[i].type, cell)) {
+                SetError(resp, "Bad INSERT values");
+                return;
+            }
+            row.cells.push_back(static_cast<QCQL::Cell&&>(cell));
+
+            p = SkipSpaces(p);
+            if (i + 1 < table->schema.columns.size()) {
+                if (*p != ',') {
+                    SetError(resp, "Bad INSERT values");
+                    return;
+                }
+                ++p;
+            }
+        }
+
+        p = SkipSpaces(p);
+        if (*p != ')') {
+            SetError(resp, "Bad INSERT values");
+            return;
+        }
+        ++p;
+        p = SkipSpaces(p);
+        if (*p != '\0') {
+            SetError(resp, "Bad INSERT syntax");
+            return;
+        }
+
+        const QCQL::Status status = QCQL::Engine::instance().insertRowByName(*database, tableName, row);
+        if (status != QCQL::Status::Success) {
+            switch (status) {
+                case QCQL::Status::AlreadyExists: SetError(resp, "Primary key already exists"); break;
+                case QCQL::Status::InvalidParam: SetError(resp, "Row does not match schema"); break;
+                default: SetError(resp, EngineStatusToText(status)); break;
+            }
+            return;
+        }
+
+        std::string result = "Inserted into ";
+        result += tableName;
+        SetSuccess(resp, result, 1);
+    }
+
+    static void Execute(QCQL::Database* database, const ExecuteSQLRequest* req, ExecuteSQLResponse* resp) {
+        if (!database) {
+            SetError(resp, "No database bound");
+            return;
+        }
+        if (!req || req->queryLength == 0 || req->query[0] == '\0') {
+            SetError(resp, "Query is empty");
+            return;
+        }
+
+        const char* query = SkipSpaces(req->query);
+        if (!query || *query == '\0') {
+            SetError(resp, "Query is empty");
+            return;
+        }
+
+        if (EqualsIgnoreCase(query, "SHOW TABLES") || EqualsIgnoreCase(query, "DUMP TABLES_LOADED")) {
+            ExecShowTables(database, resp);
+            return;
+        }
+        if (StartsWithIgnoreCase(query, "DESCRIBE ")) {
+            ExecDescribe(database, SkipSpaces(query + 9), resp);
+            return;
+        }
+        if (StartsWithIgnoreCase(query, "SHOW COLUMNS FROM ")) {
+            ExecDescribe(database, SkipSpaces(query + 18), resp);
+            return;
+        }
+        if (StartsWithIgnoreCase(query, "SELECT ")) {
+            ExecSelect(database, query, resp);
+            return;
+        }
+        if (StartsWithIgnoreCase(query, "CREATE TABLE ")) {
+            ExecCreateTable(database, query + 13, resp);
+            return;
+        }
+        if (StartsWithIgnoreCase(query, "INSERT INTO ")) {
+            ExecInsert(database, query, resp);
+            return;
+        }
+
+        SetError(resp, "Supported queries: SHOW TABLES, DESCRIBE, SHOW COLUMNS, SELECT * FROM, CREATE TABLE, INSERT INTO");
+    }
+};
 #endif
 } // namespace
 
 #if defined(CITADEL_QCSQL_USE_CQL_ENGINE) && defined(CITADEL_QCSQL_USE_QCQL_ENGINE)
 #error "Enable only one engine binding mode: CITADEL_QCSQL_USE_CQL_ENGINE or CITADEL_QCSQL_USE_QCQL_ENGINE"
 #endif
+
+namespace {
+const char* ActiveBackendLabel() {
+#if defined(CITADEL_QCSQL_USE_CQL_ENGINE)
+    return "CQL engine";
+#elif defined(CITADEL_QCSQL_USE_QCQL_ENGINE)
+    return "QCQL engine";
+#else
+    return "stub backend";
+#endif
+}
+
+const char* DefaultVersionString() {
+#if defined(CITADEL_QCSQL_USE_CQL_ENGINE)
+    return "1.0.0-Citadel-CQL";
+#elif defined(CITADEL_QCSQL_USE_QCQL_ENGINE)
+    return "1.0.0-Citadel-QCQL";
+#else
+    return "1.0.0-Citadel-Stub";
+#endif
+}
+
+const char* InitModeMessage() {
+#if defined(CITADEL_QCSQL_USE_CQL_ENGINE)
+    return "QCSQL Service initialized (CQL engine backend)";
+#elif defined(CITADEL_QCSQL_USE_QCQL_ENGINE)
+    return "QCSQL Service initialized (QCQL engine backend)";
+#else
+    return "QCSQL Service initialized (stub backend)";
+#endif
+}
+}
 
 // ============================================================================
 // Constructor / Destructor
@@ -173,6 +844,9 @@ QCSQLService::~QCSQLService() {
 
 bool QCSQLService::Initialize(const ServiceConfig& cfg) {
     config = cfg;
+    if (!config.version || config.version[0] == '\0') {
+        config.version = DefaultVersionString();
+    }
     
     LogInfo("QCSQL Service initializing...");
 
@@ -181,7 +855,7 @@ bool QCSQLService::Initialize(const ServiceConfig& cfg) {
     
     running = true;
     LogInfo(statusMessage);
-    LogInfo("QCSQL Service initialized (STUB MODE)");
+    LogInfo(InitModeMessage());
     return true;
 }
 
@@ -527,6 +1201,12 @@ void QCSQLService::HandleExecuteSQL(const ExecuteSQLRequest* req,
     return;
 #endif
 
+#if defined(CITADEL_QCSQL_USE_QCQL_ENGINE)
+    auto* db = static_cast<QCQL::Database*>(databases[req->handle].databasePtr);
+    QCQLEngineAdapter::Execute(db, req, resp);
+    return;
+#endif
+
     if (req->queryLength == 0 || req->query[0] == '\0') {
         Citadel::PAL::String::Copy(resp->errorMessage, "Query is empty", MaxErrorLength);
         return;
@@ -542,8 +1222,7 @@ void QCSQLService::HandleExecuteSQL(const ExecuteSQLRequest* req,
 void QCSQLService::HandleGetVersion(const GetVersionRequest* req,
                                      GetVersionResponse* resp) {
     LogInfo("GetVersion request");
-    
-    // STUB: Return stub version
+
     resp->type = MessageType::Response;
     Citadel::PAL::String::Copy(resp->version, config.version, sizeof(resp->version));
 }

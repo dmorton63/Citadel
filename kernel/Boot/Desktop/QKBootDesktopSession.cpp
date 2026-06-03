@@ -9,6 +9,7 @@
 #include "QDrvVmwareSVGA.h"
 #include "QKDrvManager.h"
 #include "PS2/QKDrvPS2Keyboard.h"
+#include "PS2/QKDrvPS2Mouse.h"
 
 #include "QWFramebuffer.h"
 #include "QWWindowManager.h"
@@ -22,8 +23,10 @@
 #include "QKSecureStore.h"
 #include "QKStorageProbe.h"
 #include "QKSecurityCenter.h"
+#include "QSCSecurityCenter.h"
 #include "QFSVFS.h"
 #include "QFSFile.h"
+#include "QFSVolumeManager.h"
 
 #include "QNetDHCP.h"
 #include "QNetStack.h"
@@ -40,46 +43,12 @@
 namespace
 {
     static QK::Boot::Desktop::FLogFn g_Log = nullptr;
-    static constexpr const char *kOwnerMarkerPath = "/system/OWNER.ENR";
-    static constexpr const char *kOwnerMarkerPathLegacy = "/system/owner.enrolled";
-    static constexpr const char *kOwnerInfoPath = "/system/OWNER.INF";
 
     static void secureZero(void *ptr, QC::usize len)
     {
         volatile QC::u8 *p = reinterpret_cast<volatile QC::u8 *>(ptr);
         while (len--)
             *p++ = 0;
-    }
-
-    static bool TryWriteBypassOwnerMarker(const char *username)
-    {
-        QFS::VFS &vfs = QFS::VFS::instance();
-        if (!vfs.exists("/system"))
-            (void)vfs.createDir("/system");
-
-        {
-            QFS::File *f = vfs.open(kOwnerMarkerPath, QFS::OpenMode::Write | QFS::OpenMode::Create | QFS::OpenMode::Truncate);
-            if (!f)
-                return false;
-            const char *marker = "owner_enrolled=1\n";
-            (void)f->write(marker, QC::String::strlen(marker));
-            vfs.close(f);
-        }
-
-        {
-            QFS::File *f = vfs.open(kOwnerInfoPath, QFS::OpenMode::Write | QFS::OpenMode::Create | QFS::OpenMode::Truncate);
-            if (!f)
-                return false;
-            const char *prefix = "username=";
-            (void)f->write(prefix, QC::String::strlen(prefix));
-            if (username)
-                (void)f->write(username, QC::String::strlen(username));
-            const char *newline = "\n";
-            (void)f->write(newline, 1);
-            vfs.close(f);
-        }
-
-        return true;
     }
 
     static bool PromptSecretLine(const char *prompt, char *out, QC::usize outCap)
@@ -93,7 +62,7 @@ namespace
         // serial spam if the underlying read reports transient false.
         for (;;)
         {
-            if (QK::Console::readLineBlocking(out, outCap, false))
+            if (QK::Console::readLineBlocking(out, outCap, true))
                 return true;
         }
     }
@@ -139,13 +108,23 @@ namespace
     static void EnsureNonTpmSecureStoreUnlocked()
     {
         if (QK::SecureStore::tpm_present())
+        {
+            QK::Console::write("SecureStore: anchor=tpm\r\n");
             return;
+        }
 
         constexpr const char *kKdfKey = "WRAPKEY.KDF";
         constexpr const char *kPlainKey = "WRAPKEY.BIN";
 
         const bool hasKdf = QK::SecureStore::exists(kKdfKey);
         const bool hasPlain = QK::SecureStore::exists(kPlainKey);
+
+        if (hasKdf)
+            QK::Console::write("SecureStore: anchor=recovery\r\n");
+        else if (hasPlain)
+            QK::Console::write("SecureStore: anchor=legacy-plain\r\n");
+        else
+            QK::Console::write("SecureStore: anchor=recovery-bootstrap\r\n");
 
         char a[96];
         char b[96];
@@ -186,13 +165,16 @@ namespace
                 if (!PromptSecretLine("Set recovery code: ", a, sizeof(a)))
                     continue;
                 if (!PromptSecretLine("Confirm recovery code: ", b, sizeof(b)))
+                {
+                    secureZero(a, sizeof(a));
                     continue;
+                }
 
                 if (QC::String::strcmp(a, b) != 0)
                 {
-                    QK::Console::write("Codes did not match. Try again.\r\n");
                     secureZero(a, sizeof(a));
                     secureZero(b, sizeof(b));
+                    QK::Console::write("Recovery codes did not match. Try again.\r\n");
                     continue;
                 }
 
@@ -209,15 +191,15 @@ namespace
             }
         }
 
-        QK::Console::write("\r\nEnter recovery code to unlock SecureStore: ");
         if (tryUnlockWithCmdlineRecovery())
             return;
 
         for (;;)
         {
-            if (!QK::Console::readLineBlocking(a, sizeof(a), false))
+            if (!PromptLine("\r\nEnter recovery code to unlock SecureStore: ", a, sizeof(a)))
                 continue;
 
+            QK::Console::write("Unlocking SecureStore... Please wait...\r\n");
             const QC::Status st = QK::SecureStore::nonTpmUnlockOrInitializeWrapKey(a);
             secureZero(a, sizeof(a));
 
@@ -234,110 +216,158 @@ namespace
     static void RunPreDesktopOwnerGate()
     {
         auto &sc = QK::SecurityCenter::instance();
-
-        if (sc.bypassEnabled() &&
-            !sc.ownerIsEnrolled() &&
-            (QFS::VFS::instance().exists(kOwnerMarkerPath) || QFS::VFS::instance().exists(kOwnerMarkerPathLegacy)))
+        for (;;)
         {
-            QK::Console::write("Owner marker detected in BYPASS mode; skipping pre-desktop enrollment gate.\r\n");
-            return;
-        }
-
-        if (!sc.ownerIsEnrolled())
-        {
-            QK::Console::write("\r\nOwner enrollment required before desktop startup.\r\n");
-            char user[48];
-            char passA[96];
-            char passB[96];
-            for (;;)
+            if (!sc.ownerIsEnrolled())
             {
-                QC::String::memset(user, 0, sizeof(user));
-                QC::String::memset(passA, 0, sizeof(passA));
-                QC::String::memset(passB, 0, sizeof(passB));
-
-                if (!PromptLine("Owner username: ", user, sizeof(user)))
-                    continue;
-                if (!PromptSecretLine("Owner password: ", passA, sizeof(passA)))
-                    continue;
-                if (!PromptSecretLine("Confirm password: ", passB, sizeof(passB)))
-                    continue;
-
-                if (!user[0])
+                QK::Console::write("\r\nOwner enrollment required before desktop startup.\r\n");
+                char user[48];
+                char passA[96];
+                char passB[96];
+                bool restartGate = false;
+                for (;;)
                 {
-                    QK::Console::write("Username cannot be empty. Try again.\r\n");
-                    continue;
-                }
+                    QC::String::memset(user, 0, sizeof(user));
+                    QC::String::memset(passA, 0, sizeof(passA));
+                    QC::String::memset(passB, 0, sizeof(passB));
 
-                if (!passA[0])
-                {
-                    QK::Console::write("Password cannot be empty. Try again.\r\n");
-                    continue;
-                }
+                    if (!PromptLine("Owner username: ", user, sizeof(user)))
+                        continue;
+                    if (!PromptSecretLine("Owner password: ", passA, sizeof(passA)))
+                        continue;
+                    if (!PromptSecretLine("Confirm password: ", passB, sizeof(passB)))
+                        continue;
 
-                if (QC::String::strcmp(passA, passB) != 0)
-                {
-                    QK::Console::write("Passwords did not match. Try again.\r\n");
-                    continue;
-                }
-
-                const QC::Status st = sc.ownerEnroll(user, passA);
-                secureZero(passA, sizeof(passA));
-                secureZero(passB, sizeof(passB));
-
-                if (st == QC::Status::Success)
-                {
-                    QK::Console::write("Owner enrolled.\r\n");
-                    char recoveryCode[48];
-                    QC::String::memset(recoveryCode, 0, sizeof(recoveryCode));
-                    if (sc.consumePendingInstallRecoveryCode(recoveryCode) == QC::Status::Success)
+                    if (!user[0])
                     {
-                        QK::Console::write("One-time recovery code (displayed once): ");
-                        QK::Console::write(recoveryCode);
-                        QK::Console::write("\r\nStore it offline before continuing.\r\n");
-                        secureZero(recoveryCode, sizeof(recoveryCode));
+                        QK::Console::write("Username cannot be empty. Try again.\r\n");
+                        continue;
                     }
-                    break;
+
+                    if (!passA[0])
+                    {
+                        QK::Console::write("Password cannot be empty. Try again.\r\n");
+                        continue;
+                    }
+
+                    if (QC::String::strcmp(passA, passB) != 0)
+                    {
+                        QK::Console::write("Passwords did not match. Try again.\r\n");
+                        continue;
+                    }
+
+                    const QC::Status st = sc.ownerEnroll(user, passA, true);
+                    secureZero(passA, sizeof(passA));
+                    secureZero(passB, sizeof(passB));
+
+                    if (st == QC::Status::Success)
+                    {
+                        QK::Console::write("Owner enrolled and unlocked.\r\n");
+                        char recoveryCode[48];
+                        QC::String::memset(recoveryCode, 0, sizeof(recoveryCode));
+                        const QC::Status recoverySt = sc.consumePendingInstallRecoveryCode(recoveryCode);
+                        if (recoverySt == QC::Status::Success)
+                        {
+                            QK::Console::write("One-time recovery code (displayed once): ");
+                            QK::Console::write(recoveryCode);
+                            QK::Console::write("\r\nStore it offline before continuing.\r\n");
+                            secureZero(recoveryCode, sizeof(recoveryCode));
+                        }
+                        else if (recoverySt == QC::Status::Busy)
+                        {
+                            QK::Console::write("Recovery code generation deferred for boot-time enrollment.\r\n");
+                        }
+                        QK::Console::write("Starting Desktop ... Please wait...\r\n");
+                        return;
+                    }
+
+                    if (st == QC::Status::Busy)
+                    {
+                        char existingUser[48];
+                        QC::String::memset(existingUser, 0, sizeof(existingUser));
+                        if (sc.getEnrolledOwnerUsername(existingUser, sizeof(existingUser)) == QC::Status::Success && existingUser[0] != '\0')
+                        {
+                            QK::Console::write("Owner record already exists for username: ");
+                            QK::Console::write(existingUser);
+                            QK::Console::write("\r\nEnrollment did not use the credentials just entered; switching to unlock for the stored owner.\r\n");
+                            break;
+                        }
+
+                        QK::Console::write("Owner state is inconsistent: enrollment reported an existing owner, but the credential record is unreadable.\r\n");
+                        char ownerSummary[384];
+                        QC::String::memset(ownerSummary, 0, sizeof(ownerSummary));
+                        sc.debugDescribeOwnerRecord(ownerSummary, sizeof(ownerSummary));
+                        QK::Console::write("Owner record debug: ");
+                        QK::Console::write(ownerSummary);
+                        QK::Console::write("\r\n");
+                        QK::Console::write("Restarting owner gate from enrollment.\r\n");
+                        restartGate = true;
+                        break;
+                    }
+
+                    if (sc.bypassEnabled())
+                    {
+                        QK::Console::write("Enrollment unavailable in BYPASS mode; continuing boot without owner enrollment.\r\n");
+                        return;
+                    }
+
+                    QK::Console::write("Enrollment failed (status=");
+                    QK::Console::write(statusText(st));
+                    QK::Console::write("). Try again.\r\n");
                 }
 
-                if ((st == QC::Status::NotSupported || st == QC::Status::InvalidParam) && sc.bypassEnabled())
-                {
-                    if (TryWriteBypassOwnerMarker(user))
-                        QK::Console::write("Owner marker saved for BYPASS mode.\r\n");
-                    else
-                        QK::Console::write("Warning: failed to save BYPASS owner marker.\r\n");
-
-                    QK::Console::write("Enrollment unavailable in BYPASS mode; continuing boot without owner enrollment.\r\n");
-                    break;
-                }
-
-                QK::Console::write("Enrollment failed (status=");
-                QK::Console::write(statusText(st));
-                QK::Console::write("). Try again.\r\n");
+                if (restartGate)
+                    continue;
             }
-        }
 
-        if (!sc.bypassEnabled() && !sc.ownerUnlocked())
-        {
+            if (sc.bypassEnabled() || sc.ownerUnlocked())
+                return;
+
+            if (!sc.ownerIsEnrolled())
+            {
+                QK::Console::write("Owner credential record is not readable; returning to enrollment.\r\n");
+                continue;
+            }
+
             QK::Console::write("\r\nOwner unlock required before desktop startup.\r\n");
-            char user[48];
+            char storedUser[48];
+            QC::String::memset(storedUser, 0, sizeof(storedUser));
+            const QC::Status storedUserSt = sc.getEnrolledOwnerUsername(storedUser, sizeof(storedUser));
+            const bool haveStoredUser = (storedUserSt == QC::Status::Success && storedUser[0] != '\0');
+            if (haveStoredUser)
+            {
+                QK::Console::write("Stored owner username: ");
+                QK::Console::write(storedUser);
+                QK::Console::write("\r\n");
+            }
+
             char pass[96];
+            bool restartGate = false;
             for (;;)
             {
-                QC::String::memset(user, 0, sizeof(user));
                 QC::String::memset(pass, 0, sizeof(pass));
 
-                if (!PromptLine("Owner username: ", user, sizeof(user)))
-                    continue;
+                const char *unlockUser = storedUser;
+                char enteredUser[48];
+                QC::String::memset(enteredUser, 0, sizeof(enteredUser));
+
+                if (!haveStoredUser)
+                {
+                    if (!PromptLine("Owner username: ", enteredUser, sizeof(enteredUser)))
+                        continue;
+                    unlockUser = enteredUser;
+                }
                 if (!PromptSecretLine("Owner password: ", pass, sizeof(pass)))
                     continue;
 
-                const QC::Status st = sc.ownerUnlock(user, pass);
+                const QC::Status st = sc.ownerUnlock(unlockUser, pass, false);
                 secureZero(pass, sizeof(pass));
 
                 if (st == QC::Status::Success)
                 {
                     QK::Console::write("Owner unlocked.\r\n");
-                    break;
+                    QK::Console::write("Starting Desktop ... Please wait...\r\n");
+                    return;
                 }
 
                 if (st == QC::Status::Timeout)
@@ -346,8 +376,25 @@ namespace
                     continue;
                 }
 
-                QK::Console::write("Unlock denied. Try again.\r\n");
+                if (st == QC::Status::NotFound)
+                {
+                    QK::Console::write("Owner credential record disappeared or is unreadable; returning to enrollment.\r\n");
+                    restartGate = true;
+                    break;
+                }
+
+                QK::Console::write("Unlock denied (status=");
+                QK::Console::write(statusText(st));
+                if (haveStoredUser && st == QC::Status::Error)
+                {
+                    QK::Console::write(", username=");
+                    QK::Console::write(storedUser);
+                }
+                QK::Console::write("). Try again.\r\n");
             }
+
+            if (restartGate)
+                continue;
         }
     }
 
@@ -504,12 +551,250 @@ namespace
     static bool g_prevPosValid = false;
     static QC::i32 g_prevX = 0;
     static QC::i32 g_prevY = 0;
+    static bool g_primaryMouseStateValid = false;
+    static QC::i32 g_primaryMouseX = 0;
+    static QC::i32 g_primaryMouseY = 0;
+    static QC::u8 g_primaryMouseButtons = 0;
     static volatile bool g_stopDesktopRequested = false;
     static bool g_backspaceRepeatArmed = false;
     static QC::u64 g_backspaceRepeatNextMs = 0;
+    static QC::u64 g_lastPrimaryKeyboardReportMs = 0;
+    static QC::u64 g_lastPrimaryMouseReportMs = 0;
 
     static constexpr QC::u64 kBackspaceRepeatInitialDelayMs = 400;
     static constexpr QC::u64 kBackspaceRepeatIntervalMs = 33;
+    static constexpr QC::u64 kPs2KeyboardFallbackSilenceMs = 250;
+    static constexpr QC::u64 kPs2MouseFallbackSilenceMs = 16;
+
+    static void armBackspaceRepeat(bool pressed);
+    static void logInt(QC::i32 value);
+
+    static void logBootMetric(const char *label, QC::u64 startMs)
+    {
+        if (!g_Log)
+            return;
+
+        g_Log("BOOTMETRIC ");
+        g_Log(label);
+        g_Log("=");
+        const QC::u64 elapsed = QDrv::Timer::instance().milliseconds() - startMs;
+        logInt(static_cast<QC::i32>(elapsed > 0x7fffffffULL ? 0x7fffffff : elapsed));
+        g_Log("ms\r\n");
+    }
+
+    static bool shouldUsePs2KeyboardFallback()
+    {
+        const QC::u64 nowMs = QDrv::Timer::instance().milliseconds();
+        return g_lastPrimaryKeyboardReportMs == 0 ||
+               nowMs >= (g_lastPrimaryKeyboardReportMs + kPs2KeyboardFallbackSilenceMs);
+    }
+
+    static bool shouldUsePs2MouseFallback()
+    {
+        const QC::u64 nowMs = QDrv::Timer::instance().milliseconds();
+        return g_lastPrimaryMouseReportMs == 0 ||
+               nowMs >= (g_lastPrimaryMouseReportMs + kPs2MouseFallbackSilenceMs);
+    }
+
+    static void dispatchDesktopKeyboardReport(const QKDrv::KeyboardReport &rep,
+                                              bool markPrimarySource)
+    {
+        if (markPrimarySource)
+            g_lastPrimaryKeyboardReportMs = QDrv::Timer::instance().milliseconds();
+
+        QKDrv::PS2::KeyEvent evt;
+        evt.key = static_cast<QKDrv::PS2::Key>(rep.scancode);
+        evt.pressed = rep.pressed;
+
+        evt.shift = (rep.modifiers & 0x01) != 0;
+        evt.ctrl = (rep.modifiers & 0x02) != 0;
+        evt.alt = (rep.modifiers & 0x04) != 0;
+        const bool caps = (rep.modifiers & 0x08) != 0;
+        evt.character = keyToChar(evt.key, evt.shift, caps);
+
+        if (evt.key == QKDrv::PS2::Key::Backspace)
+            armBackspaceRepeat(evt.pressed);
+
+        if (QK::Console::inputEnabled())
+        {
+            QK::Console::handleKeyEvent(evt);
+            return;
+        }
+
+        auto &eventMgr = QK::Event::EventManager::instance();
+
+        QK::Event::Modifiers mods = QK::Event::Modifiers::None;
+        if (evt.shift)
+            mods = mods | QK::Event::Modifiers::Shift;
+        if (evt.ctrl)
+            mods = mods | QK::Event::Modifiers::Ctrl;
+        if (evt.alt)
+            mods = mods | QK::Event::Modifiers::Alt;
+
+        eventMgr.postKeyEvent(
+            evt.pressed ? QK::Event::Type::KeyDown : QK::Event::Type::KeyUp,
+            static_cast<QC::u8>(evt.key),
+            static_cast<QC::u8>(evt.key),
+            evt.character,
+            mods,
+            false);
+    }
+
+    static void dispatchDesktopMouseReport(const QKDrv::MouseReport &report,
+                                           QKDrv::MouseDriver &sourceMouse,
+                                           bool markPrimarySource)
+    {
+        auto &eventMgr = QK::Event::EventManager::instance();
+        auto &wm = QW::WindowManager::instance();
+        const QC::u64 reportMs = QDrv::Timer::instance().milliseconds();
+
+        const QC::i32 curX = report.isAbsolute ? report.x : sourceMouse.x();
+        const QC::i32 curY = report.isAbsolute ? report.y : sourceMouse.y();
+
+        QC::i32 dx = 0;
+        QC::i32 dy = 0;
+        if (report.isAbsolute)
+        {
+            if (g_prevPosValid)
+            {
+                dx = curX - g_prevX;
+                dy = curY - g_prevY;
+            }
+            g_prevX = curX;
+            g_prevY = curY;
+            g_prevPosValid = true;
+        }
+        else
+        {
+            dx = report.deltaX;
+            dy = report.deltaY;
+        }
+
+        static QC::u32 s_mouseReportCount = 0;
+        static QC::u8 s_prevButtons = 0;
+        ++s_mouseReportCount;
+
+        const bool buttonsChanged = (report.buttons != s_prevButtons);
+        s_prevButtons = report.buttons;
+
+        bool logThis = false;
+        if (buttonsChanged)
+        {
+            logThis = true;
+        }
+        else
+        {
+            logThis = ((s_mouseReportCount % 5000u) == 0u);
+        }
+
+        if (logThis)
+        {
+            g_Log("Mouse report (");
+            g_Log(report.isAbsolute ? "abs" : "rel");
+            g_Log(") pos(");
+            logInt(curX);
+            g_Log(",");
+            logInt(curY);
+            g_Log(") d(");
+            logInt(dx);
+            g_Log(",");
+            logInt(dy);
+            g_Log(") buttons=");
+            logInt(report.buttons);
+            g_Log("\r\n");
+        }
+
+        auto logClick = [&](const char *label)
+        {
+            g_Log(label);
+            g_Log(" at (");
+            logInt(curX);
+            g_Log(", ");
+            logInt(curY);
+            g_Log(") ");
+            g_Log(report.isAbsolute ? "abs" : "rel");
+            g_Log("\r\n");
+        };
+
+        const bool leftBtn = (report.buttons & 0x01) != 0;
+        const bool rightBtn = (report.buttons & 0x02) != 0;
+
+        if (markPrimarySource)
+        {
+            bool primaryActivity = (report.wheel != 0) || buttonsChanged;
+            if (report.isAbsolute)
+            {
+                primaryActivity = primaryActivity || !g_primaryMouseStateValid ||
+                                  curX != g_primaryMouseX || curY != g_primaryMouseY;
+                g_primaryMouseX = curX;
+                g_primaryMouseY = curY;
+            }
+            else
+            {
+                primaryActivity = primaryActivity || dx != 0 || dy != 0;
+            }
+
+            g_primaryMouseButtons = report.buttons;
+            g_primaryMouseStateValid = true;
+
+            if (primaryActivity)
+                g_lastPrimaryMouseReportMs = QDrv::Timer::instance().milliseconds();
+        }
+
+        bool postedMove = false;
+        if (report.isAbsolute || dx != 0 || dy != 0 || buttonsChanged)
+        {
+            wm.noteMouseEventPosted(reportMs);
+            eventMgr.postMouseMove(curX, curY, dx, dy);
+            postedMove = true;
+        }
+
+        if (report.wheel != 0)
+        {
+            if (!postedMove)
+            {
+                wm.noteMouseEventPosted(reportMs);
+                eventMgr.postMouseMove(curX, curY, 0, 0);
+                postedMove = true;
+            }
+            wm.noteMouseEventPosted(reportMs);
+            eventMgr.postMouseScroll(report.wheel, curX, curY);
+        }
+
+        if (leftBtn && !g_prevLeftBtn)
+        {
+            logClick("Left click");
+            wm.noteMouseEventPosted(reportMs);
+            eventMgr.postMouseButton(QK::Event::Type::MouseButtonDown,
+                                     QK::Event::MouseButton::Left,
+                                     curX, curY, QK::Event::Modifiers::None);
+        }
+        if (!leftBtn && g_prevLeftBtn)
+        {
+            wm.noteMouseEventPosted(reportMs);
+            eventMgr.postMouseButton(QK::Event::Type::MouseButtonUp,
+                                     QK::Event::MouseButton::Left,
+                                     curX, curY, QK::Event::Modifiers::None);
+        }
+        if (rightBtn && !g_prevRightBtn)
+        {
+            logClick("Right click");
+            wm.noteMouseEventPosted(reportMs);
+            eventMgr.postMouseButton(QK::Event::Type::MouseButtonDown,
+                                     QK::Event::MouseButton::Right,
+                                     curX, curY, QK::Event::Modifiers::None);
+        }
+        if (!rightBtn && g_prevRightBtn)
+        {
+            wm.noteMouseEventPosted(reportMs);
+            eventMgr.postMouseButton(QK::Event::Type::MouseButtonUp,
+                                     QK::Event::MouseButton::Right,
+                                     curX, curY, QK::Event::Modifiers::None);
+        }
+
+        g_prevLeftBtn = leftBtn;
+        g_prevRightBtn = rightBtn;
+    }
 
     static void armBackspaceRepeat(bool pressed)
     {
@@ -660,9 +945,11 @@ namespace
 
     [[noreturn]] static void enterTerminalOnlyLoop()
     {
+        QK::Console::setSafeFallbackEnabled(true);
         g_Log("Entering console-only startup path (mode: ");
         g_Log(QK::Boot::Config::StartupModeName(QK::Boot::Config::GetStartupMode()));
         g_Log(")\r\n");
+        QK::Console::showPrompt();
 
         while (true)
         {
@@ -761,6 +1048,7 @@ namespace QK::Boot::Desktop
 
         const QC::u32 width = g_State.Width;
         const QC::u32 height = g_State.Height;
+        const QC::u64 inputStartMs = QDrv::Timer::instance().milliseconds();
 
         g_Log("Initializing QWindowing...\r\n");
 
@@ -807,17 +1095,14 @@ namespace QK::Boot::Desktop
 
         // Initialize driver manager (probes USB and PS/2).
         g_Log("Initializing drivers...\r\n");
+        const QC::u64 driversStartMs = QDrv::Timer::instance().milliseconds();
         QKDrv::Manager::instance().setScreenSize(width, height);
         QKDrv::Manager::instance().initialize();
         g_Log("Drivers initialized\r\n");
+        logBootMetric("drivers_init", driversStartMs);
 
         if (!QK::SecurityCenter::instance().initialized())
             QK::SecurityCenter::instance().initialize(QK::Boot::Config::GetSecurityCenterMode());
-
-        EnsureNonTpmSecureStoreUnlocked();
-
-        // Ensure SST exists after /system is mounted from the system volume.
-        (void)QK::SecurityCenter::instance().ensureSst();
 
         // Allow subsystems/commands to pump RX/IO without pulling driver headers into QKernel.
         QK::System::setPumpFn([]()
@@ -827,8 +1112,117 @@ namespace QK::Boot::Desktop
                          QKDrv::Manager::instance().poll();
                      });
 
+        QKStorage::probeLimineModules();
+
+        // Set up keyboard callback so the console works in every startup mode.
+        g_Log("Setting up keyboard...\r\n");
+        auto *kbd = QKDrv::Manager::instance().keyboardDriver();
+        if (!kbd)
+        {
+            g_Log("WARNING: No keyboard driver available\r\n");
+        }
+        else
+        {
+            kbd->setCallback([](const QKDrv::KeyboardReport &rep)
+                             {
+                                 dispatchDesktopKeyboardReport(rep, true);
+                             });
+
+            if (kbd->controllerType() != QKDrv::ControllerType::PS2)
+            {
+                QKDrv::PS2::Keyboard::instance().setCallback([](const QKDrv::KeyboardReport &rep)
+                                                             {
+                                                                 if (!shouldUsePs2KeyboardFallback())
+                                                                     return;
+                                                                 dispatchDesktopKeyboardReport(rep, false);
+                                                             });
+            }
+        }
+        g_Log("Keyboard initialized\r\n");
+
+        // Keep console input enabled through startup gates (owner enrollment/unlock).
+        // We hand keyboard ownership to desktop only after the pre-desktop gate succeeds.
+        QK::Console::setInputEnabled(true);
+
+        EnsureNonTpmSecureStoreUnlocked();
+
+        if (QK::SecurityCenter::instance().mode() == QK::SecurityCenter::Mode::Enforce &&
+            !QFS::VolumeManager::instance().isMounted("QFS_SYSTEM"))
+        {
+            g_Log("BootTrust gate: /system volume is not mounted\r\n");
+            g_Log("Switching startup mode to INSTALLER\r\n");
+            QK::Boot::Config::SetStartupMode(QK::Boot::Config::StartupMode::Installer);
+            QK::Console::write("Installer: persistent system volume not found.\r\n");
+            QK::Console::write("Installer: run 'help', then 'admin' twice, then 'sysmount' or 'sysformat'.\r\n");
+            QK::Console::setInputEnabled(true);
+            enterTerminalOnlyLoop();
+        }
+
+        // Ensure SST exists after /system is mounted from the system volume.
+        const QC::u64 ensureSstStartMs = QDrv::Timer::instance().milliseconds();
+        const QC::Status ensureSstSt = QK::SecurityCenter::instance().ensureSst();
+        logBootMetric("ensure_sst", ensureSstStartMs);
+        if (ensureSstSt != QC::Status::Success)
+        {
+            g_Log("BootTrust gate failed: ensureSst did not pass\r\n");
+            g_Log("Switching startup mode to TERMINAL\r\n");
+            QK::Boot::Config::SetStartupMode(QK::Boot::Config::StartupMode::Terminal);
+            QK::Console::write("Security Center: system trust store is not ready.\r\n");
+            QK::Console::write("Security Center: ensureSst status=");
+            QK::Console::write(statusText(ensureSstSt));
+            QK::Console::write("\r\n");
+            QK::Console::write("Security Center: securestore tpm=");
+            QK::Console::write(QK::SecureStore::tpm_present() ? "on" : "off");
+            QK::Console::write(" wrapkey.kdf=");
+            QK::Console::write(QK::SecureStore::exists("WRAPKEY.KDF") ? "yes" : "no");
+            QK::Console::write(" wrapkey.tpm=");
+            QK::Console::write(QK::SecureStore::exists("WRAPKEY.TPM") ? "yes" : "no");
+            QK::Console::write(" sstwrap=");
+            QK::Console::write(QK::SecureStore::exists("SSTWRAP") ? "yes" : "no");
+            QK::Console::write("\r\n");
+            QK::Console::write("Security Center: desktop startup skipped; staying in terminal mode.\r\n");
+            QK::Console::setInputEnabled(true);
+            enterTerminalOnlyLoop();
+        }
+
+        // Mark input initialized even for console-only startup modes so a later
+        // `startx` can safely bring up the window system.
+        g_State.InputInitialized = true;
+
+        // v1 boot trust gate: require TAS/SST-backed SC integrity when enforcement is active.
+        if (QK::SecurityCenter::instance().mode() == QK::SecurityCenter::Mode::Enforce)
+        {
+            const auto sst = QSC::SecurityCenter::instance().sstStatus();
+            if (!sst.available || sst.generation == 0)
+            {
+                g_Log("BootTrust gate failed: TAS/SC integrity check did not pass\r\n");
+                g_Log("Switching startup mode to TERMINAL\r\n");
+                QK::Boot::Config::SetStartupMode(QK::Boot::Config::StartupMode::Terminal);
+                QK::Console::write("Security Center: boot trust gate did not pass.\r\n");
+                QK::Console::write("Security Center: desktop startup skipped; staying in terminal mode.\r\n");
+                QK::Console::setInputEnabled(true);
+                enterTerminalOnlyLoop();
+            }
+        }
+
+        if (QK::Boot::Config::GetStartupMode() != QK::Boot::Config::StartupMode::Desktop)
+        {
+            g_Log("Startup mode ");
+            g_Log(QK::Boot::Config::StartupModeName(QK::Boot::Config::GetStartupMode()));
+            g_Log(" selected - skipping desktop bring-up\r\n");
+            enterTerminalOnlyLoop();
+        }
+
+        // Pre-desktop owner registration/login gate: enrollment/unlock must complete
+        // before desktop initialization.
+        RunPreDesktopOwnerGate();
+        // Do not emit a permanent BOOTMETRIC here: this interval includes human typing time,
+        // so it is useful for one-off diagnosis but misleading as a stable boot metric.
+
         // Best-effort DHCPv4 (bounded wait); falls back to manual `ip set`.
+        // Defer it until after the owner gate so the boot password prompt appears promptly.
         g_Log("Attempting DHCPv4...\r\n");
+        const QC::u64 dhcpStartMs = QDrv::Timer::instance().milliseconds();
         {
             QNet::DHCPv4Client dhcp;
             if (dhcp.begin() == QC::Status::Success)
@@ -878,97 +1272,12 @@ namespace QK::Boot::Desktop
                 g_Log("DHCPv4 skipped (no NIC/MAC or UDP bind failed)\r\n");
             }
         }
-
-        QKStorage::probeLimineModules();
-
-        // Set up keyboard callback so the console works in every startup mode.
-        g_Log("Setting up keyboard...\r\n");
-        auto *kbd = QKDrv::Manager::instance().keyboardDriver();
-        if (!kbd)
-        {
-            g_Log("WARNING: No keyboard driver available\r\n");
-        }
-        else
-        {
-            kbd->setCallback([](const QKDrv::KeyboardReport &rep)
-                             {
-                QKDrv::PS2::KeyEvent evt;
-                evt.key = static_cast<QKDrv::PS2::Key>(rep.scancode);
-                evt.pressed = rep.pressed;
-
-                evt.shift = (rep.modifiers & 0x01) != 0;
-                evt.ctrl = (rep.modifiers & 0x02) != 0;
-                evt.alt = (rep.modifiers & 0x04) != 0;
-                const bool caps = (rep.modifiers & 0x08) != 0;
-                evt.character = keyToChar(evt.key, evt.shift, caps);
-
-                if (evt.key == QKDrv::PS2::Key::Backspace)
-                    armBackspaceRepeat(evt.pressed);
-
-                // Keyboard routing is controlled by the console input enable flag.
-                // This lets TERMINAL startup mode hand off to the desktop via `startx`
-                // without mutating the configured startup mode.
-                if (QK::Console::inputEnabled())
-                {
-                    QK::Console::handleKeyEvent(evt);
-                    return;
-                }
-
-                auto &eventMgr = QK::Event::EventManager::instance();
-
-                QK::Event::Modifiers mods = QK::Event::Modifiers::None;
-                if (evt.shift)
-                    mods = mods | QK::Event::Modifiers::Shift;
-                if (evt.ctrl)
-                    mods = mods | QK::Event::Modifiers::Ctrl;
-                if (evt.alt)
-                    mods = mods | QK::Event::Modifiers::Alt;
-
-                eventMgr.postKeyEvent(
-                    evt.pressed ? QK::Event::Type::KeyDown : QK::Event::Type::KeyUp,
-                    static_cast<QC::u8>(evt.key),
-                    static_cast<QC::u8>(evt.key),
-                    evt.character,
-                    mods,
-                    false); });
-        }
-        g_Log("Keyboard initialized\r\n");
-
-        // Keep console input enabled through startup gates (owner enrollment/unlock).
-        // We hand keyboard ownership to desktop only after the pre-desktop gate succeeds.
-        QK::Console::setInputEnabled(true);
-
-        // Mark input initialized even for console-only startup modes so a later
-        // `startx` can safely bring up the window system.
-        g_State.InputInitialized = true;
-
-        // v1 boot trust gate: require TAS/SST-backed SC integrity when enforcement is active.
-        if (QK::SecurityCenter::instance().mode() == QK::SecurityCenter::Mode::Enforce)
-        {
-            const QC::Status trustSt = QK::SecurityCenter::instance().checkBootTrustGate();
-            if (trustSt != QC::Status::Success)
-            {
-                g_Log("BootTrust gate failed: TAS/SC integrity check did not pass\r\n");
-                g_Log("Entering terminal-only safe path\r\n");
-                QK::Console::setInputEnabled(true);
-                enterTerminalOnlyLoop();
-            }
-        }
-
-        if (QK::Boot::Config::GetStartupMode() != QK::Boot::Config::StartupMode::Desktop)
-        {
-            g_Log("Startup mode ");
-            g_Log(QK::Boot::Config::StartupModeName(QK::Boot::Config::GetStartupMode()));
-            g_Log(" selected - skipping desktop bring-up\r\n");
-            enterTerminalOnlyLoop();
-        }
-
-        // Pre-desktop owner registration/login gate: enrollment/unlock must complete
-        // before desktop initialization.
-        RunPreDesktopOwnerGate();
+        logBootMetric("dhcp_wait", dhcpStartMs);
 
         // Desktop now owns keyboard input; keep serial console non-interactive.
         QK::Console::setInputEnabled(false);
+        // Do not emit a permanent BOOTMETRIC for InitializeInput total time because it includes
+        // interactive SecureStore/owner gating and is not a machine-only stage duration.
     }
 
     bool IsPrepared() { return g_State.Prepared; }
@@ -1000,6 +1309,8 @@ namespace QK::Boot::Desktop
         }
         if (g_State.WindowSystemInitialized)
             return;
+
+        const QC::u64 windowSystemStartMs = QDrv::Timer::instance().milliseconds();
 
         QC::u32 width = g_State.Width;
         QC::u32 height = g_State.Height;
@@ -1100,148 +1411,23 @@ namespace QK::Boot::Desktop
         {
             mouseDriver->setCallback([](const QKDrv::MouseReport &report)
                                      {
-                auto *mouse = QKDrv::Manager::instance().mouseDriver();
-                if (!mouse)
-                    return;
+                                         auto *mouse = QKDrv::Manager::instance().mouseDriver();
+                                         if (!mouse)
+                                             return;
+                                         dispatchDesktopMouseReport(report, *mouse, true);
+                                     });
 
-                auto &eventMgr = QK::Event::EventManager::instance();
-
-                // For absolute devices, report.x/y are screen coordinates.
-                // For relative devices, report.x/y are absolute cursor position; deltaX/deltaY are movement.
-                const QC::i32 curX = report.isAbsolute ? report.x : mouse->x();
-                const QC::i32 curY = report.isAbsolute ? report.y : mouse->y();
-
-                QC::i32 dx = 0;
-                QC::i32 dy = 0;
-                if (report.isAbsolute)
-                {
-                    if (g_prevPosValid)
-                    {
-                        dx = curX - g_prevX;
-                        dy = curY - g_prevY;
-                    }
-                    g_prevX = curX;
-                    g_prevY = curY;
-                    g_prevPosValid = true;
-                }
-                else
-                {
-                    dx = report.deltaX;
-                    dy = report.deltaY;
-                }
-
-                // Movement telemetry is useful for driver bring-up, but it's very noisy.
-                // Log:
-                //  - always when buttons change
-                //  - periodically on movement (dx/dy != 0)
-                //  - and a slow heartbeat even when idle
-                static QC::u32 s_mouseReportCount = 0;
-                static QC::u8 s_prevButtons = 0;
-                ++s_mouseReportCount;
-
-                const bool buttonsChanged = (report.buttons != s_prevButtons);
-                s_prevButtons = report.buttons;
-
-                const bool moved = (dx != 0) || (dy != 0);
-                bool logThis = false;
-                if (buttonsChanged)
-                {
-                    logThis = true;
-                }
-                else
-                {
-                    // Slow heartbeat so we know input is still flowing.
-                    // Avoid logging movement by default; serial I/O here directly impacts UI latency.
-                    logThis = ((s_mouseReportCount % 5000u) == 0u);
-                }
-
-                if (logThis)
-                {
-                    g_Log("Mouse report (");
-                    g_Log(report.isAbsolute ? "abs" : "rel");
-                    g_Log(") pos(");
-                    logInt(curX);
-                    g_Log(",");
-                    logInt(curY);
-                    g_Log(") d(");
-                    logInt(dx);
-                    g_Log(",");
-                    logInt(dy);
-                    g_Log(") buttons=");
-                    logInt(report.buttons);
-                    g_Log("\r\n");
-                }
-
-                auto logClick = [&](const char *label)
-                {
-                    // NOTE: A click packet often has dx/dy = 0; that's normal for relative mice.
-                    g_Log(label);
-                    g_Log(" at (");
-                    logInt(curX);
-                    g_Log(", ");
-                    logInt(curY);
-                    g_Log(") ");
-                    g_Log(report.isAbsolute ? "abs" : "rel");
-                    g_Log("\r\n");
-                };
-
-                bool leftBtn = report.buttons & 0x01;
-                bool rightBtn = report.buttons & 0x02;
-
-                // Post mouse move event first so hover state is up-to-date.
-                // Always post the current cursor position.
-                // NOTE: For our USB mouse path, the driver already maintains a clamped
-                // absolute cursor position even for relative devices (curX/curY). Windowing
-                // hit-testing relies on x/y being meaningful.
-                bool postedMove = false;
-                if (moved || buttonsChanged)
-                {
-                    eventMgr.postMouseMove(curX, curY, dx, dy);
-                    postedMove = true;
-                }
-
-                // Scroll wheel (mouse wheel) -> mouse scroll event.
-                // Ensure hover is current even if the wheel moved without pointer movement.
-                if (report.wheel != 0)
-                {
-                    if (!postedMove)
-                    {
-                        eventMgr.postMouseMove(curX, curY, 0, 0);
-                        postedMove = true;
-                    }
-                    eventMgr.postMouseScroll(report.wheel, curX, curY);
-                }
-
-                // Check for button state changes.
-                if (leftBtn && !g_prevLeftBtn)
-                {
-                    logClick("Left click");
-                    eventMgr.postMouseButton(QK::Event::Type::MouseButtonDown,
-                                             QK::Event::MouseButton::Left,
-                                             curX, curY, QK::Event::Modifiers::None);
-                }
-                if (!leftBtn && g_prevLeftBtn)
-                {
-                    eventMgr.postMouseButton(QK::Event::Type::MouseButtonUp,
-                                             QK::Event::MouseButton::Left,
-                                             curX, curY, QK::Event::Modifiers::None);
-                }
-                if (rightBtn && !g_prevRightBtn)
-                {
-                    logClick("Right click");
-                    eventMgr.postMouseButton(QK::Event::Type::MouseButtonDown,
-                                             QK::Event::MouseButton::Right,
-                                             curX, curY, QK::Event::Modifiers::None);
-                }
-                if (!rightBtn && g_prevRightBtn)
-                {
-                    eventMgr.postMouseButton(QK::Event::Type::MouseButtonUp,
-                                             QK::Event::MouseButton::Right,
-                                             curX, curY, QK::Event::Modifiers::None);
-                }
-
-                g_prevLeftBtn = leftBtn;
-                g_prevRightBtn = rightBtn; });
+            if (mouseDriver->controllerType() != QKDrv::ControllerType::PS2)
+            {
+                QKDrv::PS2::Mouse::instance().setCallback([](const QKDrv::MouseReport &report)
+                                                          {
+                                                              if (!shouldUsePs2MouseFallback())
+                                                                  return;
+                                                              dispatchDesktopMouseReport(report,
+                                                                                         QKDrv::PS2::Mouse::instance(),
+                                                                                         false);
+                                                          });
+            }
         }
         g_Log("Mouse configured\r\n");
 
@@ -1257,6 +1443,7 @@ namespace QK::Boot::Desktop
 
         // Create desktop using QDDesktop module.
         g_State.WindowSystemInitialized = true;
+        logBootMetric("window_system_init", windowSystemStartMs);
     }
 
     [[noreturn]] void InitializeDesktopAndRunLoop()
@@ -1280,10 +1467,12 @@ namespace QK::Boot::Desktop
         {
             const QC::u32 width = g_State.Width;
             const QC::u32 height = g_State.Height;
+            const QC::u64 desktopInitStartMs = QDrv::Timer::instance().milliseconds();
 
             g_Log("Creating desktop...\r\n");
             g_Desktop.initialize(width, height);
             g_Log("Desktop initialized\r\n");
+            logBootMetric("desktop_init", desktopInitStartMs);
 
             // Trigger an initial paint via the normal window invalidation path.
             // Avoid repainting the entire desktop every loop (can add input latency).
@@ -1293,8 +1482,10 @@ namespace QK::Boot::Desktop
             }
 
             // Initial render.
+            const QC::u64 firstRenderStartMs = QDrv::Timer::instance().milliseconds();
             QW::WindowManager::instance().render();
             g_Log("Initial render complete!\r\n");
+            logBootMetric("desktop_first_render", firstRenderStartMs);
 
             // Register keyboard listener for Ctrl+Q shutdown.
             g_CtrlQListener.categoryMask = QK::Event::Category::Input;
@@ -1361,7 +1552,7 @@ namespace QK::Boot::Desktop
             // high-frequency mouse reports.
             for (;;)
             {
-                const QC::usize processed = eventMgr.processEvents(128);
+                const QC::usize processed = eventMgr.processEvents(16);
 
                 if (wm.needsRender())
                 {

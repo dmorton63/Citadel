@@ -29,15 +29,21 @@ namespace QFS
         FileSystemKind fsKind;
         BlockDevice *device;
         bool autoMount = true;
+        const char *sourceKind = nullptr;
+        const char *sourceDetail = nullptr;
+        bool persistent = false;
     };
 
     struct VolumeInfo
     {
         char name[32] = {0};
         char mountPath[128] = {0};
+        char sourceKind[24] = {0};
+        char sourceDetail[64] = {0};
         FileSystemKind fsKind = FileSystemKind::FAT_AUTO;
         bool mounted = false;
         bool autoMount = false;
+        bool persistent = false;
         bool mountFailed = false;
         QC::u32 mountFailCount = 0;
     };
@@ -62,11 +68,14 @@ namespace QFS
         {
             char name[32];
             char mountPath[128];
+            char sourceKind[24];
+            char sourceDetail[64];
             FileSystemKind fsKind;
             BlockDevice *device;
             FileSystem *fs;
             bool mounted;
             bool autoMount;
+            bool persistent;
             bool mountFailed;
             QC::u32 mountFailCount;
         };

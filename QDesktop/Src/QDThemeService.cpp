@@ -1,5 +1,7 @@
 #include "QDThemeService.h"
 
+#include "QDColorUtils.h"
+#include "QCQLEngine.h"
 #include "QCString.h"
 #include "QWStyleTypes.h"
 
@@ -135,6 +137,93 @@ namespace QD
             if (definition && definition->isObject())
                 applyAssetOverridesFromObject(definition, assets);
         }
+
+        QCQL::Cell makeTextCell(const char *text)
+        {
+            QCQL::Cell cell{};
+            cell.type = QCQL::ColumnType::Text;
+            if (!text)
+                return cell;
+
+            const QC::usize len = QC::String::strlen(text);
+            for (QC::usize i = 0; i < len; ++i)
+                cell.bytes.push_back(static_cast<QC::u8>(text[i]));
+            return cell;
+        }
+
+        bool copyCellText(const QCQL::Cell &cell, char *dst, QC::usize dstSize)
+        {
+            if (!dst || dstSize == 0 || cell.type != QCQL::ColumnType::Text)
+                return false;
+
+            const QC::usize maxCopy = (cell.bytes.size() < (dstSize - 1))
+                                          ? cell.bytes.size()
+                                          : static_cast<QC::usize>(dstSize - 1);
+            for (QC::usize i = 0; i < maxCopy; ++i)
+                dst[i] = static_cast<char>(cell.bytes[i]);
+            dst[maxCopy] = '\0';
+            return true;
+        }
+
+        bool cellMatchesText(const QCQL::Cell &cell, const char *text)
+        {
+            if (cell.type != QCQL::ColumnType::Text)
+                return false;
+
+            const QC::usize len = text ? QC::String::strlen(text) : 0;
+            if (cell.bytes.size() != len)
+                return false;
+
+            for (QC::usize i = 0; i < len; ++i)
+            {
+                if (cell.bytes[i] != static_cast<QC::u8>(text[i]))
+                    return false;
+            }
+
+            return true;
+        }
+
+        bool applyPaletteToken(Theme &theme, const char *tokenKey, const char *tokenValue)
+        {
+            if (!tokenKey || !tokenValue)
+                return false;
+
+            QC::Color parsed;
+            if (!parseColorString(tokenValue, parsed))
+                return false;
+
+            ThemeColorPalette &palette = theme.colors();
+            if (QC::String::strcmp(tokenKey, "windowBackground") == 0)
+                palette.windowBackground = parsed;
+            else if (QC::String::strcmp(tokenKey, "titleBarGradientStart") == 0)
+                palette.titleBarGradientStart = parsed;
+            else if (QC::String::strcmp(tokenKey, "titleBarGradientEnd") == 0)
+                palette.titleBarGradientEnd = parsed;
+            else if (QC::String::strcmp(tokenKey, "buttonNormal") == 0)
+                palette.buttonNormal = parsed;
+            else if (QC::String::strcmp(tokenKey, "buttonHover") == 0)
+                palette.buttonHover = parsed;
+            else if (QC::String::strcmp(tokenKey, "buttonPressed") == 0)
+                palette.buttonPressed = parsed;
+            else if (QC::String::strcmp(tokenKey, "buttonGlow") == 0)
+                palette.buttonGlow = parsed;
+            else if (QC::String::strcmp(tokenKey, "textPrimary") == 0)
+                palette.textPrimary = parsed;
+            else if (QC::String::strcmp(tokenKey, "textSecondary") == 0)
+                palette.textSecondary = parsed;
+            else if (QC::String::strcmp(tokenKey, "border") == 0)
+                palette.border = parsed;
+            else if (QC::String::strcmp(tokenKey, "shadow") == 0)
+                palette.shadow = parsed;
+            else if (QC::String::strcmp(tokenKey, "accentPrimary") == 0)
+                palette.accentPrimary = parsed;
+            else if (QC::String::strcmp(tokenKey, "accentSecondary") == 0)
+                palette.accentSecondary = parsed;
+            else
+                return false;
+
+            return true;
+        }
     } // namespace
 
     bool ThemeService::loadTheme(const QC::JSON::Value *themeValue, ThemeLoadResult &outResult) const
@@ -183,6 +272,91 @@ namespace QD
         populateStyle(outResult.theme, outResult.package.style);
         populateAssets(outResult.package.id, outResult.package.assets);
         applyAssetOverrides(themeValue, outResult.package.assets);
+        return true;
+    }
+
+    bool ThemeService::loadThemeFromDatabase(const QCQL::Database &database,
+                                             ThemeID themeId,
+                                             ThemeLoadResult &outResult) const
+    {
+        resetResult(outResult);
+
+        const char *themeIdText = themeIdToString(themeId);
+        if (!themeIdText || !*themeIdText)
+            return false;
+
+        outResult.package.id = themeId;
+
+        QCQL::Row themeRow{};
+        const QCQL::Cell keyCell = makeTextCell(themeIdText);
+        const QCQL::Status themeSt =
+            QCQL::Engine::instance().selectRowByPrimaryKeyByName(database, "Themes", keyCell.bytes, themeRow);
+        if (themeSt != QCQL::Status::Success || themeRow.tombstone || themeRow.cells.size() < 2)
+            return false;
+
+        Theme theme{};
+        theme.reset();
+
+        char nameBuf[sizeof(CitadelThemeMetadata::name)] = {};
+        if (copyCellText(themeRow.cells[1], nameBuf, sizeof(nameBuf)) && nameBuf[0] != '\0')
+            theme.setName(nameBuf);
+        else
+            theme.setName(themeIdText);
+
+        QC::u32 themeTokensTableId = 0;
+        if (QCQL::Engine::instance().lookupTableId(database, "ThemeTokens", themeTokensTableId) != QCQL::Status::Success)
+            return false;
+
+        const QCQL::Table *themeTokensTable = nullptr;
+        for (QC::usize i = 0; i < database.tables.size(); ++i)
+        {
+            if (database.tables[i].tableId == themeTokensTableId)
+            {
+                themeTokensTable = &database.tables[i];
+                break;
+            }
+        }
+        if (!themeTokensTable)
+            return false;
+
+        bool sawToken = false;
+        for (QC::usize p = 0; p < themeTokensTable->pages.size(); ++p)
+        {
+            QCQL::Page page{};
+            const QCQL::Status loadSt =
+                QCQL::Engine::instance().loadPage(database, themeTokensTable->pages[p], page);
+            if (loadSt != QCQL::Status::Success)
+                continue;
+
+            for (QC::usize r = 0; r < page.rowOffsets.size(); ++r)
+            {
+                QCQL::Row row{};
+                const QCQL::Status readSt =
+                    QCQL::Engine::instance().readRow(database, themeTokensTable->pages[p], page.rowOffsets[r], row);
+                if (readSt != QCQL::Status::Success || row.tombstone || row.cells.size() < 4)
+                    continue;
+                if (!cellMatchesText(row.cells[1], themeIdText))
+                    continue;
+
+                char tokenKey[48] = {};
+                char tokenValue[16] = {};
+                if (!copyCellText(row.cells[2], tokenKey, sizeof(tokenKey)) ||
+                    !copyCellText(row.cells[3], tokenValue, sizeof(tokenValue)))
+                    continue;
+
+                if (applyPaletteToken(theme, tokenKey, tokenValue))
+                    sawToken = true;
+            }
+        }
+
+        if (!sawToken)
+            return false;
+
+        outResult.loaded = true;
+        outResult.theme = theme;
+        populateMetadata(themeId, outResult.theme, outResult.package.metadata);
+        populateStyle(outResult.theme, outResult.package.style);
+        populateAssets(themeId, outResult.package.assets);
         return true;
     }
 
@@ -414,25 +588,25 @@ namespace QD
     {
         outAssets = CitadelThemeAssets{};
 
-        outAssets.icons.settings = "/system/icons/SETTINGS.PNG";
-        outAssets.icons.terminal = "/system/icons/TERMINAL.PNG";
-        outAssets.icons.folder = "/system/icons/FOLDER.PNG";
-        outAssets.icons.start = "/system/icons/START.PNG";
-        outAssets.icons.shutdown = "/system/icons/svg/power.svg";
+        outAssets.icons.settings = "/ICONS/SETTINGS.PNG";
+        outAssets.icons.terminal = "/ICONS/TERMINAL.PNG";
+        outAssets.icons.folder = "/ICONS/FOLDER.PNG";
+        outAssets.icons.start = "/ICONS/START.PNG";
+        outAssets.icons.shutdown = "/ICONS/svg/power.svg";
 
         switch (themeId)
         {
         case ThemeID::Winter:
-            outAssets.backgrounds.desktopPrimary = "/system/wall/WINTER.PNG";
+            outAssets.backgrounds.desktopPrimary = "/WALL/WINTER.PNG";
             break;
         case ThemeID::Spring:
-            outAssets.backgrounds.desktopPrimary = "/system/wall/SPRING.PNG";
+            outAssets.backgrounds.desktopPrimary = "/WALL/SPRING.PNG";
             break;
         case ThemeID::Summer:
-            outAssets.backgrounds.desktopPrimary = "/system/wall/SUMMER.PNG";
+            outAssets.backgrounds.desktopPrimary = "/WALL/SUMMER.PNG";
             break;
         case ThemeID::Autumn:
-            outAssets.backgrounds.desktopPrimary = "/system/wall/AUTUMN.PNG";
+            outAssets.backgrounds.desktopPrimary = "/WALL/AUTUMN.PNG";
             break;
         default:
             break;

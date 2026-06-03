@@ -135,37 +135,44 @@ namespace QKDrv
             if (key == Key::None)
                 return;
 
-            m_keyStates[static_cast<QC::u8>(key)] = !released;
+            const bool newPressed = !released;
+            const bool wasPressed = m_keyStates[static_cast<QC::u8>(key)];
+            const bool stateChanged = (wasPressed != newPressed);
+
+            m_keyStates[static_cast<QC::u8>(key)] = newPressed;
 
             // Update modifier states
             switch (key)
             {
             case Key::LeftShift:
             case Key::RightShift:
-                m_shiftPressed = !released;
+                m_shiftPressed = newPressed;
                 break;
             case Key::LeftCtrl:
             case Key::RightCtrl:
-                m_ctrlPressed = !released;
+                m_ctrlPressed = newPressed;
                 break;
             case Key::LeftAlt:
             case Key::RightAlt:
-                m_altPressed = !released;
+                m_altPressed = newPressed;
                 break;
             case Key::CapsLock:
-                if (!released)
+                if (stateChanged && newPressed)
                     m_capsLock = !m_capsLock;
                 break;
             default:
                 break;
             }
 
+            if (!stateChanged)
+                return;
+
             // Call generic keyboard callback
             if (m_callback)
             {
                 KeyboardReport report;
                 report.scancode = static_cast<QC::u8>(key);
-                report.pressed = !released;
+                report.pressed = newPressed;
                 report.modifiers = modifiers();
                 m_callback(report);
             }
@@ -175,7 +182,7 @@ namespace QKDrv
             {
                 KeyEvent event;
                 event.key = key;
-                event.pressed = !released;
+                event.pressed = newPressed;
                 event.shift = m_shiftPressed;
                 event.ctrl = m_ctrlPressed;
                 event.alt = m_altPressed;

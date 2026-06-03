@@ -3,9 +3,6 @@
 // QCSQLServiceProtocol.h - Message protocol for QCSQL Database Service
 // Defines request/response messages for inter-service communication
 //
-// STATUS: STUB FILE FOR TESTING
-// Phase 3: Service Integration
-//
 
 #include <cstdint>
 #include <cstddef>
@@ -145,7 +142,7 @@ struct GetDatabaseInfoResponse {
 };
 
 // ============================================================================
-// Helper Functions (STUB)
+// Helper Functions
 // ============================================================================
 
 inline const char* MessageTypeToString(MessageType type) {

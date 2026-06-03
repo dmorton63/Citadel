@@ -1,9 +1,8 @@
 //
-// QCSQLServiceTest.cpp - Quick test program for QCSQL Service stubs
-// Demonstrates message protocol usage
+// QCSQLServiceTest.cpp - Quick test program for QCSQL Service
+// Demonstrates message protocol usage against the selected backend.
 //
-// STATUS: STUB TEST FILE
-// Compile with: g++ -std=c++17 QCSQLService.cpp QCSQLServiceTest.cpp -o test_qcsql
+// Compile with the service and engine sources, for example via build_stubs.sh.
 //
 
 #include "QCSQLService.h"
@@ -14,6 +13,14 @@
 
 using namespace QCQL::Svc;
 using namespace Citadel::PAL;
+
+#if defined(CITADEL_QCSQL_USE_CQL_ENGINE)
+static const char* kBackendLabel = "CQL engine";
+#elif defined(CITADEL_QCSQL_USE_QCQL_ENGINE)
+static const char* kBackendLabel = "QCQL engine";
+#else
+static const char* kBackendLabel = "stub backend";
+#endif
 
 const char* StorageModeToString(StorageMode mode) {
     switch (mode) {
@@ -165,6 +172,7 @@ void TestGetVersion() {
     
     QCSQLService service;
     ServiceConfig config;
+    config.version = nullptr;
     service.Initialize(config);
     
     GetVersionRequest req;
@@ -256,7 +264,7 @@ void TestMultipleMessages() {
 int main() {
     printf("\n");
     printf("╔══════════════════════════════════════════════════╗\n");
-    printf("║  QCSQL Service Stub Test Suite                  ║\n");
+    printf("║  QCSQL Service Test Suite                       ║\n");
     printf("║  Testing Platform Abstraction Layer & Service   ║\n");
     printf("╚══════════════════════════════════════════════════╝\n");
     
@@ -269,7 +277,7 @@ int main() {
     
     PrintSeparator();
     printf("ALL TESTS COMPLETED\n");
-    printf("Note: All operations are STUBS - actual CQL engine not connected\n");
+    printf("Backend: %s\n", kBackendLabel);
     PrintSeparator();
     printf("\n");
     

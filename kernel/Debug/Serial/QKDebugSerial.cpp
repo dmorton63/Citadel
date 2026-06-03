@@ -5,10 +5,61 @@
 namespace
 {
     QK::Debug::Serial::FMirrorCallback GMirrorCallback = nullptr;
+    static constexpr QC::usize GCaptureCapacity = 256u * 1024u;
+    static char GCaptureBuffer[GCaptureCapacity] = {0};
+    static QC::usize GCaptureLength = 0;
+    static bool GCaptureTruncated = false;
 }
 
 namespace QK::Debug::Serial
 {
+    namespace
+    {
+        void appendCapture(const char *message)
+        {
+            if (!message)
+                return;
+
+            while (*message)
+            {
+                if (GCaptureLength + 1 < GCaptureCapacity)
+                {
+                    GCaptureBuffer[GCaptureLength++] = *message;
+                    GCaptureBuffer[GCaptureLength] = '\0';
+                }
+                else
+                {
+                    GCaptureTruncated = true;
+                }
+                ++message;
+            }
+        }
+
+        void writeImpl(const char *message, bool includeMirror)
+        {
+            if (!message)
+            {
+                return;
+            }
+
+            appendCapture(message);
+
+            if (includeMirror && GMirrorCallback)
+            {
+                GMirrorCallback(message);
+            }
+
+            while (*message)
+            {
+                while ((QC::inb(0x3F8 + 5) & 0x20) == 0)
+                {
+                }
+                QC::outb(0x3F8, static_cast<QC::u8>(*message));
+                ++message;
+            }
+        }
+    }
+
     void Init()
     {
         // Initialize COM1 at 0x3F8
@@ -28,24 +79,12 @@ namespace QK::Debug::Serial
 
     void Write(const char *Message)
     {
-        if (!Message)
-        {
-            return;
-        }
+        writeImpl(Message, false);
+    }
 
-        if (GMirrorCallback)
-        {
-            GMirrorCallback(Message);
-        }
-
-        while (*Message)
-        {
-            while ((QC::inb(0x3F8 + 5) & 0x20) == 0)
-            {
-            }
-            QC::outb(0x3F8, static_cast<QC::u8>(*Message));
-            ++Message;
-        }
+    void WriteMirrored(const char *Message)
+    {
+        writeImpl(Message, true);
     }
 
     void WriteInt(QC::i32 Value)
@@ -76,5 +115,20 @@ namespace QK::Debug::Serial
         }
 
         Write(Buffer);
+    }
+
+    const char *CaptureData()
+    {
+        return GCaptureBuffer;
+    }
+
+    QC::usize CaptureSize()
+    {
+        return GCaptureLength;
+    }
+
+    bool CaptureTruncated()
+    {
+        return GCaptureTruncated;
     }
 }

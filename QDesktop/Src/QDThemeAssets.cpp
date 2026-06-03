@@ -120,46 +120,46 @@ namespace QD
             equalsIgnoreCase(token, "/system/icons/svg/power.svg"))
         {
             // Some runtime images ship power.svg but not shutdown.svg/SHUTDOWN.PNG.
-            QC::String::strncpy(out, "/system/icons/svg/power.svg", outCap - 1);
+            QC::String::strncpy(out, "/ICONS/svg/power.svg", outCap - 1);
         }
         else if (equalsIgnoreCase(token, "icons.folder") || equalsIgnoreCase(token, "icon.folder") || equalsIgnoreCase(token, "folder"))
         {
-            QC::String::strncpy(out, "/system/icons/FOLDER.PNG", outCap - 1);
+            QC::String::strncpy(out, "/ICONS/FOLDER.PNG", outCap - 1);
         }
         else if (equalsIgnoreCase(token, "icons.settings") || equalsIgnoreCase(token, "icon.settings") || equalsIgnoreCase(token, "settings"))
         {
-            QC::String::strncpy(out, "/system/icons/SETTINGS.PNG", outCap - 1);
+            QC::String::strncpy(out, "/ICONS/SETTINGS.PNG", outCap - 1);
         }
         else if (equalsIgnoreCase(token, "icons.terminal") || equalsIgnoreCase(token, "icon.terminal") || equalsIgnoreCase(token, "terminal"))
         {
-            QC::String::strncpy(out, "/system/icons/TERMINAL.PNG", outCap - 1);
+            QC::String::strncpy(out, "/ICONS/TERMINAL.PNG", outCap - 1);
         }
         else if (equalsIgnoreCase(token, "icons.start") || equalsIgnoreCase(token, "icon.start") || equalsIgnoreCase(token, "start"))
         {
-            QC::String::strncpy(out, "/system/icons/START.PNG", outCap - 1);
+            QC::String::strncpy(out, "/ICONS/START.PNG", outCap - 1);
         }
         else if (equalsIgnoreCase(token, "icons.shutdown") || equalsIgnoreCase(token, "icon.shutdown") ||
                  equalsIgnoreCase(token, "icons.power") || equalsIgnoreCase(token, "icon.power") ||
                  equalsIgnoreCase(token, "shutdown") || equalsIgnoreCase(token, "power"))
         {
-            QC::String::strncpy(out, "/system/icons/svg/power.svg", outCap - 1);
+            QC::String::strncpy(out, "/ICONS/svg/power.svg", outCap - 1);
         }
         else if (equalsIgnoreCase(token, "backgrounds.winter") || equalsIgnoreCase(token, "background.winter"))
         {
-            QC::String::strncpy(out, "/system/wall/WINTER.PNG", outCap - 1);
+            QC::String::strncpy(out, "/WALL/WINTER.PNG", outCap - 1);
         }
         else if (equalsIgnoreCase(token, "backgrounds.spring") || equalsIgnoreCase(token, "background.spring"))
         {
-            QC::String::strncpy(out, "/system/wall/SPRING.PNG", outCap - 1);
+            QC::String::strncpy(out, "/WALL/SPRING.PNG", outCap - 1);
         }
         else if (equalsIgnoreCase(token, "backgrounds.summer") || equalsIgnoreCase(token, "background.summer"))
         {
-            QC::String::strncpy(out, "/system/wall/SUMMER.PNG", outCap - 1);
+            QC::String::strncpy(out, "/WALL/SUMMER.PNG", outCap - 1);
         }
         else if (equalsIgnoreCase(token, "backgrounds.autumn") || equalsIgnoreCase(token, "background.autumn") ||
                  equalsIgnoreCase(token, "backgrounds.fall") || equalsIgnoreCase(token, "background.fall"))
         {
-            QC::String::strncpy(out, "/system/wall/AUTUMN.PNG", outCap - 1);
+            QC::String::strncpy(out, "/WALL/AUTUMN.PNG", outCap - 1);
         }
         else
         {

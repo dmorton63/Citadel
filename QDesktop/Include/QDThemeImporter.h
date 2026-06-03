@@ -16,6 +16,9 @@ namespace QD
         // Skips rows that already exist (idempotent). Returns the first
         // non-Success, non-AlreadyExists status, or Success.
         static QCQL::Status importBuiltinThemes(QCQL::Database &database);
+
+        // Validates that builtin theme rows can be read back with canonical values.
+        static bool validateBuiltinThemes(const QCQL::Database &database);
     };
 
 } // namespace QD

@@ -2,7 +2,11 @@
 
 #include "QDCommandMessages.h"
 
+#include "QDDesktopDocumentIO.h"
+#include "QDDesktopDocumentValidation.h"
+
 #include "QCCommandRegistry.h"
+#include "QCQLEngine.h"
 #include "QCString.h"
 
 #include "QKCommandCenter.h"
@@ -18,6 +22,8 @@
 
 namespace
 {
+    constexpr const char *CMMS_DB_PATH = "/system/CMMS.QDB";
+
     static void destroyOwnedString(void *p)
     {
         char *s = static_cast<char *>(p);
@@ -55,6 +61,165 @@ namespace
         return ok;
     }
 
+    static const char *skipSpaces(const char *text)
+    {
+        while (text && (*text == ' ' || *text == '\t'))
+            ++text;
+        return text;
+    }
+
+    static bool equalsIgnoreCaseAscii(const char *a, const char *b)
+    {
+        if (!a || !b)
+            return false;
+        while (*a && *b)
+        {
+            char ca = (*a >= 'A' && *a <= 'Z') ? static_cast<char>(*a + 32) : *a;
+            char cb = (*b >= 'A' && *b <= 'Z') ? static_cast<char>(*b + 32) : *b;
+            if (ca != cb)
+                return false;
+            ++a;
+            ++b;
+        }
+        return *a == '\0' && *b == '\0';
+    }
+
+    static bool readToken(const char *&text, char *out, QC::usize outSize)
+    {
+        if (!out || outSize == 0)
+            return false;
+        out[0] = '\0';
+        text = skipSpaces(text);
+        if (!text || !*text)
+            return false;
+
+        QC::usize i = 0;
+        while (*text && *text != ' ' && *text != '\t')
+        {
+            if (i + 1 < outSize)
+                out[i++] = *text;
+            ++text;
+        }
+        out[i] = '\0';
+        return i > 0;
+    }
+
+    static void appendText(char *dst, QC::usize dstSize, const char *text)
+    {
+        if (!dst || dstSize == 0 || !text)
+            return;
+        const QC::usize used = QC::String::strlen(dst);
+        if (used + 1 >= dstSize)
+            return;
+        QC::String::strncpy(dst + used, text, dstSize - used - 1);
+        dst[dstSize - 1] = '\0';
+    }
+
+    static void appendUnsigned(char *dst, QC::usize dstSize, QC::u32 value)
+    {
+        char reversed[16]{};
+        QC::usize count = 0;
+        do
+        {
+            reversed[count++] = static_cast<char>('0' + (value % 10u));
+            value /= 10u;
+        } while (value != 0 && count + 1 < sizeof(reversed));
+
+        char text[16]{};
+        for (QC::usize i = 0; i < count; ++i)
+            text[i] = reversed[count - 1 - i];
+        text[count] = '\0';
+        appendText(dst, dstSize, text);
+    }
+
+    static bool cmdDeskDoc(const char *args, const QC::Cmd::Context &ctx, void *)
+    {
+        char verb[24]{};
+        char documentId[24]{};
+        char formatText[24]{};
+        char modeText[24]{};
+        const char *cursor = args;
+
+        if (!readToken(cursor, verb, sizeof(verb)) || !equalsIgnoreCaseAscii(verb, "validate"))
+        {
+            ctx.writeLine("usage: deskdoc validate [production|golden] [json|cuiml] [save|publish]");
+            ctx.writeLine("example: deskdoc validate production cuiml publish");
+            return true;
+        }
+
+        if (!readToken(cursor, documentId, sizeof(documentId)))
+            QC::String::strncpy(documentId, "production", sizeof(documentId) - 1);
+        if (!readToken(cursor, formatText, sizeof(formatText)))
+            QC::String::strncpy(formatText, "cuiml", sizeof(formatText) - 1);
+        if (!readToken(cursor, modeText, sizeof(modeText)))
+            QC::String::strncpy(modeText, "save", sizeof(modeText) - 1);
+
+        QCQL::Database database{};
+        QCQL::Engine &engine = QCQL::Engine::instance();
+        const QCQL::Status openSt = engine.openDatabase(CMMS_DB_PATH, database);
+        if (openSt != QCQL::Status::Success)
+        {
+            ctx.writeLine("deskdoc: failed to open /system/CMMS.QDB");
+            return true;
+        }
+
+        QD::DesktopDocumentImportResult importResult{};
+        bool imported = false;
+        if (equalsIgnoreCaseAscii(formatText, "json"))
+            imported = QD::DesktopDocumentIO::importCmmsJson(database, documentId, importResult);
+        else
+            imported = QD::DesktopDocumentIO::importCmmsCuiml(database, documentId, importResult);
+
+        if (!imported)
+        {
+            ctx.writeLine(importResult.error[0] ? importResult.error : "deskdoc: import failed");
+            (void)engine.closeDatabase(database);
+            return true;
+        }
+
+        QD::DesktopDocumentValidationResult validation{};
+        const bool publishMode = equalsIgnoreCaseAscii(modeText, "publish");
+        const bool valid = publishMode
+                               ? QD::DesktopDocumentValidation::validateForPublish(importResult.document, validation)
+                               : QD::DesktopDocumentValidation::validateForSave(importResult.document, validation);
+
+        char line[256]{};
+        appendText(line, sizeof(line), "deskdoc: document=");
+        appendText(line, sizeof(line), importResult.document.documentId);
+        appendText(line, sizeof(line), " format=");
+        appendText(line, sizeof(line), formatText);
+        appendText(line, sizeof(line), " mode=");
+        appendText(line, sizeof(line), publishMode ? "publish" : "save");
+        appendText(line, sizeof(line), " controls=");
+        appendUnsigned(line, sizeof(line), static_cast<QC::u32>(importResult.document.controls.size()));
+        ctx.writeLine(line);
+
+        QC::String::memset(line, 0, sizeof(line));
+        appendText(line, sizeof(line), "deskdoc: valid=");
+        appendText(line, sizeof(line), valid ? "yes" : "no");
+        appendText(line, sizeof(line), " errors=");
+        appendUnsigned(line, sizeof(line), validation.errorCount);
+        appendText(line, sizeof(line), " warnings=");
+        appendUnsigned(line, sizeof(line), validation.warningCount);
+        ctx.writeLine(line);
+
+        for (QC::usize i = 0; i < validation.issues.size(); ++i)
+        {
+            QC::String::memset(line, 0, sizeof(line));
+            appendText(line, sizeof(line), validation.issues[i].severity == QD::DesktopValidationSeverity::Error ? "error: " : "warn: ");
+            if (validation.issues[i].controlId[0])
+            {
+                appendText(line, sizeof(line), validation.issues[i].controlId);
+                appendText(line, sizeof(line), ": ");
+            }
+            appendText(line, sizeof(line), validation.issues[i].message);
+            ctx.writeLine(line);
+        }
+
+        (void)engine.closeDatabase(database);
+        return true;
+    }
+
 }
 
 namespace QD
@@ -72,6 +237,12 @@ namespace QD
 
         // Shared Command Center MVP (single registry for all front-ends).
         QK::CmdCenter::registerMvpCommands();
+        (void)QC::Cmd::Registry::instance().registerCommandExAccess(
+            "deskdoc",
+            QC::Cmd::AccessLevel::User,
+            &cmdDeskDoc,
+            nullptr,
+            "Validate CMMS desktop documents through the canonical desktop model (deskdoc validate [production|golden] [json|cuiml] [save|publish])");
 
         m_commandsRegistered = true;
     }

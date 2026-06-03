@@ -289,6 +289,31 @@ namespace QK
             return true;
         }
 
+        static const char *statusName(QC::Status st)
+        {
+            switch (st)
+            {
+            case QC::Status::Success:
+                return "Success";
+            case QC::Status::Error:
+                return "Error";
+            case QC::Status::InvalidParam:
+                return "InvalidParam";
+            case QC::Status::OutOfMemory:
+                return "OutOfMemory";
+            case QC::Status::NotFound:
+                return "NotFound";
+            case QC::Status::Timeout:
+                return "Timeout";
+            case QC::Status::Busy:
+                return "Busy";
+            case QC::Status::NotSupported:
+                return "NotSupported";
+            default:
+                return "Unknown";
+            }
+        }
+
         static bool appendAuditChainRecord(QC::u64 code, QC::u64 value)
         {
             if (!ensureProtectedStorageLayout())
@@ -941,11 +966,29 @@ namespace QK
             OwnerCredRecordV2 v2{};
         };
 
-        static QC::Status readOwnerCred(OwnerCredAny &out)
+        static bool ownerCredEquivalent(const OwnerCredAny &a, const OwnerCredAny &b)
+        {
+            if (a.kind != b.kind)
+                return false;
+
+            if (a.kind == OwnerCredKind::V2)
+            {
+                return QC::String::memcmp(&a.v2, &b.v2, sizeof(OwnerCredRecordV2)) == 0;
+            }
+
+            if (a.kind == OwnerCredKind::V1)
+            {
+                return QC::String::memcmp(&a.v1, &b.v1, sizeof(OwnerCredRecordV1)) == 0;
+            }
+
+            return false;
+        }
+
+        static QC::Status readOwnerCredUncached(OwnerCredAny &out)
         {
             QC::Vector<QC::u8> blob;
             QC::Status st = QK::SecureStore::readSealedBlob(kOwnerCredKey, blob);
-            if (st == QC::Status::NotSupported)
+            if (st == QC::Status::NotSupported || st == QC::Status::NotFound)
             {
                 QK::SecureStore::Config compatCfg = QK::SecureStore::defaultConfig();
                 compatCfg.baseDir = kOwnerCredCompatBaseDir;
@@ -963,6 +1006,10 @@ namespace QK
                     rec.username[sizeof(rec.username) - 1] = 0;
                     if (rec.saltLen != 16)
                         return QC::Status::Error;
+                    if (rec.userLen == 0 || rec.userLen >= sizeof(rec.username))
+                        return QC::Status::Error;
+                    if (rec.username[0] == 0)
+                        return QC::Status::Error;
                     out.kind = OwnerCredKind::V2;
                     out.v2 = rec;
                     return QC::Status::Success;
@@ -976,6 +1023,10 @@ namespace QK
                 if (rec.magic == kOwnerCredMagic && rec.version == kOwnerCredVersionV1)
                 {
                     rec.username[sizeof(rec.username) - 1] = 0;
+                    if (rec.userLen == 0 || rec.userLen >= sizeof(rec.username))
+                        return QC::Status::Error;
+                    if (rec.username[0] == 0)
+                        return QC::Status::Error;
                     out.kind = OwnerCredKind::V1;
                     out.v1 = rec;
                     return QC::Status::Success;
@@ -983,6 +1034,25 @@ namespace QK
             }
 
             return QC::Status::Error;
+        }
+
+        static QC::Status readOwnerCred(OwnerCredAny &out)
+        {
+            OwnerCredAny first{};
+            QC::Status st = readOwnerCredUncached(first);
+            if (st != QC::Status::Success)
+                return st;
+
+            OwnerCredAny second{};
+            st = readOwnerCredUncached(second);
+            if (st != QC::Status::Success)
+                return st;
+
+            if (!ownerCredEquivalent(first, second))
+                return QC::Status::Error;
+
+            out = first;
+            return QC::Status::Success;
         }
 
         static QC::Status writeOwnerCred(const OwnerCredRecordV2 &rec)
@@ -1030,6 +1100,7 @@ namespace QK
     {
         m_mode = mode;
         QC::String::memset(m_pendingRecoveryCode, 0, sizeof(m_pendingRecoveryCode));
+        m_deferInstallRecoveryCode = false;
         m_ownerLockoutUntilMs = 0;
         m_ownerUnlockAttempts = 0;
         m_ownerUnlockFailures = 0;
@@ -1095,9 +1166,7 @@ namespace QK
         const QSC::SstStatus after = QSC::SecurityCenter::instance().sstStatus();
         if ((!before.available || before.generation == 0) && after.available && after.generation == 1)
         {
-            char recoveryCode[48];
-            if (generateInstallRecoveryCode(recoveryCode) != QC::Status::Success)
-                return QC::Status::Error;
+            m_deferInstallRecoveryCode = true;
             emitProvisioningCompletedAuditEvent();
         }
 
@@ -1284,7 +1353,7 @@ namespace QK
         return QC::Status::Success;
     }
 
-    QC::Status SecurityCenter::ownerEnroll(const char *username, const char *secret)
+    QC::Status SecurityCenter::ownerEnroll(const char *username, const char *secret, bool activateSession)
     {
         if (!username || !username[0] || !secret)
             return QC::Status::Error;
@@ -1311,7 +1380,7 @@ namespace QK
         rec.iterations = kDefaultIterations;
 
         st = qkFillRandom(nullptr, rec.salt, sizeof(rec.salt));
-        if (st != QC::Status::Success)
+        if (st != QC::Status::Success && st != QC::Status::Busy)
             return st;
 
         QC::String::strncpy(rec.username, canonicalUser, sizeof(rec.username) - 1);
@@ -1324,6 +1393,17 @@ namespace QK
         st = writeOwnerCred(rec);
         if (st != QC::Status::Success)
             return st;
+
+        if (!activateSession)
+        {
+            clearOwnerSessionKeys();
+            m_ownerUnlocked = false;
+            m_unlockState = UnlockState::Locked;
+            m_ownerFailCount = 0;
+            m_ownerBackoffMs = 0;
+            m_ownerLockoutUntilMs = 0;
+            return QC::Status::Success;
+        }
 
         st = deriveUserMasterKeyMemoryHard(rec.username, secret, rec.salt, rec.iterations, m_ownerUmk);
         if (st != QC::Status::Success)
@@ -1373,7 +1453,7 @@ namespace QK
         return QC::Status::Success;
     }
 
-    QC::Status SecurityCenter::ownerUnlock(const char *username, const char *secret)
+    QC::Status SecurityCenter::ownerUnlock(const char *username, const char *secret, bool activateSession)
     {
         if (!username || !username[0] || !secret)
             return QC::Status::Error;
@@ -1434,6 +1514,17 @@ namespace QK
             return QC::Status::Error;
         }
 
+        if (!activateSession)
+        {
+            clearOwnerSessionKeys();
+            m_ownerUnlocked = true;
+            m_unlockState = UnlockState::Unlocked;
+            m_ownerFailCount = 0;
+            m_ownerBackoffMs = 0;
+            m_ownerLockoutUntilMs = 0;
+            return QC::Status::Success;
+        }
+
         if (rec.kind == OwnerCredKind::V2)
         {
             st = deriveUserMasterKeyMemoryHard(rec.v2.username, secret, rec.v2.salt, rec.v2.iterations, m_ownerUmk);
@@ -1483,7 +1574,94 @@ namespace QK
     QC::Status SecurityCenter::ownerUnlockPasskey(const char *username, const char *passkey)
     {
         // MVP bridge: passkeys follow the same verifier path until a dedicated attestation format lands.
-        return ownerUnlock(username, passkey);
+        return ownerUnlock(username, passkey, true);
+    }
+
+    QC::Status SecurityCenter::getEnrolledOwnerUsername(char *outUsername, QC::usize outCap) const
+    {
+        if (!outUsername || outCap == 0)
+            return QC::Status::InvalidParam;
+
+        QC::String::memset(outUsername, 0, outCap);
+
+        OwnerCredAny rec;
+        const QC::Status st = readOwnerCred(rec);
+        if (st != QC::Status::Success)
+            return st;
+
+        const char *storedUser = nullptr;
+        if (rec.kind == OwnerCredKind::V2)
+            storedUser = rec.v2.username;
+        else if (rec.kind == OwnerCredKind::V1)
+            storedUser = rec.v1.username;
+
+        if (!storedUser || !storedUser[0])
+            return QC::Status::NotFound;
+
+        QC::String::strncpy(outUsername, storedUser, outCap - 1);
+        outUsername[outCap - 1] = '\0';
+        return QC::Status::Success;
+    }
+
+    void SecurityCenter::debugDescribeOwnerRecord(char *outSummary, QC::usize outCap) const
+    {
+        if (!outSummary || outCap == 0)
+            return;
+
+        QC::String::memset(outSummary, 0, outCap);
+        QC::usize used = 0;
+
+        QC::Vector<QC::u8> rawBlob;
+        const QC::Status rawSt = QK::SecureStore::readBlob(kOwnerCredKey, rawBlob);
+        (void)appendText(outSummary, outCap, used, "raw=");
+        (void)appendText(outSummary, outCap, used, statusName(rawSt));
+        if (rawSt == QC::Status::Success)
+        {
+            (void)appendText(outSummary, outCap, used, " bytes=");
+            (void)appendU64(outSummary, outCap, used, static_cast<QC::u64>(rawBlob.size()));
+        }
+
+        QC::Vector<QC::u8> plainBlob;
+        const QC::Status plainSt = QK::SecureStore::readSealedBlob(kOwnerCredKey, plainBlob);
+        (void)appendText(outSummary, outCap, used, " plain=");
+        (void)appendText(outSummary, outCap, used, statusName(plainSt));
+        if (plainSt == QC::Status::Success)
+        {
+            (void)appendText(outSummary, outCap, used, " plain_bytes=");
+            (void)appendU64(outSummary, outCap, used, static_cast<QC::u64>(plainBlob.size()));
+        }
+
+        OwnerCredAny first{};
+        const QC::Status firstSt = readOwnerCredUncached(first);
+        (void)appendText(outSummary, outCap, used, " first=");
+        (void)appendText(outSummary, outCap, used, statusName(firstSt));
+        if (firstSt == QC::Status::Success)
+        {
+            const char *user = (first.kind == OwnerCredKind::V2) ? first.v2.username : first.v1.username;
+            (void)appendText(outSummary, outCap, used, " user=");
+            (void)appendText(outSummary, outCap, used, user && *user ? user : "(empty)");
+            (void)appendText(outSummary, outCap, used, " kind=");
+            (void)appendText(outSummary, outCap, used, (first.kind == OwnerCredKind::V2) ? "V2" : "V1");
+        }
+
+        OwnerCredAny second{};
+        const QC::Status secondSt = readOwnerCredUncached(second);
+        (void)appendText(outSummary, outCap, used, " second=");
+        (void)appendText(outSummary, outCap, used, statusName(secondSt));
+        if (secondSt == QC::Status::Success)
+        {
+            const char *user = (second.kind == OwnerCredKind::V2) ? second.v2.username : second.v1.username;
+            (void)appendText(outSummary, outCap, used, " user2=");
+            (void)appendText(outSummary, outCap, used, user && *user ? user : "(empty)");
+            (void)appendText(outSummary, outCap, used, " kind2=");
+            (void)appendText(outSummary, outCap, used, (second.kind == OwnerCredKind::V2) ? "V2" : "V1");
+        }
+
+        if (firstSt == QC::Status::Success && secondSt == QC::Status::Success)
+        {
+            (void)appendText(outSummary, outCap, used, " stable=");
+            (void)appendText(outSummary, outCap, used, ownerCredEquivalent(first, second) ? "yes" : "no");
+        }
     }
 
     void SecurityCenter::ownerLock()
@@ -1510,12 +1688,8 @@ namespace QK
 
     bool SecurityCenter::ownerIsEnrolled() const
     {
-        if (QK::SecureStore::exists(kOwnerCredKey))
-            return true;
-
-        QK::SecureStore::Config compatCfg = QK::SecureStore::defaultConfig();
-        compatCfg.baseDir = kOwnerCredCompatBaseDir;
-        return QK::SecureStore::exists(kOwnerCredKey, compatCfg);
+        OwnerCredAny rec;
+        return readOwnerCred(rec) == QC::Status::Success;
     }
 
     bool SecurityCenter::ownerLockedOut() const
@@ -2025,6 +2199,7 @@ namespace QK
         if (st == QC::Status::Success)
         {
             QC::String::strncpy(m_pendingRecoveryCode, code, sizeof(m_pendingRecoveryCode) - 1);
+            m_deferInstallRecoveryCode = false;
             if (outCode)
             {
                 QC::String::memset(outCode, 0, 48);
@@ -2041,6 +2216,8 @@ namespace QK
     {
         if (!outCode)
             return QC::Status::InvalidParam;
+        if (!m_pendingRecoveryCode[0] && m_deferInstallRecoveryCode)
+            return QC::Status::Busy;
         if (!m_pendingRecoveryCode[0])
             return QC::Status::NotFound;
         QC::String::memset(outCode, 0, 48);

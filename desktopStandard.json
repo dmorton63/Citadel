@@ -60,9 +60,9 @@
           "shutdown": "/system/icons/svg/power.svg"
         },
         "backgrounds": {
-          "desktopPrimary": "/system/wall/WINTER.PNG",
-          "desktopSecondary": "/system/wall/SPRING.PNG",
-          "lockScreen": "/system/wall/SUMMER.PNG"
+          "desktopPrimary": "/WALL/WINTER.PNG",
+          "desktopSecondary": "/WALL/SPRING.PNG",
+          "lockScreen": "/WALL/SUMMER.PNG"
         },
         "textures": {
           "glassNoise": "/system/textures/glass_noise.png",

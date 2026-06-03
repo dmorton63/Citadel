@@ -37,6 +37,7 @@ namespace QW
         QC::u32 pitch() const { return m_pitch; }
         QC::u32 bpp() const { return m_bpp; }
         PixelFormat format() const { return m_format; }
+        bool frontbufferIsMMIO() const { return m_frontbufferIsMMIO; }
 
         // Buffer access
         void *buffer() const { return m_buffer; }

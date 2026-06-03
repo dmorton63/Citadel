@@ -56,12 +56,14 @@
          ============================ -->
 
     <Icons>
-        <Icon id="folder" path="/system/icons/folder.png" />
-        <Icon id="settings" path="/system/icons/settings.png" />
-        <Icon id="cmms" path="/system/icons/settings.png" />
-        <Icon id="terminal" path="/system/icons/terminal.png" />
-        <Icon id="leaf" path="/system/icons/leaf.png" />
-        <Icon id="shutdown" path="/system/icons/svg/power.svg" />
+        <Icon id="folder" path="/ICONS/svg/folder.svg" />
+        <Icon id="settings" path="/ICONS/svg/settings.svg" />
+        <Icon id="cmms" path="/ICONS/svg/settings.svg" />
+        <Icon id="terminal" path="/ICONS/svg/terminal.svg" />
+        <Icon id="file" path="/ICONS/svg/file.svg" />
+        <Icon id="leaf" path="/ICONS/svg/info.svg" />
+        <Icon id="power" path="/ICONS/SHUTDOWN.PNG" />
+        <Icon id="shutdown" path="/ICONS/SHUTDOWN.PNG" />
     </Icons>
 
     <!-- ============================

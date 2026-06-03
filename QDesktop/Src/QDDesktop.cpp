@@ -33,31 +33,324 @@
 #include "QDrvTimer.h"
 #include "QWControls/Leaf/ScrollBar.h"
 #include "QCMSApp.h"
+#include "QDDesktopDocumentIO.h"
 #include "QDThemeImporter.h"
 
 namespace QD
 {
     namespace
     {
-        constexpr const char *OWNER_MARKER_PATH = "/system/OWNER.ENR";
-        constexpr const char *OWNER_MARKER_PATH_LEGACY = "/system/owner.enrolled";
-    }
-
-    // Sidebar item labels
-    static const char *SIDEBAR_LABELS[] = {
-        "Home",
-        "Apps",
-        "Settings",
-        "Files",
-        "Terminal",
-        "Power"};
-
-    namespace
-    {
         constexpr const char *LOG_MODULE = "QDesktop";
         constexpr const char *CMMS_DB_PATH = "/system/CMMS.QDB";
+        constexpr const char *CMMS_DESKTOP_LAYOUT_TABLE = "DesktopLayouts";
+        constexpr const char *CMMS_DESKTOP_LAYOUT_CHUNK_TABLE = "DesktopLayoutChunks";
+        constexpr const char *CMMS_DESKTOP_CUIML_TABLE = "DesktopCuiml";
+        constexpr const char *CMMS_DESKTOP_CUIML_CHUNK_TABLE = "DesktopCuimlChunks";
+        constexpr const char *CMMS_DESKTOP_REGION_TABLE = "DesktopRegions";
+        constexpr const char *CMMS_DESKTOP_CONTROL_TABLE = "DesktopControls";
+        constexpr const char *CMMS_DESKTOP_CONTROL_RUNTIME_TABLE = "DesktopControlRuntime";
+        constexpr const char *CMMS_DESKTOP_CONTROL_PROPERTIES_TABLE = "DesktopControlProperties";
+        constexpr const char *CMMS_DESKTOP_CONTROL_BINDINGS_TABLE = "DesktopControlBindings";
+        constexpr const char *CMMS_DESKTOP_LAYOUT_THEME_TABLE = "DesktopLayoutThemes";
+        constexpr const char *CMMS_DESKTOP_LAYOUT_ASSET_TABLE = "DesktopLayoutAssets";
+        constexpr const char *CMMS_DESKTOP_LAYOUT_MATERIALIZATION_TABLE = "DesktopLayoutMaterialization";
+        constexpr const char *CMMS_DESKTOP_CONTROL_HIERARCHY_TABLE = "DesktopControlHierarchy";
+        constexpr const char *CMMS_DESKTOP_LAYOUT_PRODUCTION = "production";
+        constexpr const char *CMMS_DESKTOP_LAYOUT_GOLDEN = "golden";
+        constexpr QC::u32 CMMS_DESKTOP_DOCUMENT_CHUNK_BYTES = 1024;
+        constexpr QC::u32 CMMS_LAYOUT_MATERIALIZATION_SCHEMA_VERSION = 1;
+        constexpr bool CMMS_MATERIALIZE_RUNTIME_ON_BOOT = false;
+        constexpr bool CMMS_ENSURE_ACTIVE_RUNTIME_ON_BOOT = true;
         constexpr float BASE_THEME_FONT_SIZE = 12.0f;
         static bool g_imageCorpusChecked = false;
+
+        static QCQL::Cell makeTextCell(const char *text)
+        {
+            QCQL::Cell cell{};
+            cell.type = QCQL::ColumnType::Text;
+            if (!text)
+                return cell;
+
+            const QC::usize len = QC::String::strlen(text);
+            for (QC::usize i = 0; i < len; ++i)
+                cell.bytes.push_back(static_cast<QC::u8>(text[i]));
+            return cell;
+        }
+
+        // Sidebar item labels
+        static const char *SIDEBAR_LABELS[] = {
+            "Home",
+            "Apps",
+            "Settings",
+            "Files",
+            "Terminal",
+            "Power"};
+
+        static bool copyCellText(const QCQL::Cell &cell, char *dst, QC::usize dstSize)
+        {
+            if (!dst || dstSize == 0 || cell.type != QCQL::ColumnType::Text)
+                return false;
+
+            const QC::usize copyLen = (cell.bytes.size() < (dstSize - 1))
+                                          ? cell.bytes.size()
+                                          : static_cast<QC::usize>(dstSize - 1);
+            for (QC::usize i = 0; i < copyLen; ++i)
+                dst[i] = static_cast<char>(cell.bytes[i]);
+            dst[copyLen] = '\0';
+            return true;
+        }
+
+        static bool cellMatchesText(const QCQL::Cell &cell, const char *text)
+        {
+            if (cell.type != QCQL::ColumnType::Text)
+                return false;
+
+            const QC::usize textLen = text ? QC::String::strlen(text) : 0;
+            if (cell.bytes.size() != textLen)
+                return false;
+
+            for (QC::usize i = 0; i < textLen; ++i)
+            {
+                if (cell.bytes[i] != static_cast<QC::u8>(text[i]))
+                    return false;
+            }
+            return true;
+        }
+
+        static QCQL::Cell makeUnsignedTextCell(QC::u32 value)
+        {
+            char reversed[16];
+            QC::usize count = 0;
+            do
+            {
+                reversed[count++] = static_cast<char>('0' + (value % 10u));
+                value /= 10u;
+            } while (value != 0 && count + 1 < sizeof(reversed));
+
+            char text[16];
+            QC::String::memset(text, 0, sizeof(text));
+            for (QC::usize i = 0; i < count; ++i)
+                text[i] = reversed[count - 1 - i];
+            text[count] = '\0';
+            return makeTextCell(text);
+        }
+
+        static QCQL::Cell makeSignedTextCell(QC::i32 value)
+        {
+            if (value >= 0)
+                return makeUnsignedTextCell(static_cast<QC::u32>(value));
+
+            QCQL::Cell magnitudeCell = makeUnsignedTextCell(static_cast<QC::u32>(-value));
+            QCQL::Cell cell{};
+            cell.type = QCQL::ColumnType::Text;
+            cell.bytes.push_back(static_cast<QC::u8>('-'));
+            for (QC::usize i = 0; i < magnitudeCell.bytes.size(); ++i)
+                cell.bytes.push_back(magnitudeCell.bytes[i]);
+            return cell;
+        }
+
+        static const char *backgroundModeName(DesktopBackgroundMode mode)
+        {
+            switch (mode)
+            {
+            case DesktopBackgroundMode::Solid:
+                return "solid";
+            case DesktopBackgroundMode::Gradient:
+                return "gradient";
+            case DesktopBackgroundMode::Image:
+                return "image";
+            case DesktopBackgroundMode::None:
+            default:
+                return "none";
+            }
+        }
+
+        static const char *assetKindName(DesktopAssetKind kind)
+        {
+            switch (kind)
+            {
+            case DesktopAssetKind::Wallpaper:
+                return "wallpaper";
+            case DesktopAssetKind::Icon:
+                return "icon";
+            case DesktopAssetKind::Illustration:
+                return "illustration";
+            case DesktopAssetKind::Font:
+                return "font";
+            case DesktopAssetKind::Import:
+                return "import";
+            case DesktopAssetKind::Unknown:
+            default:
+                return "unknown";
+            }
+        }
+
+        static bool makeScopedRowId(const char *scope, const char *name, char *out, QC::usize outCap)
+        {
+            if (!scope || !*scope || !name || !*name || !out || outCap == 0)
+                return false;
+
+            const QC::usize scopeLen = QC::String::strlen(scope);
+            const QC::usize nameLen = QC::String::strlen(name);
+            if (scopeLen + 1 + nameLen + 1 > outCap)
+                return false;
+
+            QC::String::memcpy(out, scope, scopeLen);
+            out[scopeLen] = ':';
+            QC::String::memcpy(out + scopeLen + 1, name, nameLen);
+            out[scopeLen + 1 + nameLen] = '\0';
+            return true;
+        }
+
+        static bool makeScopedIndexedRowId(const char *scope,
+                                           const char *prefix,
+                                           QC::u32 index,
+                                           char *out,
+                                           QC::usize outCap)
+        {
+            if (!scope || !*scope || !prefix || !*prefix || !out || outCap == 0)
+                return false;
+
+            char prefixAndIndex[64];
+            QC::String::memset(prefixAndIndex, 0, sizeof(prefixAndIndex));
+            const QC::usize prefixLen = QC::String::strlen(prefix);
+            if (prefixLen + 1 >= sizeof(prefixAndIndex))
+                return false;
+
+            QC::String::memcpy(prefixAndIndex, prefix, prefixLen);
+            QCQL::Cell indexCell = makeUnsignedTextCell(index);
+            const QC::usize indexLen = (indexCell.bytes.size() < (sizeof(prefixAndIndex) - prefixLen - 1))
+                                           ? indexCell.bytes.size()
+                                           : static_cast<QC::usize>(sizeof(prefixAndIndex) - prefixLen - 1);
+            for (QC::usize i = 0; i < indexLen; ++i)
+                prefixAndIndex[prefixLen + i] = static_cast<char>(indexCell.bytes[i]);
+            prefixAndIndex[prefixLen + indexLen] = '\0';
+            return makeScopedRowId(scope, prefixAndIndex, out, outCap);
+        }
+
+        static bool parseUnsignedTextCell(const QCQL::Cell &cell, QC::u32 &outValue)
+        {
+            outValue = 0;
+            if (cell.type != QCQL::ColumnType::Text || cell.bytes.empty())
+                return false;
+
+            QC::u32 value = 0;
+            for (QC::usize i = 0; i < cell.bytes.size(); ++i)
+            {
+                const char c = static_cast<char>(cell.bytes[i]);
+                if (c < '0' || c > '9')
+                    return false;
+                value = value * 10u + static_cast<QC::u32>(c - '0');
+            }
+
+            outValue = value;
+            return true;
+        }
+
+        static bool makeChunkRowId(const char *documentId, QC::u32 chunkIndex, char *out, QC::usize outCap)
+        {
+            if (!documentId || !*documentId || !out || outCap == 0)
+                return false;
+
+            char indexText[16];
+            QC::String::memset(indexText, 0, sizeof(indexText));
+            const QCQL::Cell indexCell = makeUnsignedTextCell(chunkIndex);
+            const QC::usize indexLen = (indexCell.bytes.size() < (sizeof(indexText) - 1))
+                                           ? indexCell.bytes.size()
+                                           : static_cast<QC::usize>(sizeof(indexText) - 1);
+            for (QC::usize i = 0; i < indexLen; ++i)
+                indexText[i] = static_cast<char>(indexCell.bytes[i]);
+            indexText[indexLen] = '\0';
+
+            const QC::usize docLen = QC::String::strlen(documentId);
+            if (docLen + 1 + indexLen + 1 > outCap)
+                return false;
+
+            QC::String::memcpy(out, documentId, docLen);
+            out[docLen] = ':';
+            QC::String::memcpy(out + docLen + 1, indexText, indexLen);
+            out[docLen + 1 + indexLen] = '\0';
+            return true;
+        }
+
+        static bool loadChunkedDocumentPayload(const QCQL::Database &database,
+                                               const char *chunkTableName,
+                                               const char *documentId,
+                                               QC::u32 chunkCount,
+                                               QC::Vector<QC::u8> &outPayload)
+        {
+            outPayload.clear();
+            if (!chunkTableName || !*chunkTableName || !documentId || !*documentId || chunkCount == 0)
+                return false;
+
+            QC::u32 tableId = 0;
+            if (QCQL::Engine::instance().lookupTableId(database, chunkTableName, tableId) != QCQL::Status::Success)
+                return false;
+
+            const QCQL::Table *chunkTable = nullptr;
+            for (QC::usize i = 0; i < database.tables.size(); ++i)
+            {
+                if (database.tables[i].tableId == tableId)
+                {
+                    chunkTable = &database.tables[i];
+                    break;
+                }
+            }
+            if (!chunkTable)
+                return false;
+
+            QC::Vector<QC::Vector<QC::u8>> chunks;
+            chunks.resize(chunkCount);
+            QC::Vector<QC::u8> seen;
+            seen.resize(chunkCount);
+            for (QC::usize i = 0; i < chunkCount; ++i)
+                seen[i] = 0;
+
+            QC::usize totalBytes = 0;
+            for (QC::usize p = 0; p < chunkTable->pages.size(); ++p)
+            {
+                QCQL::Page page{};
+                if (QCQL::Engine::instance().loadPage(database, chunkTable->pages[p], page) != QCQL::Status::Success)
+                    continue;
+
+                for (QC::usize r = 0; r < page.rowOffsets.size(); ++r)
+                {
+                    QCQL::Row row{};
+                    if (QCQL::Engine::instance().readRow(database, chunkTable->pages[p], page.rowOffsets[r], row) != QCQL::Status::Success)
+                        continue;
+                    if (row.tombstone || row.cells.size() < 4)
+                        continue;
+                    if (!cellMatchesText(row.cells[1], documentId))
+                        continue;
+
+                    QC::u32 chunkIndex = 0;
+                    if (!parseUnsignedTextCell(row.cells[2], chunkIndex) || chunkIndex >= chunkCount)
+                        continue;
+                    if (row.cells[3].type != QCQL::ColumnType::Text || seen[chunkIndex])
+                        continue;
+
+                    chunks[chunkIndex] = row.cells[3].bytes;
+                    seen[chunkIndex] = 1;
+                    totalBytes += chunks[chunkIndex].size();
+                }
+            }
+
+            for (QC::usize i = 0; i < chunkCount; ++i)
+            {
+                if (!seen[i])
+                    return false;
+            }
+
+            outPayload.resize(totalBytes);
+            QC::usize offset = 0;
+            for (QC::usize i = 0; i < chunkCount; ++i)
+            {
+                for (QC::usize j = 0; j < chunks[i].size(); ++j)
+                    outPayload[offset + j] = chunks[i][j];
+                offset += chunks[i].size();
+            }
+            return true;
+        }
 
         static QW::Controls::ControlId hashControlId(const char *text)
         {
@@ -227,7 +520,7 @@ namespace QD
             if (!family || !*family)
                 return false;
 
-            const char *dirs[] = {"/system/fonts", "/system/fonts/static", "/shared/fonts", "/shared/fonts/static"};
+            const char *dirs[] = {"/FONTS", "/FONTS/static", "/system/fonts", "/system/fonts/static", "/shared/fonts", "/shared/fonts/static"};
             const char *exts[] = {".ttf", ".otf"};
 
             char path[160];
@@ -243,9 +536,12 @@ namespace QD
             }
 
             // FAT 8.3 compatibility aliases (no LFN): map friendly family names to stable short filenames.
-            // build.sh will optionally pack RobotoMono-Regular.ttf as /system/fonts/RMONO.TTF.
+            // build.sh packs RobotoMono-Regular.ttf under both /FONTS/RMONO.TTF and
+            // /system/fonts/RMONO.TTF so the desktop can survive /system volume shadowing.
             if (equalsIgnoreCase(family, "RobotoMono") || equalsIgnoreCase(family, "Roboto Mono"))
             {
+                if (readVfsFileToBytes("/FONTS/RMONO.TTF", outBytes) && !outBytes.empty())
+                    return true;
                 if (readVfsFileToBytes("/system/fonts/RMONO.TTF", outBytes) && !outBytes.empty())
                     return true;
             }
@@ -940,6 +1236,12 @@ namespace QD
             m_windowListenerId = QK::Event::InvalidListenerId;
         }
 
+        if (m_inputListenerId != QK::Event::InvalidListenerId)
+        {
+            QK::Event::EventManager::instance().removeListener(m_inputListenerId);
+            m_inputListenerId = QK::Event::InvalidListenerId;
+        }
+
         if (m_shutdownDialog)
         {
             delete m_shutdownDialog;
@@ -1054,12 +1356,7 @@ namespace QD
 
     bool Desktop::isOwnerEnrolled() const
     {
-        // Prefer the real credential record; fall back to marker for legacy installs.
-        if (QK::SecurityCenter::instance().ownerIsEnrolled())
-            return true;
-        if (QFS::VFS::instance().exists(OWNER_MARKER_PATH))
-            return true;
-        return QFS::VFS::instance().exists(OWNER_MARKER_PATH_LEGACY);
+        return QK::SecurityCenter::instance().ownerIsEnrolled();
     }
 
     void Desktop::showSetupWizard()
@@ -1145,31 +1442,1489 @@ namespace QD
         auto &engine = QCQL::Engine::instance();
         engine.initialize();
 
-        QCQL::Status st = engine.openDatabase(CMMS_DB_PATH, m_cmmsDatabase);
-        if (st == QCQL::Status::NotFound)
+        auto initializeCmmsDatabase = [&](bool recreate) -> bool
         {
-            st = engine.createDatabase(CMMS_DB_PATH, m_cmmsDatabase);
-        }
+            const QC::u64 initStartMs = QDrv::Timer::instance().milliseconds();
+            auto findTable = [&](const char *tableName) -> QCQL::Table *
+            {
+                if (!tableName || !*tableName)
+                    return nullptr;
 
-        if (st != QCQL::Status::Success)
-        {
-            QC_LOG_WARN(LOG_MODULE, "CMMS DB open/create failed path=%s status=%d", CMMS_DB_PATH, static_cast<int>(st));
-            return false;
-        }
+                for (QC::usize i = 0; i < m_cmmsDatabase.tables.size(); ++i)
+                {
+                    if (QC::String::strcmp(m_cmmsDatabase.tables[i].name, tableName) == 0)
+                        return &m_cmmsDatabase.tables[i];
+                }
+                return nullptr;
+            };
 
-        st = engine.initializeSystemTables(m_cmmsDatabase);
-        if (st != QCQL::Status::Success)
-        {
-            QC_LOG_WARN(LOG_MODULE, "CMMS DB system table init failed status=%d", static_cast<int>(st));
-            return false;
-        }
+            auto hasForeignKey = [&](const QCQL::TableSchema &schema,
+                                     const char *columnName,
+                                     const char *referencedTable,
+                                     const char *referencedColumn) -> bool
+            {
+                for (QC::usize i = 0; i < schema.foreignKeys.size(); ++i)
+                {
+                    const QCQL::ForeignKey &foreignKey = schema.foreignKeys[i];
+                    if (QC::String::strcmp(foreignKey.columnName, columnName) != 0)
+                        continue;
+                    if (QC::String::strcmp(foreignKey.referencedTable, referencedTable) != 0)
+                        continue;
+                    if (QC::String::strcmp(foreignKey.referencedColumn, referencedColumn) != 0)
+                        continue;
+                    return true;
+                }
+                return false;
+            };
 
-        st = ThemeImporter::importBuiltinThemes(m_cmmsDatabase);
-        if (st != QCQL::Status::Success)
-        {
-            QC_LOG_WARN(LOG_MODULE, "CMMS DB theme import failed status=%d", static_cast<int>(st));
+            bool cmmsSchemaChanged = false;
+
+            auto attachForeignKey = [&](const char *tableName,
+                                        const char *columnName,
+                                        const char *referencedTable,
+                                        const char *referencedColumn) -> bool
+            {
+                QCQL::Table *table = findTable(tableName);
+                if (!table)
+                    return false;
+                if (hasForeignKey(table->schema, columnName, referencedTable, referencedColumn))
+                    return true;
+
+                QCQL::ForeignKey foreignKey{};
+                QC::String::strncpy(foreignKey.columnName, columnName, sizeof(foreignKey.columnName) - 1);
+                QC::String::strncpy(foreignKey.referencedTable, referencedTable, sizeof(foreignKey.referencedTable) - 1);
+                QC::String::strncpy(foreignKey.referencedColumn, referencedColumn, sizeof(foreignKey.referencedColumn) - 1);
+                table->schema.foreignKeys.push_back(static_cast<QCQL::ForeignKey &&>(foreignKey));
+                cmmsSchemaChanged = true;
+                return true;
+            };
+
+            auto ensureDesktopDocumentTable = [&](const char *tableName) -> bool
+            {
+                if (!tableName || !*tableName)
+                    return false;
+
+                QC::u32 tableId = 0;
+                const QCQL::Status lookupSt = engine.lookupTableId(m_cmmsDatabase, tableName, tableId);
+                if (lookupSt == QCQL::Status::Success)
+                    return true;
+                if (lookupSt != QCQL::Status::NotFound)
+                    return false;
+
+                QCQL::TableSchema schema{};
+                QC::String::strncpy(schema.tableName, tableName, sizeof(schema.tableName) - 1);
+
+                QCQL::Column idCol{};
+                QC::String::strncpy(idCol.name, "id", sizeof(idCol.name) - 1);
+                idCol.type = QCQL::ColumnType::Text;
+                idCol.isPrimaryKey = true;
+                schema.columns.push_back(static_cast<QCQL::Column &&>(idCol));
+
+                QCQL::Column sourcePathCol{};
+                QC::String::strncpy(sourcePathCol.name, "sourcePath", sizeof(sourcePathCol.name) - 1);
+                sourcePathCol.type = QCQL::ColumnType::Text;
+                schema.columns.push_back(static_cast<QCQL::Column &&>(sourcePathCol));
+
+                QCQL::Column payloadCol{};
+                QC::String::strncpy(payloadCol.name, "payload", sizeof(payloadCol.name) - 1);
+                payloadCol.type = QCQL::ColumnType::Text;
+                schema.columns.push_back(static_cast<QCQL::Column &&>(payloadCol));
+
+                schema.primaryKeyIndex = 0;
+                const QCQL::Status createSt = engine.createTable(m_cmmsDatabase, schema);
+                return createSt == QCQL::Status::Success || createSt == QCQL::Status::AlreadyExists;
+            };
+
+            auto ensureDesktopChunkTable = [&](const char *tableName, const char *documentTableName) -> bool
+            {
+                if (!tableName || !*tableName || !documentTableName || !*documentTableName)
+                    return false;
+
+                QC::u32 tableId = 0;
+                const QCQL::Status lookupSt = engine.lookupTableId(m_cmmsDatabase, tableName, tableId);
+                if (lookupSt == QCQL::Status::Success)
+                    return attachForeignKey(tableName, "documentId", documentTableName, "id");
+                if (lookupSt != QCQL::Status::NotFound)
+                    return false;
+
+                QCQL::TableSchema schema{};
+                QC::String::strncpy(schema.tableName, tableName, sizeof(schema.tableName) - 1);
+
+                QCQL::Column idCol{};
+                QC::String::strncpy(idCol.name, "id", sizeof(idCol.name) - 1);
+                idCol.type = QCQL::ColumnType::Text;
+                idCol.isPrimaryKey = true;
+                schema.columns.push_back(static_cast<QCQL::Column &&>(idCol));
+
+                QCQL::Column documentIdCol{};
+                QC::String::strncpy(documentIdCol.name, "documentId", sizeof(documentIdCol.name) - 1);
+                documentIdCol.type = QCQL::ColumnType::Text;
+                schema.columns.push_back(static_cast<QCQL::Column &&>(documentIdCol));
+
+                QCQL::ForeignKey documentForeignKey{};
+                QC::String::strncpy(documentForeignKey.columnName, "documentId", sizeof(documentForeignKey.columnName) - 1);
+                QC::String::strncpy(documentForeignKey.referencedTable, documentTableName, sizeof(documentForeignKey.referencedTable) - 1);
+                QC::String::strncpy(documentForeignKey.referencedColumn, "id", sizeof(documentForeignKey.referencedColumn) - 1);
+                schema.foreignKeys.push_back(static_cast<QCQL::ForeignKey &&>(documentForeignKey));
+
+                QCQL::Column chunkIndexCol{};
+                QC::String::strncpy(chunkIndexCol.name, "chunkIndex", sizeof(chunkIndexCol.name) - 1);
+                chunkIndexCol.type = QCQL::ColumnType::Text;
+                schema.columns.push_back(static_cast<QCQL::Column &&>(chunkIndexCol));
+
+                QCQL::Column payloadCol{};
+                QC::String::strncpy(payloadCol.name, "payload", sizeof(payloadCol.name) - 1);
+                payloadCol.type = QCQL::ColumnType::Text;
+                schema.columns.push_back(static_cast<QCQL::Column &&>(payloadCol));
+
+                schema.primaryKeyIndex = 0;
+                const QCQL::Status createSt = engine.createTable(m_cmmsDatabase, schema);
+                return createSt == QCQL::Status::Success || createSt == QCQL::Status::AlreadyExists;
+            };
+
+            auto ensureDesktopRegionTable = [&]() -> bool
+            {
+                QC::u32 tableId = 0;
+                const QCQL::Status lookupSt = engine.lookupTableId(m_cmmsDatabase, CMMS_DESKTOP_REGION_TABLE, tableId);
+                if (lookupSt == QCQL::Status::Success)
+                    return attachForeignKey(CMMS_DESKTOP_REGION_TABLE, "layoutId", CMMS_DESKTOP_LAYOUT_TABLE, "id");
+                if (lookupSt != QCQL::Status::NotFound)
+                    return false;
+
+                QCQL::TableSchema schema{};
+                QC::String::strncpy(schema.tableName, CMMS_DESKTOP_REGION_TABLE, sizeof(schema.tableName) - 1);
+
+                QCQL::Column idCol{};
+                QC::String::strncpy(idCol.name, "id", sizeof(idCol.name) - 1);
+                idCol.type = QCQL::ColumnType::Text;
+                idCol.isPrimaryKey = true;
+                schema.columns.push_back(static_cast<QCQL::Column &&>(idCol));
+
+                QCQL::Column layoutIdCol{};
+                QC::String::strncpy(layoutIdCol.name, "layoutId", sizeof(layoutIdCol.name) - 1);
+                layoutIdCol.type = QCQL::ColumnType::Text;
+                schema.columns.push_back(static_cast<QCQL::Column &&>(layoutIdCol));
+
+                QCQL::ForeignKey layoutForeignKey{};
+                QC::String::strncpy(layoutForeignKey.columnName, "layoutId", sizeof(layoutForeignKey.columnName) - 1);
+                QC::String::strncpy(layoutForeignKey.referencedTable, CMMS_DESKTOP_LAYOUT_TABLE, sizeof(layoutForeignKey.referencedTable) - 1);
+                QC::String::strncpy(layoutForeignKey.referencedColumn, "id", sizeof(layoutForeignKey.referencedColumn) - 1);
+                schema.foreignKeys.push_back(static_cast<QCQL::ForeignKey &&>(layoutForeignKey));
+
+                QCQL::Column regionKeyCol{};
+                QC::String::strncpy(regionKeyCol.name, "regionKey", sizeof(regionKeyCol.name) - 1);
+                regionKeyCol.type = QCQL::ColumnType::Text;
+                schema.columns.push_back(static_cast<QCQL::Column &&>(regionKeyCol));
+
+                QCQL::Column displayNameCol{};
+                QC::String::strncpy(displayNameCol.name, "displayName", sizeof(displayNameCol.name) - 1);
+                displayNameCol.type = QCQL::ColumnType::Text;
+                schema.columns.push_back(static_cast<QCQL::Column &&>(displayNameCol));
+
+                schema.primaryKeyIndex = 0;
+                const QCQL::Status createSt = engine.createTable(m_cmmsDatabase, schema);
+                return createSt == QCQL::Status::Success || createSt == QCQL::Status::AlreadyExists;
+            };
+
+            auto ensureDesktopControlTable = [&]() -> bool
+            {
+                QC::u32 tableId = 0;
+                const QCQL::Status lookupSt = engine.lookupTableId(m_cmmsDatabase, CMMS_DESKTOP_CONTROL_TABLE, tableId);
+                if (lookupSt == QCQL::Status::Success)
+                {
+                    return attachForeignKey(CMMS_DESKTOP_CONTROL_TABLE, "layoutId", CMMS_DESKTOP_LAYOUT_TABLE, "id") &&
+                           attachForeignKey(CMMS_DESKTOP_CONTROL_TABLE, "regionId", CMMS_DESKTOP_REGION_TABLE, "id");
+                }
+                if (lookupSt != QCQL::Status::NotFound)
+                    return false;
+
+                QCQL::TableSchema schema{};
+                QC::String::strncpy(schema.tableName, CMMS_DESKTOP_CONTROL_TABLE, sizeof(schema.tableName) - 1);
+
+                QCQL::Column idCol{};
+                QC::String::strncpy(idCol.name, "id", sizeof(idCol.name) - 1);
+                idCol.type = QCQL::ColumnType::Text;
+                idCol.isPrimaryKey = true;
+                schema.columns.push_back(static_cast<QCQL::Column &&>(idCol));
+
+                QCQL::Column layoutIdCol{};
+                QC::String::strncpy(layoutIdCol.name, "layoutId", sizeof(layoutIdCol.name) - 1);
+                layoutIdCol.type = QCQL::ColumnType::Text;
+                schema.columns.push_back(static_cast<QCQL::Column &&>(layoutIdCol));
+
+                QCQL::ForeignKey layoutForeignKey{};
+                QC::String::strncpy(layoutForeignKey.columnName, "layoutId", sizeof(layoutForeignKey.columnName) - 1);
+                QC::String::strncpy(layoutForeignKey.referencedTable, CMMS_DESKTOP_LAYOUT_TABLE, sizeof(layoutForeignKey.referencedTable) - 1);
+                QC::String::strncpy(layoutForeignKey.referencedColumn, "id", sizeof(layoutForeignKey.referencedColumn) - 1);
+                schema.foreignKeys.push_back(static_cast<QCQL::ForeignKey &&>(layoutForeignKey));
+
+                QCQL::Column regionIdCol{};
+                QC::String::strncpy(regionIdCol.name, "regionId", sizeof(regionIdCol.name) - 1);
+                regionIdCol.type = QCQL::ColumnType::Text;
+                schema.columns.push_back(static_cast<QCQL::Column &&>(regionIdCol));
+
+                QCQL::ForeignKey regionForeignKey{};
+                QC::String::strncpy(regionForeignKey.columnName, "regionId", sizeof(regionForeignKey.columnName) - 1);
+                QC::String::strncpy(regionForeignKey.referencedTable, CMMS_DESKTOP_REGION_TABLE, sizeof(regionForeignKey.referencedTable) - 1);
+                QC::String::strncpy(regionForeignKey.referencedColumn, "id", sizeof(regionForeignKey.referencedColumn) - 1);
+                schema.foreignKeys.push_back(static_cast<QCQL::ForeignKey &&>(regionForeignKey));
+
+                QCQL::Column controlTypeCol{};
+                QC::String::strncpy(controlTypeCol.name, "controlType", sizeof(controlTypeCol.name) - 1);
+                controlTypeCol.type = QCQL::ColumnType::Text;
+                schema.columns.push_back(static_cast<QCQL::Column &&>(controlTypeCol));
+
+                QCQL::Column controlKeyCol{};
+                QC::String::strncpy(controlKeyCol.name, "controlKey", sizeof(controlKeyCol.name) - 1);
+                controlKeyCol.type = QCQL::ColumnType::Text;
+                schema.columns.push_back(static_cast<QCQL::Column &&>(controlKeyCol));
+
+                schema.primaryKeyIndex = 0;
+                const QCQL::Status createSt = engine.createTable(m_cmmsDatabase, schema);
+                return createSt == QCQL::Status::Success || createSt == QCQL::Status::AlreadyExists;
+            };
+
+            auto ensureDesktopControlRuntimeTable = [&]() -> bool
+            {
+                QC::u32 tableId = 0;
+                const QCQL::Status lookupSt = engine.lookupTableId(m_cmmsDatabase, CMMS_DESKTOP_CONTROL_RUNTIME_TABLE, tableId);
+                if (lookupSt == QCQL::Status::Success)
+                {
+                    return attachForeignKey(CMMS_DESKTOP_CONTROL_RUNTIME_TABLE, "layoutId", CMMS_DESKTOP_LAYOUT_TABLE, "id") &&
+                           attachForeignKey(CMMS_DESKTOP_CONTROL_RUNTIME_TABLE, "controlId", CMMS_DESKTOP_CONTROL_TABLE, "id");
+                }
+                if (lookupSt != QCQL::Status::NotFound)
+                    return false;
+
+                QCQL::TableSchema schema{};
+                QC::String::strncpy(schema.tableName, CMMS_DESKTOP_CONTROL_RUNTIME_TABLE, sizeof(schema.tableName) - 1);
+
+                QCQL::Column idCol{};
+                QC::String::strncpy(idCol.name, "id", sizeof(idCol.name) - 1);
+                idCol.type = QCQL::ColumnType::Text;
+                idCol.isPrimaryKey = true;
+                schema.columns.push_back(static_cast<QCQL::Column &&>(idCol));
+
+                QCQL::Column layoutIdCol{};
+                QC::String::strncpy(layoutIdCol.name, "layoutId", sizeof(layoutIdCol.name) - 1);
+                layoutIdCol.type = QCQL::ColumnType::Text;
+                schema.columns.push_back(static_cast<QCQL::Column &&>(layoutIdCol));
+
+                QCQL::ForeignKey layoutForeignKey{};
+                QC::String::strncpy(layoutForeignKey.columnName, "layoutId", sizeof(layoutForeignKey.columnName) - 1);
+                QC::String::strncpy(layoutForeignKey.referencedTable, CMMS_DESKTOP_LAYOUT_TABLE, sizeof(layoutForeignKey.referencedTable) - 1);
+                QC::String::strncpy(layoutForeignKey.referencedColumn, "id", sizeof(layoutForeignKey.referencedColumn) - 1);
+                schema.foreignKeys.push_back(static_cast<QCQL::ForeignKey &&>(layoutForeignKey));
+
+                QCQL::Column controlIdCol{};
+                QC::String::strncpy(controlIdCol.name, "controlId", sizeof(controlIdCol.name) - 1);
+                controlIdCol.type = QCQL::ColumnType::Text;
+                schema.columns.push_back(static_cast<QCQL::Column &&>(controlIdCol));
+
+                QCQL::ForeignKey controlForeignKey{};
+                QC::String::strncpy(controlForeignKey.columnName, "controlId", sizeof(controlForeignKey.columnName) - 1);
+                QC::String::strncpy(controlForeignKey.referencedTable, CMMS_DESKTOP_CONTROL_TABLE, sizeof(controlForeignKey.referencedTable) - 1);
+                QC::String::strncpy(controlForeignKey.referencedColumn, "id", sizeof(controlForeignKey.referencedColumn) - 1);
+                schema.foreignKeys.push_back(static_cast<QCQL::ForeignKey &&>(controlForeignKey));
+
+                auto addTextColumn = [&](const char *name) {
+                    QCQL::Column column{};
+                    QC::String::strncpy(column.name, name, sizeof(column.name) - 1);
+                    column.type = QCQL::ColumnType::Text;
+                    schema.columns.push_back(static_cast<QCQL::Column &&>(column));
+                };
+
+                addTextColumn("x");
+                addTextColumn("y");
+                addTextColumn("width");
+                addTextColumn("height");
+                addTextColumn("zIndex");
+                addTextColumn("visible");
+                addTextColumn("enabled");
+                addTextColumn("styleClass");
+                addTextColumn("text");
+                addTextColumn("iconPath");
+
+                schema.primaryKeyIndex = 0;
+                const QCQL::Status createSt = engine.createTable(m_cmmsDatabase, schema);
+                return createSt == QCQL::Status::Success || createSt == QCQL::Status::AlreadyExists;
+            };
+
+            auto ensureDesktopControlPropertiesTable = [&]() -> bool
+            {
+                QC::u32 tableId = 0;
+                const QCQL::Status lookupSt = engine.lookupTableId(m_cmmsDatabase, CMMS_DESKTOP_CONTROL_PROPERTIES_TABLE, tableId);
+                if (lookupSt == QCQL::Status::Success)
+                {
+                    return attachForeignKey(CMMS_DESKTOP_CONTROL_PROPERTIES_TABLE, "layoutId", CMMS_DESKTOP_LAYOUT_TABLE, "id") &&
+                           attachForeignKey(CMMS_DESKTOP_CONTROL_PROPERTIES_TABLE, "controlId", CMMS_DESKTOP_CONTROL_TABLE, "id");
+                }
+                if (lookupSt != QCQL::Status::NotFound)
+                    return false;
+
+                QCQL::TableSchema schema{};
+                QC::String::strncpy(schema.tableName, CMMS_DESKTOP_CONTROL_PROPERTIES_TABLE, sizeof(schema.tableName) - 1);
+
+                QCQL::Column idCol{};
+                QC::String::strncpy(idCol.name, "id", sizeof(idCol.name) - 1);
+                idCol.type = QCQL::ColumnType::Text;
+                idCol.isPrimaryKey = true;
+                schema.columns.push_back(static_cast<QCQL::Column &&>(idCol));
+
+                QCQL::Column layoutIdCol{};
+                QC::String::strncpy(layoutIdCol.name, "layoutId", sizeof(layoutIdCol.name) - 1);
+                layoutIdCol.type = QCQL::ColumnType::Text;
+                schema.columns.push_back(static_cast<QCQL::Column &&>(layoutIdCol));
+
+                QCQL::ForeignKey layoutForeignKey{};
+                QC::String::strncpy(layoutForeignKey.columnName, "layoutId", sizeof(layoutForeignKey.columnName) - 1);
+                QC::String::strncpy(layoutForeignKey.referencedTable, CMMS_DESKTOP_LAYOUT_TABLE, sizeof(layoutForeignKey.referencedTable) - 1);
+                QC::String::strncpy(layoutForeignKey.referencedColumn, "id", sizeof(layoutForeignKey.referencedColumn) - 1);
+                schema.foreignKeys.push_back(static_cast<QCQL::ForeignKey &&>(layoutForeignKey));
+
+                QCQL::Column controlIdCol{};
+                QC::String::strncpy(controlIdCol.name, "controlId", sizeof(controlIdCol.name) - 1);
+                controlIdCol.type = QCQL::ColumnType::Text;
+                schema.columns.push_back(static_cast<QCQL::Column &&>(controlIdCol));
+
+                QCQL::ForeignKey controlForeignKey{};
+                QC::String::strncpy(controlForeignKey.columnName, "controlId", sizeof(controlForeignKey.columnName) - 1);
+                QC::String::strncpy(controlForeignKey.referencedTable, CMMS_DESKTOP_CONTROL_TABLE, sizeof(controlForeignKey.referencedTable) - 1);
+                QC::String::strncpy(controlForeignKey.referencedColumn, "id", sizeof(controlForeignKey.referencedColumn) - 1);
+                schema.foreignKeys.push_back(static_cast<QCQL::ForeignKey &&>(controlForeignKey));
+
+                QCQL::Column keyCol{};
+                QC::String::strncpy(keyCol.name, "propertyKey", sizeof(keyCol.name) - 1);
+                keyCol.type = QCQL::ColumnType::Text;
+                schema.columns.push_back(static_cast<QCQL::Column &&>(keyCol));
+
+                QCQL::Column valueCol{};
+                QC::String::strncpy(valueCol.name, "propertyValue", sizeof(valueCol.name) - 1);
+                valueCol.type = QCQL::ColumnType::Text;
+                schema.columns.push_back(static_cast<QCQL::Column &&>(valueCol));
+
+                schema.primaryKeyIndex = 0;
+                const QCQL::Status createSt = engine.createTable(m_cmmsDatabase, schema);
+                return createSt == QCQL::Status::Success || createSt == QCQL::Status::AlreadyExists;
+            };
+
+            auto ensureDesktopControlBindingsTable = [&]() -> bool
+            {
+                QC::u32 tableId = 0;
+                const QCQL::Status lookupSt = engine.lookupTableId(m_cmmsDatabase, CMMS_DESKTOP_CONTROL_BINDINGS_TABLE, tableId);
+                if (lookupSt == QCQL::Status::Success)
+                {
+                    return attachForeignKey(CMMS_DESKTOP_CONTROL_BINDINGS_TABLE, "layoutId", CMMS_DESKTOP_LAYOUT_TABLE, "id") &&
+                           attachForeignKey(CMMS_DESKTOP_CONTROL_BINDINGS_TABLE, "controlId", CMMS_DESKTOP_CONTROL_TABLE, "id");
+                }
+                if (lookupSt != QCQL::Status::NotFound)
+                    return false;
+
+                QCQL::TableSchema schema{};
+                QC::String::strncpy(schema.tableName, CMMS_DESKTOP_CONTROL_BINDINGS_TABLE, sizeof(schema.tableName) - 1);
+
+                QCQL::Column idCol{};
+                QC::String::strncpy(idCol.name, "id", sizeof(idCol.name) - 1);
+                idCol.type = QCQL::ColumnType::Text;
+                idCol.isPrimaryKey = true;
+                schema.columns.push_back(static_cast<QCQL::Column &&>(idCol));
+
+                QCQL::Column layoutIdCol{};
+                QC::String::strncpy(layoutIdCol.name, "layoutId", sizeof(layoutIdCol.name) - 1);
+                layoutIdCol.type = QCQL::ColumnType::Text;
+                schema.columns.push_back(static_cast<QCQL::Column &&>(layoutIdCol));
+
+                QCQL::ForeignKey layoutForeignKey{};
+                QC::String::strncpy(layoutForeignKey.columnName, "layoutId", sizeof(layoutForeignKey.columnName) - 1);
+                QC::String::strncpy(layoutForeignKey.referencedTable, CMMS_DESKTOP_LAYOUT_TABLE, sizeof(layoutForeignKey.referencedTable) - 1);
+                QC::String::strncpy(layoutForeignKey.referencedColumn, "id", sizeof(layoutForeignKey.referencedColumn) - 1);
+                schema.foreignKeys.push_back(static_cast<QCQL::ForeignKey &&>(layoutForeignKey));
+
+                QCQL::Column controlIdCol{};
+                QC::String::strncpy(controlIdCol.name, "controlId", sizeof(controlIdCol.name) - 1);
+                controlIdCol.type = QCQL::ColumnType::Text;
+                schema.columns.push_back(static_cast<QCQL::Column &&>(controlIdCol));
+
+                QCQL::ForeignKey controlForeignKey{};
+                QC::String::strncpy(controlForeignKey.columnName, "controlId", sizeof(controlForeignKey.columnName) - 1);
+                QC::String::strncpy(controlForeignKey.referencedTable, CMMS_DESKTOP_CONTROL_TABLE, sizeof(controlForeignKey.referencedTable) - 1);
+                QC::String::strncpy(controlForeignKey.referencedColumn, "id", sizeof(controlForeignKey.referencedColumn) - 1);
+                schema.foreignKeys.push_back(static_cast<QCQL::ForeignKey &&>(controlForeignKey));
+
+                QCQL::Column eventCol{};
+                QC::String::strncpy(eventCol.name, "eventName", sizeof(eventCol.name) - 1);
+                eventCol.type = QCQL::ColumnType::Text;
+                schema.columns.push_back(static_cast<QCQL::Column &&>(eventCol));
+
+                QCQL::Column actionCol{};
+                QC::String::strncpy(actionCol.name, "actionName", sizeof(actionCol.name) - 1);
+                actionCol.type = QCQL::ColumnType::Text;
+                schema.columns.push_back(static_cast<QCQL::Column &&>(actionCol));
+
+                QCQL::Column argumentCol{};
+                QC::String::strncpy(argumentCol.name, "argument", sizeof(argumentCol.name) - 1);
+                argumentCol.type = QCQL::ColumnType::Text;
+                schema.columns.push_back(static_cast<QCQL::Column &&>(argumentCol));
+
+                schema.primaryKeyIndex = 0;
+                const QCQL::Status createSt = engine.createTable(m_cmmsDatabase, schema);
+                return createSt == QCQL::Status::Success || createSt == QCQL::Status::AlreadyExists;
+            };
+
+            auto ensureDesktopLayoutThemeTable = [&]() -> bool
+            {
+                QC::u32 tableId = 0;
+                const QCQL::Status lookupSt = engine.lookupTableId(m_cmmsDatabase, CMMS_DESKTOP_LAYOUT_THEME_TABLE, tableId);
+                if (lookupSt == QCQL::Status::Success)
+                    return attachForeignKey(CMMS_DESKTOP_LAYOUT_THEME_TABLE, "layoutId", CMMS_DESKTOP_LAYOUT_TABLE, "id");
+                if (lookupSt != QCQL::Status::NotFound)
+                    return false;
+
+                QCQL::TableSchema schema{};
+                QC::String::strncpy(schema.tableName, CMMS_DESKTOP_LAYOUT_THEME_TABLE, sizeof(schema.tableName) - 1);
+
+                QCQL::Column idCol{};
+                QC::String::strncpy(idCol.name, "id", sizeof(idCol.name) - 1);
+                idCol.type = QCQL::ColumnType::Text;
+                idCol.isPrimaryKey = true;
+                schema.columns.push_back(static_cast<QCQL::Column &&>(idCol));
+
+                QCQL::Column layoutIdCol{};
+                QC::String::strncpy(layoutIdCol.name, "layoutId", sizeof(layoutIdCol.name) - 1);
+                layoutIdCol.type = QCQL::ColumnType::Text;
+                schema.columns.push_back(static_cast<QCQL::Column &&>(layoutIdCol));
+
+                QCQL::ForeignKey layoutForeignKey{};
+                QC::String::strncpy(layoutForeignKey.columnName, "layoutId", sizeof(layoutForeignKey.columnName) - 1);
+                QC::String::strncpy(layoutForeignKey.referencedTable, CMMS_DESKTOP_LAYOUT_TABLE, sizeof(layoutForeignKey.referencedTable) - 1);
+                QC::String::strncpy(layoutForeignKey.referencedColumn, "id", sizeof(layoutForeignKey.referencedColumn) - 1);
+                schema.foreignKeys.push_back(static_cast<QCQL::ForeignKey &&>(layoutForeignKey));
+
+                QCQL::Column themeIdCol{};
+                QC::String::strncpy(themeIdCol.name, "themeId", sizeof(themeIdCol.name) - 1);
+                themeIdCol.type = QCQL::ColumnType::Text;
+                schema.columns.push_back(static_cast<QCQL::Column &&>(themeIdCol));
+
+                QCQL::Column variantCol{};
+                QC::String::strncpy(variantCol.name, "variant", sizeof(variantCol.name) - 1);
+                variantCol.type = QCQL::ColumnType::Text;
+                schema.columns.push_back(static_cast<QCQL::Column &&>(variantCol));
+
+                schema.primaryKeyIndex = 0;
+                const QCQL::Status createSt = engine.createTable(m_cmmsDatabase, schema);
+                return createSt == QCQL::Status::Success || createSt == QCQL::Status::AlreadyExists;
+            };
+
+            auto ensureDesktopLayoutAssetTable = [&]() -> bool
+            {
+                QC::u32 tableId = 0;
+                const QCQL::Status lookupSt = engine.lookupTableId(m_cmmsDatabase, CMMS_DESKTOP_LAYOUT_ASSET_TABLE, tableId);
+                if (lookupSt == QCQL::Status::Success)
+                    return attachForeignKey(CMMS_DESKTOP_LAYOUT_ASSET_TABLE, "layoutId", CMMS_DESKTOP_LAYOUT_TABLE, "id");
+                if (lookupSt != QCQL::Status::NotFound)
+                    return false;
+
+                QCQL::TableSchema schema{};
+                QC::String::strncpy(schema.tableName, CMMS_DESKTOP_LAYOUT_ASSET_TABLE, sizeof(schema.tableName) - 1);
+
+                QCQL::Column idCol{};
+                QC::String::strncpy(idCol.name, "id", sizeof(idCol.name) - 1);
+                idCol.type = QCQL::ColumnType::Text;
+                idCol.isPrimaryKey = true;
+                schema.columns.push_back(static_cast<QCQL::Column &&>(idCol));
+
+                QCQL::Column layoutIdCol{};
+                QC::String::strncpy(layoutIdCol.name, "layoutId", sizeof(layoutIdCol.name) - 1);
+                layoutIdCol.type = QCQL::ColumnType::Text;
+                schema.columns.push_back(static_cast<QCQL::Column &&>(layoutIdCol));
+
+                QCQL::ForeignKey layoutForeignKey{};
+                QC::String::strncpy(layoutForeignKey.columnName, "layoutId", sizeof(layoutForeignKey.columnName) - 1);
+                QC::String::strncpy(layoutForeignKey.referencedTable, CMMS_DESKTOP_LAYOUT_TABLE, sizeof(layoutForeignKey.referencedTable) - 1);
+                QC::String::strncpy(layoutForeignKey.referencedColumn, "id", sizeof(layoutForeignKey.referencedColumn) - 1);
+                schema.foreignKeys.push_back(static_cast<QCQL::ForeignKey &&>(layoutForeignKey));
+
+                QCQL::Column assetRoleCol{};
+                QC::String::strncpy(assetRoleCol.name, "assetRole", sizeof(assetRoleCol.name) - 1);
+                assetRoleCol.type = QCQL::ColumnType::Text;
+                schema.columns.push_back(static_cast<QCQL::Column &&>(assetRoleCol));
+
+                QCQL::Column assetKindCol{};
+                QC::String::strncpy(assetKindCol.name, "assetKind", sizeof(assetKindCol.name) - 1);
+                assetKindCol.type = QCQL::ColumnType::Text;
+                schema.columns.push_back(static_cast<QCQL::Column &&>(assetKindCol));
+
+                QCQL::Column assetPathCol{};
+                QC::String::strncpy(assetPathCol.name, "assetPath", sizeof(assetPathCol.name) - 1);
+                assetPathCol.type = QCQL::ColumnType::Text;
+                schema.columns.push_back(static_cast<QCQL::Column &&>(assetPathCol));
+
+                QCQL::Column backgroundModeCol{};
+                QC::String::strncpy(backgroundModeCol.name, "backgroundMode", sizeof(backgroundModeCol.name) - 1);
+                backgroundModeCol.type = QCQL::ColumnType::Text;
+                schema.columns.push_back(static_cast<QCQL::Column &&>(backgroundModeCol));
+
+                schema.primaryKeyIndex = 0;
+                const QCQL::Status createSt = engine.createTable(m_cmmsDatabase, schema);
+                return createSt == QCQL::Status::Success || createSt == QCQL::Status::AlreadyExists;
+            };
+
+            auto ensureDesktopLayoutMaterializationTable = [&]() -> bool
+            {
+                QC::u32 tableId = 0;
+                const QCQL::Status lookupSt = engine.lookupTableId(m_cmmsDatabase, CMMS_DESKTOP_LAYOUT_MATERIALIZATION_TABLE, tableId);
+                if (lookupSt == QCQL::Status::Success)
+                    return attachForeignKey(CMMS_DESKTOP_LAYOUT_MATERIALIZATION_TABLE, "layoutId", CMMS_DESKTOP_LAYOUT_TABLE, "id");
+                if (lookupSt != QCQL::Status::NotFound)
+                    return false;
+
+                QCQL::TableSchema schema{};
+                QC::String::strncpy(schema.tableName, CMMS_DESKTOP_LAYOUT_MATERIALIZATION_TABLE, sizeof(schema.tableName) - 1);
+
+                QCQL::Column idCol{};
+                QC::String::strncpy(idCol.name, "id", sizeof(idCol.name) - 1);
+                idCol.type = QCQL::ColumnType::Text;
+                idCol.isPrimaryKey = true;
+                schema.columns.push_back(static_cast<QCQL::Column &&>(idCol));
+
+                QCQL::Column layoutIdCol{};
+                QC::String::strncpy(layoutIdCol.name, "layoutId", sizeof(layoutIdCol.name) - 1);
+                layoutIdCol.type = QCQL::ColumnType::Text;
+                schema.columns.push_back(static_cast<QCQL::Column &&>(layoutIdCol));
+
+                QCQL::ForeignKey layoutForeignKey{};
+                QC::String::strncpy(layoutForeignKey.columnName, "layoutId", sizeof(layoutForeignKey.columnName) - 1);
+                QC::String::strncpy(layoutForeignKey.referencedTable, CMMS_DESKTOP_LAYOUT_TABLE, sizeof(layoutForeignKey.referencedTable) - 1);
+                QC::String::strncpy(layoutForeignKey.referencedColumn, "id", sizeof(layoutForeignKey.referencedColumn) - 1);
+                schema.foreignKeys.push_back(static_cast<QCQL::ForeignKey &&>(layoutForeignKey));
+
+                QCQL::Column sourcePathCol{};
+                QC::String::strncpy(sourcePathCol.name, "sourcePath", sizeof(sourcePathCol.name) - 1);
+                sourcePathCol.type = QCQL::ColumnType::Text;
+                schema.columns.push_back(static_cast<QCQL::Column &&>(sourcePathCol));
+
+                QCQL::Column chunkCountCol{};
+                QC::String::strncpy(chunkCountCol.name, "chunkCount", sizeof(chunkCountCol.name) - 1);
+                chunkCountCol.type = QCQL::ColumnType::Text;
+                schema.columns.push_back(static_cast<QCQL::Column &&>(chunkCountCol));
+
+                QCQL::Column schemaVersionCol{};
+                QC::String::strncpy(schemaVersionCol.name, "schemaVersion", sizeof(schemaVersionCol.name) - 1);
+                schemaVersionCol.type = QCQL::ColumnType::Text;
+                schema.columns.push_back(static_cast<QCQL::Column &&>(schemaVersionCol));
+
+                schema.primaryKeyIndex = 0;
+                const QCQL::Status createSt = engine.createTable(m_cmmsDatabase, schema);
+                return createSt == QCQL::Status::Success || createSt == QCQL::Status::AlreadyExists;
+            };
+
+            auto ensureDesktopControlHierarchyTable = [&]() -> bool
+            {
+                QC::u32 tableId = 0;
+                const QCQL::Status lookupSt = engine.lookupTableId(m_cmmsDatabase, CMMS_DESKTOP_CONTROL_HIERARCHY_TABLE, tableId);
+                if (lookupSt == QCQL::Status::Success)
+                {
+                    return attachForeignKey(CMMS_DESKTOP_CONTROL_HIERARCHY_TABLE, "layoutId", CMMS_DESKTOP_LAYOUT_TABLE, "id") &&
+                           attachForeignKey(CMMS_DESKTOP_CONTROL_HIERARCHY_TABLE, "parentControlId", CMMS_DESKTOP_CONTROL_TABLE, "id") &&
+                           attachForeignKey(CMMS_DESKTOP_CONTROL_HIERARCHY_TABLE, "childControlId", CMMS_DESKTOP_CONTROL_TABLE, "id");
+                }
+                if (lookupSt != QCQL::Status::NotFound)
+                    return false;
+
+                QCQL::TableSchema schema{};
+                QC::String::strncpy(schema.tableName, CMMS_DESKTOP_CONTROL_HIERARCHY_TABLE, sizeof(schema.tableName) - 1);
+
+                QCQL::Column idCol{};
+                QC::String::strncpy(idCol.name, "id", sizeof(idCol.name) - 1);
+                idCol.type = QCQL::ColumnType::Text;
+                idCol.isPrimaryKey = true;
+                schema.columns.push_back(static_cast<QCQL::Column &&>(idCol));
+
+                QCQL::Column layoutIdCol{};
+                QC::String::strncpy(layoutIdCol.name, "layoutId", sizeof(layoutIdCol.name) - 1);
+                layoutIdCol.type = QCQL::ColumnType::Text;
+                schema.columns.push_back(static_cast<QCQL::Column &&>(layoutIdCol));
+
+                QCQL::ForeignKey layoutForeignKey{};
+                QC::String::strncpy(layoutForeignKey.columnName, "layoutId", sizeof(layoutForeignKey.columnName) - 1);
+                QC::String::strncpy(layoutForeignKey.referencedTable, CMMS_DESKTOP_LAYOUT_TABLE, sizeof(layoutForeignKey.referencedTable) - 1);
+                QC::String::strncpy(layoutForeignKey.referencedColumn, "id", sizeof(layoutForeignKey.referencedColumn) - 1);
+                schema.foreignKeys.push_back(static_cast<QCQL::ForeignKey &&>(layoutForeignKey));
+
+                QCQL::Column parentControlIdCol{};
+                QC::String::strncpy(parentControlIdCol.name, "parentControlId", sizeof(parentControlIdCol.name) - 1);
+                parentControlIdCol.type = QCQL::ColumnType::Text;
+                schema.columns.push_back(static_cast<QCQL::Column &&>(parentControlIdCol));
+
+                QCQL::ForeignKey parentForeignKey{};
+                QC::String::strncpy(parentForeignKey.columnName, "parentControlId", sizeof(parentForeignKey.columnName) - 1);
+                QC::String::strncpy(parentForeignKey.referencedTable, CMMS_DESKTOP_CONTROL_TABLE, sizeof(parentForeignKey.referencedTable) - 1);
+                QC::String::strncpy(parentForeignKey.referencedColumn, "id", sizeof(parentForeignKey.referencedColumn) - 1);
+                schema.foreignKeys.push_back(static_cast<QCQL::ForeignKey &&>(parentForeignKey));
+
+                QCQL::Column childControlIdCol{};
+                QC::String::strncpy(childControlIdCol.name, "childControlId", sizeof(childControlIdCol.name) - 1);
+                childControlIdCol.type = QCQL::ColumnType::Text;
+                schema.columns.push_back(static_cast<QCQL::Column &&>(childControlIdCol));
+
+                QCQL::ForeignKey childForeignKey{};
+                QC::String::strncpy(childForeignKey.columnName, "childControlId", sizeof(childForeignKey.columnName) - 1);
+                QC::String::strncpy(childForeignKey.referencedTable, CMMS_DESKTOP_CONTROL_TABLE, sizeof(childForeignKey.referencedTable) - 1);
+                QC::String::strncpy(childForeignKey.referencedColumn, "id", sizeof(childForeignKey.referencedColumn) - 1);
+                schema.foreignKeys.push_back(static_cast<QCQL::ForeignKey &&>(childForeignKey));
+
+                QCQL::Column childOrderCol{};
+                QC::String::strncpy(childOrderCol.name, "childOrder", sizeof(childOrderCol.name) - 1);
+                childOrderCol.type = QCQL::ColumnType::Text;
+                schema.columns.push_back(static_cast<QCQL::Column &&>(childOrderCol));
+
+                schema.primaryKeyIndex = 0;
+                const QCQL::Status createSt = engine.createTable(m_cmmsDatabase, schema);
+                return createSt == QCQL::Status::Success || createSt == QCQL::Status::AlreadyExists;
+            };
+
+            auto seedDesktopDocumentRow = [&](const char *tableName, const char *chunkTableName, const char *documentId, const char *sourcePath, QC::u64 maxBytes) -> bool
+            {
+                if (!tableName || !*tableName || !chunkTableName || !*chunkTableName || !documentId || !*documentId || !sourcePath || !*sourcePath)
+                    return false;
+
+                const QCQL::Cell keyCell = makeTextCell(documentId);
+                QCQL::Row existing{};
+                const QCQL::Status existingSt =
+                    engine.selectRowByPrimaryKeyByName(m_cmmsDatabase, tableName, keyCell.bytes, existing);
+
+                QC::u32 existingChunkCount = 0;
+                if (existingSt == QCQL::Status::Success && !existing.tombstone && existing.cells.size() >= 3 &&
+                    parseUnsignedTextCell(existing.cells[2], existingChunkCount) && existingChunkCount > 0)
+                {
+                    return true;
+                }
+
+                QFS::File *file = QFS::VFS::instance().open(sourcePath, QFS::OpenMode::Read);
+                if (!file)
+                    return true;
+
+                const QC::u64 size64 = file->size();
+                if (size64 == 0 || size64 > maxBytes)
+                {
+                    QFS::VFS::instance().close(file);
+                    return true;
+                }
+
+                QC::Vector<QC::u8> payloadBytes;
+                payloadBytes.resize(static_cast<QC::usize>(size64));
+                const QC::isize readCount = file->read(reinterpret_cast<char *>(payloadBytes.data()), payloadBytes.size());
+                QFS::VFS::instance().close(file);
+                if (readCount <= 0)
+                    return true;
+
+                if (static_cast<QC::usize>(readCount) < payloadBytes.size())
+                    payloadBytes.resize(static_cast<QC::usize>(readCount));
+
+                const QC::u32 chunkCount = static_cast<QC::u32>((payloadBytes.size() + CMMS_DESKTOP_DOCUMENT_CHUNK_BYTES - 1) / CMMS_DESKTOP_DOCUMENT_CHUNK_BYTES);
+                if (chunkCount == 0)
+                    return true;
+
+                QCQL::Row row{};
+                row.cells.push_back(keyCell);
+                row.cells.push_back(makeTextCell(sourcePath));
+
+                row.cells.push_back(makeUnsignedTextCell(chunkCount));
+
+                bool metadataOk = false;
+
+                if (existingSt == QCQL::Status::Success && !existing.tombstone)
+                    metadataOk = (engine.updateRowByPrimaryKeyByName(m_cmmsDatabase, tableName, keyCell.bytes, row) == QCQL::Status::Success);
+                else
+                {
+                    QC::u32 pageId = 0;
+                    metadataOk = (engine.insertRowByName(m_cmmsDatabase, tableName, row, &pageId) == QCQL::Status::Success);
+                }
+
+                if (!metadataOk)
+                    return false;
+
+                for (QC::u32 chunkIndex = 0; chunkIndex < chunkCount; ++chunkIndex)
+                {
+                    const QC::usize start = static_cast<QC::usize>(chunkIndex) * CMMS_DESKTOP_DOCUMENT_CHUNK_BYTES;
+                    QC::usize length = payloadBytes.size() - start;
+                    if (length > CMMS_DESKTOP_DOCUMENT_CHUNK_BYTES)
+                        length = CMMS_DESKTOP_DOCUMENT_CHUNK_BYTES;
+
+                    char chunkId[48];
+                    QC::String::memset(chunkId, 0, sizeof(chunkId));
+                    if (!makeChunkRowId(documentId, chunkIndex, chunkId, sizeof(chunkId)))
+                        return false;
+
+                    QCQL::Row chunkRow{};
+                    chunkRow.cells.push_back(makeTextCell(chunkId));
+                    chunkRow.cells.push_back(makeTextCell(documentId));
+                    chunkRow.cells.push_back(makeUnsignedTextCell(chunkIndex));
+
+                    QCQL::Cell payloadCell{};
+                    payloadCell.type = QCQL::ColumnType::Text;
+                    for (QC::usize i = 0; i < length; ++i)
+                        payloadCell.bytes.push_back(payloadBytes[start + i]);
+                    chunkRow.cells.push_back(static_cast<QCQL::Cell &&>(payloadCell));
+
+                    const QCQL::Cell chunkKeyCell = makeTextCell(chunkId);
+                    QCQL::Row existingChunk{};
+                    const QCQL::Status existingChunkSt =
+                        engine.selectRowByPrimaryKeyByName(m_cmmsDatabase, chunkTableName, chunkKeyCell.bytes, existingChunk);
+                    if (existingChunkSt == QCQL::Status::Success && !existingChunk.tombstone)
+                    {
+                        if (engine.updateRowByPrimaryKeyByName(m_cmmsDatabase, chunkTableName, chunkKeyCell.bytes, chunkRow) != QCQL::Status::Success)
+                            return false;
+                    }
+                    else
+                    {
+                        QC::u32 pageId = 0;
+                        if (engine.insertRowByName(m_cmmsDatabase, chunkTableName, chunkRow, &pageId) != QCQL::Status::Success)
+                            return false;
+                    }
+                }
+
+                return true;
+            };
+
+            auto ensureDesktopLayoutTable = [&](QCQL::Database &db) -> bool
+            {
+                (void)db;
+                return ensureDesktopDocumentTable(CMMS_DESKTOP_LAYOUT_TABLE);
+            };
+
+            auto seedDesktopLayoutRow = [&](QCQL::Database &db, const char *layoutId, const char *sourcePath) -> bool
+            {
+                (void)db;
+                return seedDesktopDocumentRow(CMMS_DESKTOP_LAYOUT_TABLE, CMMS_DESKTOP_LAYOUT_CHUNK_TABLE, layoutId, sourcePath, 1024 * 256);
+            };
+
+            auto collectLayoutScopedKeys = [&](const char *tableName,
+                                               QC::usize layoutColumnIndex,
+                                               const char *layoutId,
+                                               QC::Vector<QC::Vector<QC::u8>> &outKeys,
+                                               bool *outSawCorruptRows = nullptr) -> bool
+            {
+                outKeys.clear();
+                if (outSawCorruptRows)
+                    *outSawCorruptRows = false;
+                if (!tableName || !*tableName || !layoutId || !*layoutId)
+                    return false;
+
+                QC::u32 tableId = 0;
+                const QCQL::Status lookupSt = engine.lookupTableId(m_cmmsDatabase, tableName, tableId);
+                if (lookupSt == QCQL::Status::NotFound)
+                    return true;
+                if (lookupSt != QCQL::Status::Success)
+                {
+                    QC_LOG_WARN(LOG_MODULE,
+                                "CMMS runtime key scan lookup failed table=%s layout=%s status=%d",
+                                tableName,
+                                layoutId,
+                                static_cast<int>(lookupSt));
+                    return false;
+                }
+
+                QCQL::Table *table = findTable(tableName);
+                if (!table)
+                {
+                    QC_LOG_WARN(LOG_MODULE,
+                                "CMMS runtime key scan missing table metadata table=%s layout=%s tableId=%u",
+                                tableName,
+                                layoutId,
+                                static_cast<unsigned>(tableId));
+                    return false;
+                }
+
+                QC::u32 corruptRowsSkipped = 0;
+
+                for (QC::usize pageIndex = 0; pageIndex < table->pages.size(); ++pageIndex)
+                {
+                    QCQL::Page page{};
+                    const QCQL::Status loadPageSt = engine.loadPage(m_cmmsDatabase, table->pages[pageIndex], page);
+                    if (loadPageSt != QCQL::Status::Success)
+                    {
+                        QC_LOG_WARN(LOG_MODULE,
+                                    "CMMS runtime key scan page load failed table=%s layout=%s page=%u status=%d",
+                                    tableName,
+                                    layoutId,
+                                    static_cast<unsigned>(table->pages[pageIndex]),
+                                    static_cast<int>(loadPageSt));
+                        return false;
+                    }
+
+                    for (QC::usize rowIndex = 0; rowIndex < page.rowOffsets.size(); ++rowIndex)
+                    {
+                        QCQL::Row row{};
+                        const QCQL::Status readRowSt = engine.readRow(m_cmmsDatabase, page.header.pageId, page.rowOffsets[rowIndex], row);
+                        if (readRowSt == QCQL::Status::Corrupt)
+                        {
+                            ++corruptRowsSkipped;
+                            if (outSawCorruptRows)
+                                *outSawCorruptRows = true;
+                            continue;
+                        }
+                        if (readRowSt != QCQL::Status::Success)
+                        {
+                            QC_LOG_WARN(LOG_MODULE,
+                                        "CMMS runtime key scan row read failed table=%s layout=%s page=%u row_offset=%u status=%d",
+                                        tableName,
+                                        layoutId,
+                                        static_cast<unsigned>(page.header.pageId),
+                                        static_cast<unsigned>(page.rowOffsets[rowIndex]),
+                                        static_cast<int>(readRowSt));
+                            return false;
+                        }
+                        if (row.tombstone || row.cells.size() <= layoutColumnIndex)
+                            continue;
+                        if (!cellMatchesText(row.cells[layoutColumnIndex], layoutId))
+                            continue;
+                        outKeys.push_back(row.cells[0].bytes);
+                    }
+                }
+
+                if (corruptRowsSkipped > 0)
+                {
+                    QC_LOG_WARN(LOG_MODULE,
+                                "CMMS runtime key scan skipped corrupt rows table=%s layout=%s count=%u",
+                                tableName,
+                                layoutId,
+                                static_cast<unsigned>(corruptRowsSkipped));
+                }
+
+                return true;
+            };
+
+            auto removeRowsByKey = [&](const char *tableName,
+                                       const QC::Vector<QC::Vector<QC::u8>> &keys) -> bool
+            {
+                for (QC::usize i = 0; i < keys.size(); ++i)
+                {
+                    const QCQL::Status removeSt = engine.removeRowByPrimaryKeyByName(m_cmmsDatabase, tableName, keys[i]);
+                    if (removeSt != QCQL::Status::Success && removeSt != QCQL::Status::NotFound)
+                        return false;
+                }
+                return true;
+            };
+
+            auto upsertRowById = [&](const char *tableName, const char *rowId, const QCQL::Row &row) -> bool
+            {
+                if (!tableName || !*tableName || !rowId || !*rowId)
+                    return false;
+
+                const QCQL::Cell keyCell = makeTextCell(rowId);
+                QCQL::Row existing{};
+                const QCQL::Status existingSt = engine.selectRowByPrimaryKeyByName(m_cmmsDatabase, tableName, keyCell.bytes, existing);
+                if (existingSt == QCQL::Status::Success && !existing.tombstone)
+                    return engine.updateRowByPrimaryKeyByName(m_cmmsDatabase, tableName, keyCell.bytes, row) == QCQL::Status::Success;
+                if (existingSt != QCQL::Status::NotFound)
+                    return false;
+
+                QC::u32 pageId = 0;
+                return engine.insertRowByName(m_cmmsDatabase, tableName, row, &pageId) == QCQL::Status::Success;
+            };
+
+            auto resolveControlRowId = [&](const DesktopDocument &document,
+                                           const DesktopControlModel &control,
+                                           QC::usize controlIndex,
+                                           char *out,
+                                           QC::usize outCap) -> bool
+            {
+                if (control.id[0])
+                    return makeScopedRowId(document.documentId, control.id, out, outCap);
+                return makeScopedIndexedRowId(document.documentId, "control", static_cast<QC::u32>(controlIndex), out, outCap);
+            };
+
+            auto findControlRowIdBySourceId = [&](const DesktopDocument &document,
+                                                  const char *sourceControlId,
+                                                  char *out,
+                                                  QC::usize outCap) -> bool
+            {
+                if (!sourceControlId || !*sourceControlId)
+                    return false;
+
+                for (QC::usize i = 0; i < document.controls.size(); ++i)
+                {
+                    if (QC::String::strcmp(document.controls[i].id, sourceControlId) != 0)
+                        continue;
+                    return resolveControlRowId(document, document.controls[i], i, out, outCap);
+                }
+
+                return false;
+            };
+
+            auto materializeLayoutRuntimeRows = [&](const char *layoutId) -> bool
+            {
+                if (!layoutId || !*layoutId)
+                    return false;
+
+                const QCQL::Cell layoutKeyCell = makeTextCell(layoutId);
+                QCQL::Row layoutMetadataRow{};
+                const QCQL::Status layoutMetadataSt = engine.selectRowByPrimaryKeyByName(m_cmmsDatabase,
+                                                                                          CMMS_DESKTOP_LAYOUT_TABLE,
+                                                                                          layoutKeyCell.bytes,
+                                                                                          layoutMetadataRow);
+                if (layoutMetadataSt != QCQL::Status::Success || layoutMetadataRow.tombstone || layoutMetadataRow.cells.size() < 3)
+                {
+                    QC_LOG_WARN(LOG_MODULE,
+                                "CMMS runtime materialization missing layout metadata layout=%s status=%d tombstone=%d cells=%u",
+                                layoutId,
+                                static_cast<int>(layoutMetadataSt),
+                                layoutMetadataRow.tombstone ? 1 : 0,
+                                static_cast<unsigned>(layoutMetadataRow.cells.size()));
+                    return false;
+                }
+
+                char layoutSourcePath[192];
+                QC::String::memset(layoutSourcePath, 0, sizeof(layoutSourcePath));
+                if (!copyCellText(layoutMetadataRow.cells[1], layoutSourcePath, sizeof(layoutSourcePath)))
+                    layoutSourcePath[0] = '\0';
+
+                QC::u32 layoutChunkCount = 0;
+                if (!parseUnsignedTextCell(layoutMetadataRow.cells[2], layoutChunkCount))
+                    layoutChunkCount = 0;
+
+                QCQL::Row materializationRow{};
+                const QCQL::Status materializationSt = engine.selectRowByPrimaryKeyByName(m_cmmsDatabase,
+                                                                                           CMMS_DESKTOP_LAYOUT_MATERIALIZATION_TABLE,
+                                                                                           layoutKeyCell.bytes,
+                                                                                           materializationRow);
+                QC::u32 materializedSchemaVersion = 0;
+                QC::u32 materializedChunkCount = 0;
+                char materializedSourcePath[192];
+                QC::String::memset(materializedSourcePath, 0, sizeof(materializedSourcePath));
+                const bool haveMaterializationState =
+                    materializationSt == QCQL::Status::Success &&
+                    !materializationRow.tombstone &&
+                    materializationRow.cells.size() >= 5 &&
+                    copyCellText(materializationRow.cells[2], materializedSourcePath, sizeof(materializedSourcePath)) &&
+                    parseUnsignedTextCell(materializationRow.cells[3], materializedChunkCount) &&
+                    parseUnsignedTextCell(materializationRow.cells[4], materializedSchemaVersion);
+
+                if (haveMaterializationState &&
+                    materializedSchemaVersion == CMMS_LAYOUT_MATERIALIZATION_SCHEMA_VERSION &&
+                    materializedChunkCount == layoutChunkCount &&
+                    QC::String::strcmp(materializedSourcePath, layoutSourcePath) == 0)
+                {
+                    QC_LOG_INFO(LOG_MODULE,
+                                "CMMS runtime materialization skipped layout=%s source=%s chunks=%u schema=%u\n",
+                                layoutId,
+                                layoutSourcePath[0] ? layoutSourcePath : "<unknown>",
+                                static_cast<unsigned>(layoutChunkCount),
+                                static_cast<unsigned>(materializedSchemaVersion));
+                    return true;
+                }
+
+                DesktopDocumentImportResult importResult{};
+                if (!DesktopDocumentIO::importCmmsJson(m_cmmsDatabase, layoutId, importResult) || !importResult.loaded)
+                {
+                    DesktopDocumentImportResult cuimlImportResult{};
+                    if (!DesktopDocumentIO::importCmmsCuiml(m_cmmsDatabase, layoutId, cuimlImportResult) || !cuimlImportResult.loaded)
+                    {
+                        QC_LOG_WARN(LOG_MODULE,
+                                    "CMMS runtime materialization import failed layout=%s json_error='%s' cuiml_error='%s'",
+                                    layoutId,
+                                    importResult.error,
+                                    cuimlImportResult.error);
+                        return false;
+                    }
+                    importResult = static_cast<DesktopDocumentImportResult &&>(cuimlImportResult);
+                }
+
+                QC::Vector<QC::Vector<QC::u8>> themeKeys;
+                QC::Vector<QC::Vector<QC::u8>> assetKeys;
+                QC::Vector<QC::Vector<QC::u8>> propertyKeys;
+                QC::Vector<QC::Vector<QC::u8>> bindingKeys;
+                QC::Vector<QC::Vector<QC::u8>> hierarchyKeys;
+                QC::Vector<QC::Vector<QC::u8>> runtimeKeys;
+                QC::Vector<QC::Vector<QC::u8>> controlKeys;
+                QC::Vector<QC::Vector<QC::u8>> regionKeys;
+                bool cleanupScanSawCorruptRows = false;
+                bool tableSawCorruptRows = false;
+                if (!collectLayoutScopedKeys(CMMS_DESKTOP_LAYOUT_THEME_TABLE, 1, layoutId, themeKeys, &tableSawCorruptRows))
+                {
+                    QC_LOG_WARN(LOG_MODULE, "CMMS runtime materialization key collection failed layout=%s", layoutId);
+                    return false;
+                }
+                cleanupScanSawCorruptRows = cleanupScanSawCorruptRows || tableSawCorruptRows;
+                if (!collectLayoutScopedKeys(CMMS_DESKTOP_LAYOUT_ASSET_TABLE, 1, layoutId, assetKeys, &tableSawCorruptRows))
+                {
+                    QC_LOG_WARN(LOG_MODULE, "CMMS runtime materialization key collection failed layout=%s", layoutId);
+                    return false;
+                }
+                cleanupScanSawCorruptRows = cleanupScanSawCorruptRows || tableSawCorruptRows;
+                if (!collectLayoutScopedKeys(CMMS_DESKTOP_CONTROL_PROPERTIES_TABLE, 1, layoutId, propertyKeys, &tableSawCorruptRows))
+                {
+                    QC_LOG_WARN(LOG_MODULE, "CMMS runtime materialization key collection failed layout=%s", layoutId);
+                    return false;
+                }
+                cleanupScanSawCorruptRows = cleanupScanSawCorruptRows || tableSawCorruptRows;
+                if (!collectLayoutScopedKeys(CMMS_DESKTOP_CONTROL_BINDINGS_TABLE, 1, layoutId, bindingKeys, &tableSawCorruptRows))
+                {
+                    QC_LOG_WARN(LOG_MODULE, "CMMS runtime materialization key collection failed layout=%s", layoutId);
+                    return false;
+                }
+                cleanupScanSawCorruptRows = cleanupScanSawCorruptRows || tableSawCorruptRows;
+                if (!collectLayoutScopedKeys(CMMS_DESKTOP_CONTROL_RUNTIME_TABLE, 1, layoutId, runtimeKeys, &tableSawCorruptRows))
+                {
+                    QC_LOG_WARN(LOG_MODULE, "CMMS runtime materialization key collection failed layout=%s", layoutId);
+                    return false;
+                }
+                cleanupScanSawCorruptRows = cleanupScanSawCorruptRows || tableSawCorruptRows;
+                if (!collectLayoutScopedKeys(CMMS_DESKTOP_CONTROL_HIERARCHY_TABLE, 1, layoutId, hierarchyKeys, &tableSawCorruptRows))
+                {
+                    QC_LOG_WARN(LOG_MODULE, "CMMS runtime materialization key collection failed layout=%s", layoutId);
+                    return false;
+                }
+                cleanupScanSawCorruptRows = cleanupScanSawCorruptRows || tableSawCorruptRows;
+                if (!collectLayoutScopedKeys(CMMS_DESKTOP_CONTROL_TABLE, 1, layoutId, controlKeys, &tableSawCorruptRows))
+                {
+                    QC_LOG_WARN(LOG_MODULE, "CMMS runtime materialization key collection failed layout=%s", layoutId);
+                    return false;
+                }
+                cleanupScanSawCorruptRows = cleanupScanSawCorruptRows || tableSawCorruptRows;
+                if (!collectLayoutScopedKeys(CMMS_DESKTOP_REGION_TABLE, 1, layoutId, regionKeys, &tableSawCorruptRows))
+                {
+                    QC_LOG_WARN(LOG_MODULE, "CMMS runtime materialization key collection failed layout=%s", layoutId);
+                    return false;
+                }
+
+                cleanupScanSawCorruptRows = cleanupScanSawCorruptRows || tableSawCorruptRows;
+
+                if (cleanupScanSawCorruptRows)
+                {
+                    QC_LOG_WARN(LOG_MODULE,
+                                "CMMS runtime cleanup bypassed layout=%s due_to=corrupt_legacy_rows",
+                                layoutId);
+                }
+                else if (!removeRowsByKey(CMMS_DESKTOP_LAYOUT_THEME_TABLE, themeKeys) ||
+                         !removeRowsByKey(CMMS_DESKTOP_LAYOUT_ASSET_TABLE, assetKeys) ||
+                         !removeRowsByKey(CMMS_DESKTOP_CONTROL_PROPERTIES_TABLE, propertyKeys) ||
+                         !removeRowsByKey(CMMS_DESKTOP_CONTROL_BINDINGS_TABLE, bindingKeys) ||
+                         !removeRowsByKey(CMMS_DESKTOP_CONTROL_RUNTIME_TABLE, runtimeKeys) ||
+                         !removeRowsByKey(CMMS_DESKTOP_CONTROL_HIERARCHY_TABLE, hierarchyKeys) ||
+                         !removeRowsByKey(CMMS_DESKTOP_CONTROL_TABLE, controlKeys) ||
+                         !removeRowsByKey(CMMS_DESKTOP_REGION_TABLE, regionKeys))
+                {
+                    QC_LOG_WARN(LOG_MODULE, "CMMS runtime materialization row cleanup failed layout=%s", layoutId);
+                    return false;
+                }
+
+                if (importResult.document.themeRef.themeId[0])
+                {
+                    char themeRowId[96];
+                    QC::String::memset(themeRowId, 0, sizeof(themeRowId));
+                    if (!makeScopedRowId(layoutId, "theme", themeRowId, sizeof(themeRowId)))
+                        return false;
+
+                    QCQL::Row themeRow{};
+                    themeRow.cells.push_back(makeTextCell(themeRowId));
+                    themeRow.cells.push_back(makeTextCell(layoutId));
+                    themeRow.cells.push_back(makeTextCell(importResult.document.themeRef.themeId));
+                    themeRow.cells.push_back(makeTextCell(importResult.document.themeRef.variant));
+                    if (!upsertRowById(CMMS_DESKTOP_LAYOUT_THEME_TABLE, themeRowId, themeRow))
+                    {
+                        QC_LOG_WARN(LOG_MODULE, "CMMS runtime materialization theme upsert failed layout=%s row=%s", layoutId, themeRowId);
+                        return false;
+                    }
+                }
+
+                if (importResult.document.backgroundMode != DesktopBackgroundMode::None ||
+                    importResult.document.backgroundAsset.path[0])
+                {
+                    char assetRowId[96];
+                    QC::String::memset(assetRowId, 0, sizeof(assetRowId));
+                    if (!makeScopedRowId(layoutId, "background", assetRowId, sizeof(assetRowId)))
+                        return false;
+
+                    QCQL::Row assetRow{};
+                    assetRow.cells.push_back(makeTextCell(assetRowId));
+                    assetRow.cells.push_back(makeTextCell(layoutId));
+                    assetRow.cells.push_back(makeTextCell("background"));
+                    assetRow.cells.push_back(makeTextCell(assetKindName(importResult.document.backgroundAsset.kind)));
+                    assetRow.cells.push_back(makeTextCell(importResult.document.backgroundAsset.path));
+                    assetRow.cells.push_back(makeTextCell(backgroundModeName(importResult.document.backgroundMode)));
+                    if (!upsertRowById(CMMS_DESKTOP_LAYOUT_ASSET_TABLE, assetRowId, assetRow))
+                    {
+                        QC_LOG_WARN(LOG_MODULE, "CMMS runtime materialization asset upsert failed layout=%s row=%s", layoutId, assetRowId);
+                        return false;
+                    }
+                }
+
+                char regionId[96];
+                QC::String::memset(regionId, 0, sizeof(regionId));
+                if (!makeScopedRowId(layoutId, "root", regionId, sizeof(regionId)))
+                    return false;
+
+                QCQL::Row regionRow{};
+                regionRow.cells.push_back(makeTextCell(regionId));
+                regionRow.cells.push_back(makeTextCell(layoutId));
+                regionRow.cells.push_back(makeTextCell("root"));
+                regionRow.cells.push_back(makeTextCell("Root"));
+                if (!upsertRowById(CMMS_DESKTOP_REGION_TABLE, regionId, regionRow))
+                {
+                    QC_LOG_WARN(LOG_MODULE, "CMMS runtime materialization region upsert failed layout=%s row=%s", layoutId, regionId);
+                    return false;
+                }
+
+                for (QC::usize i = 0; i < importResult.document.controls.size(); ++i)
+                {
+                    const DesktopControlModel &control = importResult.document.controls[i];
+                    char controlRowId[128];
+                    QC::String::memset(controlRowId, 0, sizeof(controlRowId));
+                    if (!resolveControlRowId(importResult.document, control, i, controlRowId, sizeof(controlRowId)))
+                    {
+                        QC_LOG_WARN(LOG_MODULE, "CMMS runtime materialization control row id failed layout=%s index=%u", layoutId, static_cast<unsigned>(i));
+                        return false;
+                    }
+
+                    QCQL::Row controlRow{};
+                    controlRow.cells.push_back(makeTextCell(controlRowId));
+                    controlRow.cells.push_back(makeTextCell(layoutId));
+                    controlRow.cells.push_back(makeTextCell(regionId));
+                    controlRow.cells.push_back(makeTextCell(desktopControlKindName(control.kind)));
+                    controlRow.cells.push_back(makeTextCell(control.id[0] ? control.id : control.name));
+                    if (!upsertRowById(CMMS_DESKTOP_CONTROL_TABLE, controlRowId, controlRow))
+                    {
+                        QC_LOG_WARN(LOG_MODULE, "CMMS runtime materialization control upsert failed layout=%s row=%s", layoutId, controlRowId);
+                        return false;
+                    }
+
+                    QCQL::Row runtimeRow{};
+                    runtimeRow.cells.push_back(makeTextCell(controlRowId));
+                    runtimeRow.cells.push_back(makeTextCell(layoutId));
+                    runtimeRow.cells.push_back(makeTextCell(controlRowId));
+                    runtimeRow.cells.push_back(makeSignedTextCell(control.layout.x));
+                    runtimeRow.cells.push_back(makeSignedTextCell(control.layout.y));
+                    runtimeRow.cells.push_back(makeUnsignedTextCell(control.layout.width));
+                    runtimeRow.cells.push_back(makeUnsignedTextCell(control.layout.height));
+                    runtimeRow.cells.push_back(makeSignedTextCell(control.zIndex));
+                    runtimeRow.cells.push_back(makeTextCell(control.visible ? "true" : "false"));
+                    runtimeRow.cells.push_back(makeTextCell(control.enabled ? "true" : "false"));
+                    runtimeRow.cells.push_back(makeTextCell(control.styleClass));
+                    runtimeRow.cells.push_back(makeTextCell(control.text));
+                    runtimeRow.cells.push_back(makeTextCell(control.iconRef.path));
+                    if (!upsertRowById(CMMS_DESKTOP_CONTROL_RUNTIME_TABLE, controlRowId, runtimeRow))
+                    {
+                        QC_LOG_WARN(LOG_MODULE, "CMMS runtime materialization runtime upsert failed layout=%s row=%s", layoutId, controlRowId);
+                        return false;
+                    }
+
+                    for (QC::usize propertyIndex = 0; propertyIndex < control.properties.size(); ++propertyIndex)
+                    {
+                        char propertyRowId[160];
+                        QC::String::memset(propertyRowId, 0, sizeof(propertyRowId));
+                        if (!makeScopedIndexedRowId(controlRowId, "prop", static_cast<QC::u32>(propertyIndex), propertyRowId, sizeof(propertyRowId)))
+                        {
+                            QC_LOG_WARN(LOG_MODULE, "CMMS runtime materialization property row id failed layout=%s control=%s index=%u", layoutId, controlRowId, static_cast<unsigned>(propertyIndex));
+                            return false;
+                        }
+
+                        QCQL::Row propertyRow{};
+                        propertyRow.cells.push_back(makeTextCell(propertyRowId));
+                        propertyRow.cells.push_back(makeTextCell(layoutId));
+                        propertyRow.cells.push_back(makeTextCell(controlRowId));
+                        propertyRow.cells.push_back(makeTextCell(control.properties[propertyIndex].key));
+                        propertyRow.cells.push_back(makeTextCell(control.properties[propertyIndex].value));
+                        if (!upsertRowById(CMMS_DESKTOP_CONTROL_PROPERTIES_TABLE, propertyRowId, propertyRow))
+                        {
+                            QC_LOG_WARN(LOG_MODULE, "CMMS runtime materialization property upsert failed layout=%s row=%s", layoutId, propertyRowId);
+                            return false;
+                        }
+                    }
+
+                    for (QC::usize bindingIndex = 0; bindingIndex < control.bindings.size(); ++bindingIndex)
+                    {
+                        char bindingRowId[160];
+                        QC::String::memset(bindingRowId, 0, sizeof(bindingRowId));
+                        if (!makeScopedIndexedRowId(controlRowId, "bind", static_cast<QC::u32>(bindingIndex), bindingRowId, sizeof(bindingRowId)))
+                        {
+                            QC_LOG_WARN(LOG_MODULE, "CMMS runtime materialization binding row id failed layout=%s control=%s index=%u", layoutId, controlRowId, static_cast<unsigned>(bindingIndex));
+                            return false;
+                        }
+
+                        QCQL::Row bindingRow{};
+                        bindingRow.cells.push_back(makeTextCell(bindingRowId));
+                        bindingRow.cells.push_back(makeTextCell(layoutId));
+                        bindingRow.cells.push_back(makeTextCell(controlRowId));
+                        bindingRow.cells.push_back(makeTextCell(control.bindings[bindingIndex].event));
+                        bindingRow.cells.push_back(makeTextCell(control.bindings[bindingIndex].action));
+                        bindingRow.cells.push_back(makeTextCell(control.bindings[bindingIndex].argument));
+                        if (!upsertRowById(CMMS_DESKTOP_CONTROL_BINDINGS_TABLE, bindingRowId, bindingRow))
+                        {
+                            QC_LOG_WARN(LOG_MODULE, "CMMS runtime materialization binding upsert failed layout=%s row=%s", layoutId, bindingRowId);
+                            return false;
+                        }
+                    }
+                }
+
+                for (QC::usize i = 0; i < importResult.document.controls.size(); ++i)
+                {
+                    const DesktopControlModel &control = importResult.document.controls[i];
+                    if (!control.parentId[0])
+                        continue;
+
+                    char childRowId[128];
+                    char parentRowId[128];
+                    char hierarchyRowId[160];
+                    QC::String::memset(childRowId, 0, sizeof(childRowId));
+                    QC::String::memset(parentRowId, 0, sizeof(parentRowId));
+                    QC::String::memset(hierarchyRowId, 0, sizeof(hierarchyRowId));
+                    if (!resolveControlRowId(importResult.document, control, i, childRowId, sizeof(childRowId)))
+                    {
+                        QC_LOG_WARN(LOG_MODULE, "CMMS runtime materialization child row id failed layout=%s index=%u", layoutId, static_cast<unsigned>(i));
+                        return false;
+                    }
+                    if (!findControlRowIdBySourceId(importResult.document, control.parentId, parentRowId, sizeof(parentRowId)))
+                    {
+                        QC_LOG_WARN(LOG_MODULE, "CMMS runtime materialization parent lookup failed layout=%s child=%s parent=%s", layoutId, childRowId, control.parentId);
+                        return false;
+                    }
+                    if (!makeScopedRowId(parentRowId, childRowId, hierarchyRowId, sizeof(hierarchyRowId)))
+                    {
+                        QC_LOG_WARN(LOG_MODULE, "CMMS runtime materialization hierarchy row id failed layout=%s parent=%s child=%s", layoutId, parentRowId, childRowId);
+                        return false;
+                    }
+
+                    QC::u32 childOrder = 0;
+                    for (QC::usize j = 0; j < i; ++j)
+                    {
+                        if (QC::String::strcmp(importResult.document.controls[j].parentId, control.parentId) == 0)
+                            ++childOrder;
+                    }
+
+                    QCQL::Row hierarchyRow{};
+                    hierarchyRow.cells.push_back(makeTextCell(hierarchyRowId));
+                    hierarchyRow.cells.push_back(makeTextCell(layoutId));
+                    hierarchyRow.cells.push_back(makeTextCell(parentRowId));
+                    hierarchyRow.cells.push_back(makeTextCell(childRowId));
+                    hierarchyRow.cells.push_back(makeUnsignedTextCell(childOrder));
+                    if (!upsertRowById(CMMS_DESKTOP_CONTROL_HIERARCHY_TABLE, hierarchyRowId, hierarchyRow))
+                    {
+                        QC_LOG_WARN(LOG_MODULE, "CMMS runtime materialization hierarchy upsert failed layout=%s row=%s", layoutId, hierarchyRowId);
+                        return false;
+                    }
+                }
+
+                QCQL::Row newMaterializationRow{};
+                newMaterializationRow.cells.push_back(makeTextCell(layoutId));
+                newMaterializationRow.cells.push_back(makeTextCell(layoutId));
+                newMaterializationRow.cells.push_back(makeTextCell(layoutSourcePath));
+                newMaterializationRow.cells.push_back(makeUnsignedTextCell(layoutChunkCount));
+                newMaterializationRow.cells.push_back(makeUnsignedTextCell(CMMS_LAYOUT_MATERIALIZATION_SCHEMA_VERSION));
+                if (!upsertRowById(CMMS_DESKTOP_LAYOUT_MATERIALIZATION_TABLE, layoutId, newMaterializationRow))
+                {
+                    QC_LOG_WARN(LOG_MODULE, "CMMS runtime materialization state upsert failed layout=%s", layoutId);
+                    return false;
+                }
+
+                QC_LOG_INFO(LOG_MODULE,
+                            "CMMS runtime materialized layout=%s source=%s chunks=%u schema=%u controls=%u\n",
+                            layoutId,
+                            layoutSourcePath[0] ? layoutSourcePath : "<unknown>",
+                            static_cast<unsigned>(layoutChunkCount),
+                            static_cast<unsigned>(CMMS_LAYOUT_MATERIALIZATION_SCHEMA_VERSION),
+                            static_cast<unsigned>(importResult.document.controls.size()));
+
+                return true;
+            };
+
+            if (recreate)
+            {
+                engine.closeDatabase(m_cmmsDatabase);
+                m_cmmsDatabase = QCQL::Database{};
+                const QC::Status removeSt = QFS::VFS::instance().remove(CMMS_DB_PATH);
+                if (removeSt != QC::Status::Success && removeSt != QC::Status::NotFound)
+                {
+                    QC_LOG_WARN(LOG_MODULE, "CMMS DB remove failed path=%s status=%d", CMMS_DB_PATH, static_cast<int>(removeSt));
+                    return false;
+                }
+            }
+
+            const QC::u64 openStartMs = QDrv::Timer::instance().milliseconds();
+            QCQL::OpenStats openStats{};
+            QCQL::Status st = engine.openDatabase(CMMS_DB_PATH, m_cmmsDatabase, &openStats);
+            if (st == QCQL::Status::NotFound || recreate)
+            {
+                st = engine.createDatabase(CMMS_DB_PATH, m_cmmsDatabase);
+            }
+
+            if (st != QCQL::Status::Success)
+            {
+                QC_LOG_WARN(LOG_MODULE, "CMMS DB open/create failed path=%s status=%d", CMMS_DB_PATH, static_cast<int>(st));
+                return false;
+            }
+            QC_LOG_INFO(LOG_MODULE,
+                        "CMMS init phase open_create=%llums recreate=%u",
+                        static_cast<unsigned long long>(QDrv::Timer::instance().milliseconds() - openStartMs),
+                        recreate ? 1u : 0u);
+            QC_LOG_INFO(LOG_MODULE,
+                        "CMMS open stats tables=%u meta_page_headers=%u pk_tables=%u pk_pages=%u pk_rows=%u pk_indexed=%u",
+                        static_cast<unsigned>(openStats.metadataTablesLoaded),
+                        static_cast<unsigned>(openStats.metadataPageHeadersScanned),
+                        static_cast<unsigned>(openStats.pkTablesRebuilt),
+                        static_cast<unsigned>(openStats.pkPagesLoaded),
+                        static_cast<unsigned>(openStats.pkRowsScanned),
+                        static_cast<unsigned>(openStats.pkRowsIndexed));
+
+            const QC::u64 systemTablesStartMs = QDrv::Timer::instance().milliseconds();
+            st = engine.initializeSystemTables(m_cmmsDatabase);
+            if (st != QCQL::Status::Success)
+            {
+                QC_LOG_WARN(LOG_MODULE, "CMMS DB system table init failed status=%d", static_cast<int>(st));
+                return false;
+            }
+            QC_LOG_INFO(LOG_MODULE,
+                        "CMMS init phase system_tables=%llums",
+                        static_cast<unsigned long long>(QDrv::Timer::instance().milliseconds() - systemTablesStartMs));
+
+            const QC::u64 themeImportStartMs = QDrv::Timer::instance().milliseconds();
+            st = ThemeImporter::importBuiltinThemes(m_cmmsDatabase);
+            if (st != QCQL::Status::Success)
+            {
+                QC_LOG_WARN(LOG_MODULE, "CMMS DB theme import failed status=%d", static_cast<int>(st));
+                return false;
+            }
+            QC_LOG_INFO(LOG_MODULE,
+                        "CMMS init phase builtin_theme_import=%llums",
+                        static_cast<unsigned long long>(QDrv::Timer::instance().milliseconds() - themeImportStartMs));
+
+            const QC::u64 schemaEnsureStartMs = QDrv::Timer::instance().milliseconds();
+            if (!ensureDesktopLayoutTable(m_cmmsDatabase))
+            {
+                QC_LOG_WARN(LOG_MODULE, "CMMS DB desktop layout table init failed");
+                return false;
+            }
+
+            if (!ensureDesktopDocumentTable(CMMS_DESKTOP_CUIML_TABLE))
+            {
+                QC_LOG_WARN(LOG_MODULE, "CMMS DB desktop CUI-ML table init failed");
+                return false;
+            }
+
+            if (!ensureDesktopChunkTable(CMMS_DESKTOP_LAYOUT_CHUNK_TABLE, CMMS_DESKTOP_LAYOUT_TABLE))
+            {
+                QC_LOG_WARN(LOG_MODULE, "CMMS DB desktop layout chunk table init failed");
+                return false;
+            }
+
+            if (!ensureDesktopChunkTable(CMMS_DESKTOP_CUIML_CHUNK_TABLE, CMMS_DESKTOP_CUIML_TABLE))
+            {
+                QC_LOG_WARN(LOG_MODULE, "CMMS DB desktop CUI-ML chunk table init failed");
+                return false;
+            }
+
+            if (!ensureDesktopRegionTable())
+            {
+                QC_LOG_WARN(LOG_MODULE, "CMMS DB desktop region table init failed");
+                return false;
+            }
+
+            if (!ensureDesktopControlTable())
+            {
+                QC_LOG_WARN(LOG_MODULE, "CMMS DB desktop control table init failed");
+                return false;
+            }
+
+            if (!ensureDesktopControlRuntimeTable())
+            {
+                QC_LOG_WARN(LOG_MODULE, "CMMS DB desktop control runtime table init failed");
+                return false;
+            }
+
+            if (!ensureDesktopControlPropertiesTable())
+            {
+                QC_LOG_WARN(LOG_MODULE, "CMMS DB desktop control properties table init failed");
+                return false;
+            }
+
+            if (!ensureDesktopControlBindingsTable())
+            {
+                QC_LOG_WARN(LOG_MODULE, "CMMS DB desktop control bindings table init failed");
+                return false;
+            }
+
+            if (!ensureDesktopLayoutThemeTable())
+            {
+                QC_LOG_WARN(LOG_MODULE, "CMMS DB desktop layout theme table init failed");
+                return false;
+            }
+
+            if (!ensureDesktopLayoutAssetTable())
+            {
+                QC_LOG_WARN(LOG_MODULE, "CMMS DB desktop layout asset table init failed");
+                return false;
+            }
+
+            if (!ensureDesktopLayoutMaterializationTable())
+            {
+                QC_LOG_WARN(LOG_MODULE, "CMMS DB desktop layout materialization table init failed");
+                return false;
+            }
+
+            if (!ensureDesktopControlHierarchyTable())
+            {
+                QC_LOG_WARN(LOG_MODULE, "CMMS DB desktop control hierarchy table init failed");
+                return false;
+            }
+            QC_LOG_INFO(LOG_MODULE,
+                        "CMMS init phase schema_tables=%llums",
+                        static_cast<unsigned long long>(QDrv::Timer::instance().milliseconds() - schemaEnsureStartMs));
+
+            if (cmmsSchemaChanged && m_cmmsDatabase.header.version > QCQL::kFileVersion1)
+            {
+                const QC::u64 persistMetadataStartMs = QDrv::Timer::instance().milliseconds();
+                if (engine.persistMetadata(m_cmmsDatabase) != QCQL::Status::Success)
+                {
+                    QC_LOG_WARN(LOG_MODULE, "CMMS DB schema metadata persist failed");
+                    return false;
+                }
+                QC_LOG_INFO(LOG_MODULE,
+                            "CMMS init phase persist_metadata=%llums",
+                            static_cast<unsigned long long>(QDrv::Timer::instance().milliseconds() - persistMetadataStartMs));
+            }
+
+            const QC::u64 seedStartMs = QDrv::Timer::instance().milliseconds();
+            (void)seedDesktopDocumentRow(CMMS_DESKTOP_LAYOUT_TABLE, CMMS_DESKTOP_LAYOUT_CHUNK_TABLE, CMMS_DESKTOP_LAYOUT_PRODUCTION, "/PROD/DESKTOP.JSN", 1024 * 256);
+            (void)seedDesktopDocumentRow(CMMS_DESKTOP_LAYOUT_TABLE, CMMS_DESKTOP_LAYOUT_CHUNK_TABLE, CMMS_DESKTOP_LAYOUT_GOLDEN, "/GOLDEN/DESKTOP.JSN", 1024 * 256);
+            (void)seedDesktopDocumentRow(CMMS_DESKTOP_CUIML_TABLE, CMMS_DESKTOP_CUIML_CHUNK_TABLE, CMMS_DESKTOP_LAYOUT_PRODUCTION, "/PROD/DESKTOP.CML", 1024 * 1024);
+            (void)seedDesktopDocumentRow(CMMS_DESKTOP_CUIML_TABLE, CMMS_DESKTOP_CUIML_CHUNK_TABLE, CMMS_DESKTOP_LAYOUT_GOLDEN, "/GOLDEN/DESKTOP.CML", 1024 * 1024);
+            QC_LOG_INFO(LOG_MODULE,
+                        "CMMS init phase seed_documents=%llums",
+                        static_cast<unsigned long long>(QDrv::Timer::instance().milliseconds() - seedStartMs));
+
+            if (CMMS_MATERIALIZE_RUNTIME_ON_BOOT)
+            {
+                if (!materializeLayoutRuntimeRows(CMMS_DESKTOP_LAYOUT_PRODUCTION))
+                    QC_LOG_WARN(LOG_MODULE, "CMMS runtime materialization failed layout=%s", CMMS_DESKTOP_LAYOUT_PRODUCTION);
+                if (!materializeLayoutRuntimeRows(CMMS_DESKTOP_LAYOUT_GOLDEN))
+                    QC_LOG_WARN(LOG_MODULE, "CMMS runtime materialization failed layout=%s", CMMS_DESKTOP_LAYOUT_GOLDEN);
+            }
+            else
+            {
+                QC_LOG_INFO(LOG_MODULE, "CMMS runtime materialization deferred during desktop startup");
+                if (CMMS_ENSURE_ACTIVE_RUNTIME_ON_BOOT)
+                {
+                    const bool forceGolden = (QK::Boot::Config::GetActiveConfigTier() == QK::Boot::Config::ConfigTier::Golden);
+                    const char *activeLayoutId = forceGolden ? CMMS_DESKTOP_LAYOUT_GOLDEN : CMMS_DESKTOP_LAYOUT_PRODUCTION;
+                    if (!materializeLayoutRuntimeRows(activeLayoutId))
+                    {
+                        QC_LOG_WARN(LOG_MODULE, "CMMS active runtime ensure failed layout=%s", activeLayoutId);
+                    }
+                }
+            }
+
+            QC_LOG_INFO(LOG_MODULE,
+                        "CMMS init phase total=%llums recreate=%u",
+                        static_cast<unsigned long long>(QDrv::Timer::instance().milliseconds() - initStartMs),
+                        recreate ? 1u : 0u);
+
+            return true;
+        };
+
+        const QC::u64 ensureStartMs = QDrv::Timer::instance().milliseconds();
+        if (!initializeCmmsDatabase(false))
             return false;
-        }
 
         auto hasThemeTables = [&](QCQL::Database &db) -> bool
         {
@@ -1221,14 +2976,38 @@ namespace QD
         if (!hasThemeRows(m_cmmsDatabase))
         {
             // Non-destructive retry: seed themes again, but keep DB available even if still empty.
-            st = ThemeImporter::importBuiltinThemes(m_cmmsDatabase);
-            if (st != QCQL::Status::Success)
+            const QC::u64 reseedStartMs = QDrv::Timer::instance().milliseconds();
+            const QCQL::Status reseedStatus = ThemeImporter::importBuiltinThemes(m_cmmsDatabase);
+            if (reseedStatus != QCQL::Status::Success)
             {
-                QC_LOG_WARN(LOG_MODULE, "CMMS DB reseed attempt failed status=%d", static_cast<int>(st));
+                QC_LOG_WARN(LOG_MODULE, "CMMS DB reseed attempt failed status=%d", static_cast<int>(reseedStatus));
             }
+            QC_LOG_INFO(LOG_MODULE,
+                        "CMMS ensure phase reseed_themes=%llums status=%d",
+                        static_cast<unsigned long long>(QDrv::Timer::instance().milliseconds() - reseedStartMs),
+                        static_cast<int>(reseedStatus));
         }
 
+        const QC::u64 validateThemesStartMs = QDrv::Timer::instance().milliseconds();
+        if (!ThemeImporter::validateBuiltinThemes(m_cmmsDatabase))
+        {
+            QC_LOG_WARN(LOG_MODULE, "CMMS DB validation failed; rebuilding database from scratch");
+            if (!initializeCmmsDatabase(true))
+                return false;
+            if (!ThemeImporter::validateBuiltinThemes(m_cmmsDatabase))
+            {
+                QC_LOG_WARN(LOG_MODULE, "CMMS DB validation still failed after rebuild");
+                return false;
+            }
+        }
+        QC_LOG_INFO(LOG_MODULE,
+                    "CMMS ensure phase validate_themes=%llums",
+                    static_cast<unsigned long long>(QDrv::Timer::instance().milliseconds() - validateThemesStartMs));
+
         m_cmmsDatabaseReady = true;
+        QC_LOG_INFO(LOG_MODULE,
+                    "CMMS ensure total=%llums",
+                    static_cast<unsigned long long>(QDrv::Timer::instance().milliseconds() - ensureStartMs));
         return true;
     }
 
@@ -1238,6 +3017,7 @@ namespace QD
         QCQL::Database *database = nullptr;
         if (ensureCmmsDatabaseReady())
         {
+            (void)ThemeImporter::importBuiltinThemes(m_cmmsDatabase);
             database = &m_cmmsDatabase;
         }
         QCMS::App::instance().open(database, area);
@@ -1380,6 +3160,12 @@ namespace QD
             const char *themeIdText = themeIdToString(id);
             if (!themeIdText || !*themeIdText)
                 return false;
+
+            if (ensureCmmsDatabaseReady() && m_themeService.loadThemeFromDatabase(m_cmmsDatabase, id, m_loadedTheme))
+            {
+                applyLoadedThemeToOverrides();
+                return true;
+            }
 
             const char *themePathHint = nullptr;
             char pathBuf[96];
@@ -1968,7 +3754,7 @@ namespace QD
 
                         if (!recovered && QC::String::strcmp(stemLower, "shutdown") == 0)
                         {
-                            const char *fallbackPower = "/system/icons/svg/power.svg";
+                            const char *fallbackPower = "/ICONS/svg/power.svg";
                             if (readFileBytes(fallbackPower, buffer, false))
                             {
                                 recovered = storeResolvedPath(fallbackPower);
@@ -3184,9 +4970,13 @@ namespace QD
                                                      : (sizeof(cuimlPathsProdFirst) / sizeof(cuimlPathsProdFirst[0]));
 
         const char *openedPath = nullptr;
+        char openedPathStorage[192];
+        QC::String::memset(openedPathStorage, 0, sizeof(openedPathStorage));
         QC::usize openedBytes = 0;
         QC::u64 openedIoMs = 0;
         char *cuimlText = nullptr;
+        bool openedFromDatabase = false;
+        bool openedFromRuntimeRows = false;
 
         auto skipWs = [](const char *p) -> const char *
         {
@@ -4314,7 +6104,99 @@ namespace QD
             }
         };
 
-        for (QC::usize i = 0; i < cuimlPathCount; ++i)
+        if (ensureCmmsDatabaseReady())
+        {
+            const char *documentIdsProdFirst[] = {CMMS_DESKTOP_LAYOUT_PRODUCTION, CMMS_DESKTOP_LAYOUT_GOLDEN};
+            const char *documentIdsGoldenOnly[] = {CMMS_DESKTOP_LAYOUT_GOLDEN};
+
+            const char **documentIds = forceGolden ? documentIdsGoldenOnly : documentIdsProdFirst;
+            const QC::usize documentIdCount = forceGolden ? (sizeof(documentIdsGoldenOnly) / sizeof(documentIdsGoldenOnly[0]))
+                                                          : (sizeof(documentIdsProdFirst) / sizeof(documentIdsProdFirst[0]));
+
+            for (QC::usize i = 0; i < documentIdCount; ++i)
+            {
+                DesktopDocumentImportResult runtimeImport{};
+                DesktopDocumentExportResult runtimeExport{};
+                if (DesktopDocumentIO::importCmmsRuntime(m_cmmsDatabase, documentIds[i], runtimeImport) &&
+                    runtimeImport.loaded &&
+                    DesktopDocumentIO::exportCuimlText(runtimeImport.document, runtimeExport) &&
+                    runtimeExport.generated &&
+                    !runtimeExport.text.empty())
+                {
+                    QC::usize size = runtimeExport.text.size();
+                    if (size > 0 && runtimeExport.text[size - 1] == '\0')
+                        --size;
+                    if (size > 0)
+                    {
+                        char *text = static_cast<char *>(operator new[](size + 1));
+                        for (QC::usize n = 0; n < size; ++n)
+                            text[n] = runtimeExport.text[n];
+                        text[size] = '\0';
+
+                        if (runtimeImport.sourcePath[0])
+                        {
+                            QC::String::strncpy(openedPathStorage, runtimeImport.sourcePath, sizeof(openedPathStorage) - 1);
+                            openedPathStorage[sizeof(openedPathStorage) - 1] = '\0';
+                        }
+                        else
+                        {
+                            QC::String::strncpy(openedPathStorage, "CMMS runtime rows", sizeof(openedPathStorage) - 1);
+                            openedPathStorage[sizeof(openedPathStorage) - 1] = '\0';
+                        }
+
+                        openedPath = openedPathStorage;
+                        openedBytes = size;
+                        openedIoMs = 0;
+                        cuimlText = text;
+                        openedFromDatabase = true;
+                        openedFromRuntimeRows = true;
+                        break;
+                    }
+                }
+
+                const QCQL::Cell keyCell = makeTextCell(documentIds[i]);
+                QCQL::Row row{};
+                const QCQL::Status rowSt = QCQL::Engine::instance().selectRowByPrimaryKeyByName(
+                    m_cmmsDatabase,
+                    CMMS_DESKTOP_CUIML_TABLE,
+                    keyCell.bytes,
+                    row);
+                if (rowSt != QCQL::Status::Success || row.tombstone || row.cells.size() < 3 || row.cells[2].type != QCQL::ColumnType::Text)
+                    continue;
+
+                QC::u32 chunkCount = 0;
+                if (!parseUnsignedTextCell(row.cells[2], chunkCount) || chunkCount == 0)
+                    continue;
+
+                QC::Vector<QC::u8> payloadBytes;
+                if (!loadChunkedDocumentPayload(m_cmmsDatabase, CMMS_DESKTOP_CUIML_CHUNK_TABLE, documentIds[i], chunkCount, payloadBytes))
+                    continue;
+
+                const QC::usize size = payloadBytes.size();
+                if (size == 0 || size > 1024 * 1024)
+                    continue;
+
+                char *text = static_cast<char *>(operator new[](size + 1));
+                for (QC::usize n = 0; n < size; ++n)
+                    text[n] = static_cast<char>(payloadBytes[n]);
+                text[size] = '\0';
+
+                if (!copyCellText(row.cells[1], openedPathStorage, sizeof(openedPathStorage)) || !openedPathStorage[0])
+                {
+                    QC::String::strncpy(openedPathStorage, "CMMS DB", sizeof(openedPathStorage) - 1);
+                    openedPathStorage[sizeof(openedPathStorage) - 1] = '\0';
+                }
+
+                openedPath = openedPathStorage;
+                openedBytes = size;
+                openedIoMs = 0;
+                cuimlText = text;
+                openedFromDatabase = true;
+                break;
+            }
+        }
+
+        for (QC::usize i = 0; !openedPath && i < cuimlPathCount; ++i)
         {
             const char *path = cuimlPaths[i];
             QFS::File *file = QFS::VFS::instance().open(path, QFS::OpenMode::Read);
@@ -4357,10 +6239,27 @@ namespace QD
         if (!openedPath || !cuimlText)
             return false;
 
-        QC_LOG_INFO(LOG_MODULE, "Loading desktop definition from %s (CUI-ML bytes=%u io=%llums)\n",
-                    openedPath,
-                    static_cast<unsigned>(openedBytes),
-                    static_cast<unsigned long long>(openedIoMs));
+        if (openedFromRuntimeRows)
+        {
+            QC_LOG_INFO(LOG_MODULE, "Loading desktop definition from CMMS runtime rows (%s, generated CUI-ML bytes=%u io=%llums)\n",
+                        openedPath,
+                        static_cast<unsigned>(openedBytes),
+                        static_cast<unsigned long long>(openedIoMs));
+        }
+        else if (openedFromDatabase)
+        {
+            QC_LOG_INFO(LOG_MODULE, "Loading desktop definition from CMMS DB (%s, CUI-ML bytes=%u io=%llums)\n",
+                        openedPath,
+                        static_cast<unsigned>(openedBytes),
+                        static_cast<unsigned long long>(openedIoMs));
+        }
+        else
+        {
+            QC_LOG_INFO(LOG_MODULE, "Loading desktop definition from %s (CUI-ML bytes=%u io=%llums)\n",
+                        openedPath,
+                        static_cast<unsigned>(openedBytes),
+                        static_cast<unsigned long long>(openedIoMs));
+        }
 
         if (!m_desktopWindow || !m_desktopWindow->root())
         {
@@ -5853,7 +7752,7 @@ namespace QD
                         }
                     }
 
-                    // Prefer SVG icons (if present): /system/icons/svg/<token>.svg
+                    // Prefer SVG icons (if present): /ICONS/svg/<token>.svg
                     {
                         char token[128];
                         QC::String::memset(token, 0, sizeof(token));
@@ -5862,7 +7761,7 @@ namespace QD
                         trimInPlace(token);
                         if (token[0])
                         {
-                            const char *prefix = "/system/icons/svg/";
+                            const char *prefix = "/ICONS/svg/";
                             const char *suffix = ".svg";
                             const QC::usize preLen = QC::String::strlen(prefix);
                             const QC::usize nameLen = QC::String::strlen(token);
@@ -5888,7 +7787,7 @@ namespace QD
                         }
                     }
 
-                    // Otherwise treat it as a short icon name token and map to /system/icons/<NAME>.PNG
+                    // Otherwise treat it as a short icon name token and map to /ICONS/<NAME>.PNG
                     char up[9];
                     QC::String::memset(up, 0, sizeof(up));
                     QC::usize n = 0;
@@ -5907,7 +7806,7 @@ namespace QD
                     if (!up[0])
                         return false;
 
-                    const char *prefix = "/system/icons/";
+                    const char *prefix = "/ICONS/";
                     const char *suffix = ".PNG";
                     const QC::usize preLen = QC::String::strlen(prefix);
                     const QC::usize nameLen = QC::String::strlen(up);
@@ -6127,7 +8026,7 @@ namespace QD
                         }
                     }
 
-                    // Prefer SVG icons (if present): /system/icons/svg/<token>.svg
+                    // Prefer SVG icons (if present): /ICONS/svg/<token>.svg
                     {
                         char token[128];
                         QC::String::memset(token, 0, sizeof(token));
@@ -6136,7 +8035,7 @@ namespace QD
                         trimInPlace(token);
                         if (token[0])
                         {
-                            const char *prefix = "/system/icons/svg/";
+                            const char *prefix = "/ICONS/svg/";
                             const char *suffix = ".svg";
                             const QC::usize preLen = QC::String::strlen(prefix);
                             const QC::usize nameLen = QC::String::strlen(token);
@@ -6179,7 +8078,7 @@ namespace QD
                     if (!up[0])
                         return false;
 
-                    const char *prefix = "/system/icons/";
+                    const char *prefix = "/ICONS/";
                     const char *suffix = ".PNG";
                     const QC::usize preLen = QC::String::strlen(prefix);
                     const QC::usize nameLen = QC::String::strlen(up);
@@ -6777,11 +8676,80 @@ namespace QD
         const QC::JSON::Value *layout = nullptr;
         const QC::JSON::Value *controls = nullptr;
         const char *openedPath = nullptr;
+        char openedPathStorage[192];
+        QC::String::memset(openedPathStorage, 0, sizeof(openedPathStorage));
         QC::usize openedBytes = 0;
         QC::u64 openedIoMs = 0;
         QC::u64 openedParseMs = 0;
+        bool openedFromDatabase = false;
 
-        for (QC::usize i = 0; i < jsonPathCount; ++i)
+        if (ensureCmmsDatabaseReady())
+        {
+            const char *layoutIdsProdFirst[] = {CMMS_DESKTOP_LAYOUT_PRODUCTION, CMMS_DESKTOP_LAYOUT_GOLDEN};
+            const char *layoutIdsGoldenOnly[] = {CMMS_DESKTOP_LAYOUT_GOLDEN};
+            const char **layoutIds = forceGolden ? layoutIdsGoldenOnly : layoutIdsProdFirst;
+            const QC::usize layoutIdCount = forceGolden ? (sizeof(layoutIdsGoldenOnly) / sizeof(layoutIdsGoldenOnly[0]))
+                                                        : (sizeof(layoutIdsProdFirst) / sizeof(layoutIdsProdFirst[0]));
+
+            for (QC::usize i = 0; i < layoutIdCount; ++i)
+            {
+                const QCQL::Cell keyCell = makeTextCell(layoutIds[i]);
+                QCQL::Row row{};
+                const QCQL::Status rowSt =
+                    QCQL::Engine::instance().selectRowByPrimaryKeyByName(m_cmmsDatabase, CMMS_DESKTOP_LAYOUT_TABLE, keyCell.bytes, row);
+                if (rowSt != QCQL::Status::Success || row.tombstone || row.cells.size() < 3 || row.cells[2].type != QCQL::ColumnType::Text)
+                    continue;
+
+                QC::u32 chunkCount = 0;
+                if (!parseUnsignedTextCell(row.cells[2], chunkCount) || chunkCount == 0)
+                    continue;
+
+                QC::Vector<QC::u8> payloadBytes;
+                if (!loadChunkedDocumentPayload(m_cmmsDatabase, CMMS_DESKTOP_LAYOUT_CHUNK_TABLE, layoutIds[i], chunkCount, payloadBytes))
+                    continue;
+
+                QC::usize size = payloadBytes.size();
+                if (size == 0 || size > 1024 * 256)
+                    continue;
+
+                char *jsonText = static_cast<char *>(operator new[](size + 1));
+                for (QC::usize n = 0; n < size; ++n)
+                    jsonText[n] = static_cast<char>(payloadBytes[n]);
+                jsonText[size] = '\0';
+
+                root = QC::JSON::Value{};
+                const QC::u64 tParse0 = QDrv::Timer::instance().milliseconds();
+                const bool ok = QC::JSON::parse(jsonText, root);
+                const QC::u64 tParse1 = QDrv::Timer::instance().milliseconds();
+                operator delete[](jsonText);
+                if (!ok)
+                    continue;
+
+                desktop = root.find("desktop");
+                if (!desktop || !desktop->isObject())
+                    continue;
+
+                layout = desktop->find("layout");
+                controls = layout ? layout->find("controls") : nullptr;
+                if (!controls || !controls->isArray())
+                    continue;
+
+                if (!copyCellText(row.cells[1], openedPathStorage, sizeof(openedPathStorage)) || !openedPathStorage[0])
+                {
+                    QC::String::strncpy(openedPathStorage, "CMMS DB", sizeof(openedPathStorage) - 1);
+                    openedPathStorage[sizeof(openedPathStorage) - 1] = '\0';
+                }
+
+                openedPath = openedPathStorage;
+                openedBytes = size;
+                openedIoMs = 0;
+                openedParseMs = tParse1 - tParse0;
+                openedFromDatabase = true;
+                break;
+            }
+        }
+
+        for (QC::usize i = 0; !openedPath && i < jsonPathCount; ++i)
         {
             const char *path = jsonPaths[i];
             QFS::File *file = QFS::VFS::instance().open(path, QFS::OpenMode::Read);
@@ -6857,11 +8825,22 @@ namespace QD
             return false;
         }
 
-        QC_LOG_INFO(LOG_MODULE, "Loading desktop definition from %s (bytes=%u io=%llums parse=%llums)\n",
-                openedPath,
-                static_cast<unsigned>(openedBytes),
-                static_cast<unsigned long long>(openedIoMs),
-                static_cast<unsigned long long>(openedParseMs));
+        if (openedFromDatabase)
+        {
+            QC_LOG_INFO(LOG_MODULE, "Loading desktop definition from CMMS DB (%s, bytes=%u io=%llums parse=%llums)\n",
+                        openedPath,
+                        static_cast<unsigned>(openedBytes),
+                        static_cast<unsigned long long>(openedIoMs),
+                        static_cast<unsigned long long>(openedParseMs));
+        }
+        else
+        {
+            QC_LOG_INFO(LOG_MODULE, "Loading desktop definition from %s (bytes=%u io=%llums parse=%llums)\n",
+                        openedPath,
+                        static_cast<unsigned>(openedBytes),
+                        static_cast<unsigned long long>(openedIoMs),
+                        static_cast<unsigned long long>(openedParseMs));
+        }
 
         // Apply theme first. Background selection is deferred until after optional overrides
         // (e.g. seasonal presets) to avoid decoding a wallpaper that will immediately be replaced.
@@ -7517,15 +9496,87 @@ namespace QD
         static constexpr QC::u32 kTaskbarEntryHeight = 32;
         static constexpr QC::u32 kTaskbarIconSize = 32;
 
-        const bool isTerminal = (title && equalsIgnoreCase(title, "Terminal"));
+        auto resolveTaskbarIconPath = [&](const char *windowTitle, char *outPath, QC::usize outCap) -> bool
+        {
+            if (!outPath || outCap == 0)
+                return false;
+
+            outPath[0] = '\0';
+            if (!windowTitle || !*windowTitle)
+                return false;
+
+            const char *iconToken = nullptr;
+            if (equalsIgnoreCase(windowTitle, "Terminal"))
+                iconToken = "terminal";
+            else if (equalsIgnoreCase(windowTitle, "Browser") || equalsIgnoreCase(windowTitle, "HTML Viewer"))
+                iconToken = "file";
+            else if (equalsIgnoreCase(windowTitle, "CUI-ML"))
+                iconToken = "file";
+            else if (equalsIgnoreCase(windowTitle, "Citadel Management Studio"))
+                iconToken = "settings";
+
+            if (!iconToken)
+                return false;
+
+            {
+                const char *prefix = "/ICONS/svg/";
+                const char *suffix = ".svg";
+                const QC::usize preLen = QC::String::strlen(prefix);
+                const QC::usize tokenLen = QC::String::strlen(iconToken);
+                const QC::usize sufLen = QC::String::strlen(suffix);
+                if (preLen + tokenLen + sufLen + 1 <= outCap)
+                {
+                    QC::String::memcpy(outPath, prefix, preLen);
+                    QC::String::memcpy(outPath + preLen, iconToken, tokenLen);
+                    QC::String::memcpy(outPath + preLen + tokenLen, suffix, sufLen);
+                    outPath[preLen + tokenLen + sufLen] = '\0';
+
+                    if (QFS::File *file = QFS::VFS::instance().open(outPath, QFS::OpenMode::Read))
+                    {
+                        QFS::VFS::instance().close(file);
+                        return true;
+                    }
+                }
+            }
+
+            char upper[16];
+            QC::String::memset(upper, 0, sizeof(upper));
+            QC::usize upperLen = 0;
+            for (const char *p = iconToken; *p && upperLen + 1 < sizeof(upper); ++p)
+            {
+                char c = *p;
+                if (c >= 'a' && c <= 'z')
+                    c = static_cast<char>(c - 'a' + 'A');
+                upper[upperLen++] = c;
+            }
+            upper[upperLen] = '\0';
+
+            const char *prefix = "/ICONS/";
+            const char *suffix = ".PNG";
+            const QC::usize preLen = QC::String::strlen(prefix);
+            const QC::usize sufLen = QC::String::strlen(suffix);
+            if (preLen + upperLen + sufLen + 1 > outCap)
+                return false;
+
+            QC::String::memcpy(outPath, prefix, preLen);
+            QC::String::memcpy(outPath + preLen, upper, upperLen);
+            QC::String::memcpy(outPath + preLen + upperLen, suffix, sufLen);
+            outPath[preLen + upperLen + sufLen] = '\0';
+            return true;
+        };
+
+        char iconPath[192];
+        QC::String::memset(iconPath, 0, sizeof(iconPath));
+        ImageAsset *taskbarIcon = resolveTaskbarIconPath(title, iconPath, sizeof(iconPath)) ? loadImageAsset(iconPath) : nullptr;
+        const bool useIconButton = (taskbarIcon != nullptr);
 
         m_taskbarEntries[m_taskbarWindowCount].windowId = windowId;
         m_taskbarEntries[m_taskbarWindowCount].button = nullptr;
-        m_taskbarEntries[m_taskbarWindowCount].width = isTerminal ? kTaskbarIconSize : kTaskbarButtonWidth;
+        m_taskbarEntries[m_taskbarWindowCount].width = useIconButton ? kTaskbarIconSize : kTaskbarButtonWidth;
         m_taskbarEntries[m_taskbarWindowCount].height = kTaskbarEntryHeight;
         m_taskbarEntries[m_taskbarWindowCount].isActive = false;
 
-        if (isTerminal)
+        if (useIconButton)
         {
             QW::Rect btnBounds = {0, 0, kTaskbarIconSize, kTaskbarEntryHeight};
             auto *btn = new QW::Controls::Button(m_desktopWindow, nullptr, btnBounds);
@@ -7536,10 +9587,7 @@ namespace QD
             btn->setClickHandler(onTaskbarIconButtonClick, this);
             btn->setRole(QW::ButtonRole::Taskbar);
 
-            if (ImageAsset *asset = loadImageAsset("/system/icons/TERMINAL.PNG"))
-            {
-                btn->setIcon(&asset->surface);
-            }
+            btn->setIcon(&taskbarIcon->surface);
 
             m_taskbar->addChild(btn);
             m_taskbarEntries[m_taskbarWindowCount].button = btn;
@@ -7672,6 +9720,40 @@ namespace QD
         m_windowListenerId = eventMgr.addListener(QK::Event::Category::Window, &Desktop::onWindowEvent, this);
     }
 
+    bool Desktop::onInputEvent(const QK::Event::Event &event, void *userData)
+    {
+        auto *desktop = static_cast<Desktop *>(userData);
+        if (!desktop || event.type() != QK::Event::Type::KeyDown)
+            return false;
+
+        const auto &key = event.asKey();
+        if (QK::Event::hasModifier(key.modifiers, QK::Event::Modifiers::Ctrl) ||
+            QK::Event::hasModifier(key.modifiers, QK::Event::Modifiers::Alt))
+        {
+            return false;
+        }
+
+        if (key.character == 't' || key.character == 'T')
+        {
+            desktop->toggleTerminal();
+            return true;
+        }
+
+        return false;
+    }
+
+    void Desktop::ensureInputEventListener()
+    {
+        if (m_inputListenerId != QK::Event::InvalidListenerId)
+            return;
+
+        auto &eventMgr = QK::Event::EventManager::instance();
+        if (!eventMgr.isInitialized())
+            return;
+
+        m_inputListenerId = eventMgr.addListener(QK::Event::Category::Input, &Desktop::onInputEvent, this);
+    }
+
     // ==================== Rendering ====================
 
     void Desktop::paint()
@@ -7759,10 +9841,7 @@ namespace QD
             }
             else if (desktop->m_selectedSidebarItem == SidebarItem::Settings)
             {
-                if (!QK::SecurityCenter::instance().ownerIsEnrolled())
-                    desktop->showSetupWizard();
-                else
-                    desktop->cycleThemeFromSettings();
+                desktop->cycleThemeFromSettings();
             }
             else if (desktop->m_selectedSidebarItem == SidebarItem::Power)
             {
@@ -7812,10 +9891,7 @@ namespace QD
             return;
 
         Desktop *desktop = static_cast<Desktop *>(userData);
-        if (!QK::SecurityCenter::instance().ownerIsEnrolled())
-            desktop->showSetupWizard();
-        else
-            desktop->cycleThemeFromSettings();
+        desktop->cycleThemeFromSettings();
     }
 
     void Desktop::onJsonCMMSClick(QW::Controls::Button *button, void *userData)
@@ -7855,10 +9931,7 @@ namespace QD
             return;
 
         Desktop *desktop = static_cast<Desktop *>(userData);
-        if (!QK::SecurityCenter::instance().ownerIsEnrolled())
-            desktop->showSetupWizard();
-        else
-            desktop->cycleThemeFromSettings();
+        desktop->cycleThemeFromSettings();
     }
 
     void Desktop::onJsonCMMSButtonClick(QW::Controls::Button *button, void *userData)

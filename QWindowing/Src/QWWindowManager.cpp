@@ -11,8 +11,11 @@
 #include "QKMemHeap.h"
 #include "QCMemUtil.h"
 #include "QCLinearAlgebra.h"
+#include "QCLogger.h"
 #include "QDrvTimer.h"
 #include "QKRuntimeRegistries.h"
+#include "QFSVFS.h"
+#include "QFSFile.h"
 
 namespace QW
 {
@@ -74,6 +77,296 @@ namespace QW
         const QC::u32 expandedWidth = bounds.width + static_cast<QC::u32>(kLeftExpand + kRightExpand);
         const QC::u32 expandedHeight = bounds.height + static_cast<QC::u32>(kTopExpand + kBottomExpand);
         return Rect{expandedX, expandedY, expandedWidth, expandedHeight};
+    }
+
+    static Rect intersectRect(const Rect &a, const Rect &b)
+    {
+        const QC::i32 left = (a.x > b.x) ? a.x : b.x;
+        const QC::i32 top = (a.y > b.y) ? a.y : b.y;
+        const QC::i32 right = (a.right() < b.right()) ? a.right() : b.right();
+        const QC::i32 bottom = (a.bottom() < b.bottom()) ? a.bottom() : b.bottom();
+
+        if (right <= left || bottom <= top)
+            return Rect{0, 0, 0, 0};
+
+        return Rect{left,
+                    top,
+                    static_cast<QC::u32>(right - left),
+                    static_cast<QC::u32>(bottom - top)};
+    }
+
+    static void invalidateRectDifference(WindowManager *wm,
+                                         const Rect &whole,
+                                         const Rect &covered)
+    {
+        if (!wm || whole.isEmpty())
+            return;
+
+        const Rect overlap = intersectRect(whole, covered);
+        if (overlap.isEmpty())
+        {
+            wm->invalidate(whole);
+            return;
+        }
+
+        if (overlap.y > whole.y)
+        {
+            wm->invalidate(Rect{whole.x,
+                                whole.y,
+                                whole.width,
+                                static_cast<QC::u32>(overlap.y - whole.y)});
+        }
+
+        if (overlap.bottom() < whole.bottom())
+        {
+            wm->invalidate(Rect{whole.x,
+                                overlap.bottom(),
+                                whole.width,
+                                static_cast<QC::u32>(whole.bottom() - overlap.bottom())});
+        }
+
+        if (overlap.x > whole.x)
+        {
+            wm->invalidate(Rect{whole.x,
+                                overlap.y,
+                                static_cast<QC::u32>(overlap.x - whole.x),
+                                overlap.height});
+        }
+
+        if (overlap.right() < whole.right())
+        {
+            wm->invalidate(Rect{overlap.right(),
+                                overlap.y,
+                                static_cast<QC::u32>(whole.right() - overlap.right()),
+                                overlap.height});
+        }
+    }
+
+    static bool writeAll(QFS::File *file, const void *data, QC::usize size)
+    {
+        if (!file)
+            return false;
+
+        const QC::u8 *bytes = static_cast<const QC::u8 *>(data);
+        QC::usize written = 0;
+        while (written < size)
+        {
+            const QC::isize rc = file->write(bytes + written, size - written);
+            if (rc <= 0)
+                return false;
+            written += static_cast<QC::usize>(rc);
+        }
+
+        return true;
+    }
+
+    static bool appendChar(char *dst, QC::usize cap, QC::usize &pos, char c)
+    {
+        if (!dst || pos + 1 >= cap)
+            return false;
+        dst[pos++] = c;
+        dst[pos] = '\0';
+        return true;
+    }
+
+    static bool appendText(char *dst, QC::usize cap, QC::usize &pos, const char *text)
+    {
+        if (!dst || !text)
+            return false;
+        for (QC::usize i = 0; text[i] != '\0'; ++i)
+        {
+            if (!appendChar(dst, cap, pos, text[i]))
+                return false;
+        }
+        return true;
+    }
+
+    static bool appendUnsigned(char *dst, QC::usize cap, QC::usize &pos, QC::u32 value)
+    {
+        char digits[16];
+        QC::usize count = 0;
+        do
+        {
+            digits[count++] = static_cast<char>('0' + (value % 10u));
+            value /= 10u;
+        } while (value != 0 && count < sizeof(digits));
+
+        while (count > 0)
+        {
+            if (!appendChar(dst, cap, pos, digits[--count]))
+                return false;
+        }
+        return true;
+    }
+
+    static bool appendSigned(char *dst, QC::usize cap, QC::usize &pos, QC::i32 value)
+    {
+        if (value < 0)
+        {
+            if (!appendChar(dst, cap, pos, '-'))
+                return false;
+            const QC::u32 magnitude = static_cast<QC::u32>(-(value + 1)) + 1u;
+            return appendUnsigned(dst, cap, pos, magnitude);
+        }
+
+        return appendUnsigned(dst, cap, pos, static_cast<QC::u32>(value));
+    }
+
+    static bool buildDragDumpPath(char *dst, QC::usize cap, QC::u32 sequence, const char *phase, const char *suffix)
+    {
+        QC::usize pos = 0;
+        if (!appendText(dst, cap, pos, "/shared/drag_"))
+            return false;
+        if (sequence < 100u && !appendChar(dst, cap, pos, '0'))
+            return false;
+        if (sequence < 10u && !appendChar(dst, cap, pos, '0'))
+            return false;
+        if (!appendUnsigned(dst, cap, pos, sequence))
+            return false;
+        if (!appendChar(dst, cap, pos, '_'))
+            return false;
+        if (!appendText(dst, cap, pos, phase))
+            return false;
+        if (!appendChar(dst, cap, pos, '_'))
+            return false;
+        if (!appendText(dst, cap, pos, suffix))
+            return false;
+        return true;
+    }
+
+    static QC::u32 readRgbPixel(const QC::u8 *row, QC::u32 x, QC::u32 bpp, PixelFormat format)
+    {
+        switch (format)
+        {
+        case PixelFormat::ARGB8888:
+        {
+            const QC::u32 pixel = reinterpret_cast<const QC::u32 *>(row)[x];
+            return ((pixel >> 16) & 0xFFu) | (pixel & 0x00FF00u) | ((pixel & 0xFFu) << 16);
+        }
+        case PixelFormat::ABGR8888:
+        {
+            const QC::u32 pixel = reinterpret_cast<const QC::u32 *>(row)[x];
+            return pixel & 0x00FFFFFFu;
+        }
+        case PixelFormat::RGB888:
+        {
+            const QC::u8 *pixel = row + static_cast<QC::usize>(x) * 3u;
+            return (static_cast<QC::u32>(pixel[0]) << 16) |
+                   (static_cast<QC::u32>(pixel[1]) << 8) |
+                   static_cast<QC::u32>(pixel[2]);
+        }
+        case PixelFormat::BGR888:
+        {
+            const QC::u8 *pixel = row + static_cast<QC::usize>(x) * 3u;
+            return (static_cast<QC::u32>(pixel[2]) << 16) |
+                   (static_cast<QC::u32>(pixel[1]) << 8) |
+                   static_cast<QC::u32>(pixel[0]);
+        }
+        case PixelFormat::RGB565:
+        case PixelFormat::BGR565:
+        {
+            const QC::u16 pixel = reinterpret_cast<const QC::u16 *>(row)[x];
+            QC::u32 r = ((pixel >> 11) & 0x1Fu) * 255u / 31u;
+            QC::u32 g = ((pixel >> 5) & 0x3Fu) * 255u / 63u;
+            QC::u32 b = (pixel & 0x1Fu) * 255u / 31u;
+            if (format == PixelFormat::BGR565)
+            {
+                const QC::u32 tmp = r;
+                r = b;
+                b = tmp;
+            }
+            return (r << 16) | (g << 8) | b;
+        }
+        }
+
+        (void)bpp;
+        return 0;
+    }
+
+    static bool dumpBufferCropToPpm(const char *path,
+                                    const void *buffer,
+                                    QC::u32 surfaceWidth,
+                                    QC::u32 surfaceHeight,
+                                    QC::u32 pitchBytes,
+                                    QC::u32 bpp,
+                                    PixelFormat format,
+                                    const Rect &requestedRect)
+    {
+        if (!path || !buffer || surfaceWidth == 0 || surfaceHeight == 0)
+            return false;
+
+        QC::i32 x0 = requestedRect.x;
+        QC::i32 y0 = requestedRect.y;
+        QC::i32 x1 = requestedRect.right();
+        QC::i32 y1 = requestedRect.bottom();
+        if (x0 < 0)
+            x0 = 0;
+        if (y0 < 0)
+            y0 = 0;
+        if (x1 > static_cast<QC::i32>(surfaceWidth))
+            x1 = static_cast<QC::i32>(surfaceWidth);
+        if (y1 > static_cast<QC::i32>(surfaceHeight))
+            y1 = static_cast<QC::i32>(surfaceHeight);
+        if (x1 <= x0 || y1 <= y0)
+            return false;
+
+        const QC::u32 width = static_cast<QC::u32>(x1 - x0);
+        const QC::u32 height = static_cast<QC::u32>(y1 - y0);
+
+        auto &vfs = QFS::VFS::instance();
+        QFS::File *file = vfs.open(path,
+                                   QFS::OpenMode::Write |
+                                   QFS::OpenMode::Create |
+                                   QFS::OpenMode::Truncate |
+                                   QFS::OpenMode::Binary);
+        if (!file)
+            return false;
+
+        char header[64] = {};
+        QC::usize headerPos = 0;
+        bool ok = appendText(header, sizeof(header), headerPos, "P6\n") &&
+              appendUnsigned(header, sizeof(header), headerPos, width) &&
+              appendChar(header, sizeof(header), headerPos, ' ') &&
+              appendUnsigned(header, sizeof(header), headerPos, height) &&
+              appendText(header, sizeof(header), headerPos, "\n255\n") &&
+              writeAll(file, header, headerPos);
+
+        QC::Vector<QC::u8> row;
+        if (ok)
+            row.resize(static_cast<QC::usize>(width) * 3u);
+
+        const QC::u8 *base = static_cast<const QC::u8 *>(buffer);
+        for (QC::u32 y = 0; ok && y < height; ++y)
+        {
+            const QC::u8 *srcRow = base + static_cast<QC::usize>(y0 + static_cast<QC::i32>(y)) * pitchBytes;
+            for (QC::u32 x = 0; x < width; ++x)
+            {
+                const QC::u32 rgb = readRgbPixel(srcRow, static_cast<QC::u32>(x0) + x, bpp, format);
+                row[static_cast<QC::usize>(x) * 3u + 0u] = static_cast<QC::u8>((rgb >> 16) & 0xFFu);
+                row[static_cast<QC::usize>(x) * 3u + 1u] = static_cast<QC::u8>((rgb >> 8) & 0xFFu);
+                row[static_cast<QC::usize>(x) * 3u + 2u] = static_cast<QC::u8>(rgb & 0xFFu);
+            }
+
+            ok = writeAll(file, row.data(), row.size());
+        }
+
+        vfs.close(file);
+        return ok;
+    }
+
+    static bool dumpWindowSurfaceToPpm(const char *path, Window *window)
+    {
+        if (!path || !window || !window->buffer())
+            return false;
+
+        return dumpBufferCropToPpm(path,
+                                   window->buffer(),
+                                   window->bufferWidth(),
+                                   window->bufferHeight(),
+                                   window->bufferPitchBytes(),
+                                   32,
+                                   PixelFormat::ARGB8888,
+                                   Rect{0, 0, window->bufferWidth(), window->bufferHeight()});
     }
 
     WindowManager &WindowManager::instance()
@@ -471,6 +764,9 @@ namespace QW
 
     void WindowManager::render()
     {
+        if (!m_needsRender)
+            return;
+
         if (m_compositor)
         {
             // Paint dirty windows once per frame (coalesced).
@@ -484,6 +780,7 @@ namespace QW
             }
 
             m_compositor->compose();
+
             m_needsRender = false;
         }
     }
@@ -495,6 +792,15 @@ namespace QW
             return Size{m_framebuffer->width(), m_framebuffer->height()};
         }
         return Size{0, 0};
+    }
+
+    void WindowManager::resetInputLatencyStats()
+    {
+        m_lastInputTimestamp = 0;
+        m_lastInputMs = 0;
+        m_lastMouseEventPostedMs = 0;
+        m_lastMouseQueueDelayMs = 0;
+        m_maxMouseQueueDelayMs = 0;
     }
 
     Window *WindowManager::windowAt(Point p)
@@ -514,10 +820,17 @@ namespace QW
     void WindowManager::routeMouseEvent(const QK::Event::MouseEventData &mouse)
     {
         using namespace QK::Event;
+        const Point oldMousePos = m_mousePos;
 
         // Capture timing for UI instrumentation/debugging.
         m_lastInputTimestamp = mouse.timestamp;
         m_lastInputMs = QDrv::Timer::instance().milliseconds();
+        if (m_lastMouseEventPostedMs != 0 && m_lastInputMs >= m_lastMouseEventPostedMs)
+        {
+            m_lastMouseQueueDelayMs = m_lastInputMs - m_lastMouseEventPostedMs;
+            if (m_lastMouseQueueDelayMs > m_maxMouseQueueDelayMs)
+                m_maxMouseQueueDelayMs = m_lastMouseQueueDelayMs;
+        }
 
         // The kernel input layer posts mouse events with a meaningful absolute cursor position
         // (clamped to screen bounds by the active mouse driver). Always trust x/y here to keep
@@ -538,6 +851,32 @@ namespace QW
             y = maxY;
 
         m_mousePos = Point{x, y};
+
+        if (m_compositor && !m_compositor->hasHardwareCursor() &&
+            (oldMousePos.x != m_mousePos.x || oldMousePos.y != m_mousePos.y))
+        {
+            const Rect oldCursorRect = m_compositor->cursorBoundsAt(oldMousePos.x, oldMousePos.y);
+            const Rect newCursorRect = m_compositor->cursorBoundsAt(m_mousePos.x, m_mousePos.y);
+            if (!oldCursorRect.isEmpty() && !newCursorRect.isEmpty())
+            {
+                const QC::i32 x1 = (oldCursorRect.x < newCursorRect.x) ? oldCursorRect.x : newCursorRect.x;
+                const QC::i32 y1 = (oldCursorRect.y < newCursorRect.y) ? oldCursorRect.y : newCursorRect.y;
+                const QC::i32 x2 = (oldCursorRect.right() > newCursorRect.right()) ? oldCursorRect.right() : newCursorRect.right();
+                const QC::i32 y2 = (oldCursorRect.bottom() > newCursorRect.bottom()) ? oldCursorRect.bottom() : newCursorRect.bottom();
+                invalidate(Rect{x1,
+                                y1,
+                                static_cast<QC::u32>(x2 - x1),
+                                static_cast<QC::u32>(y2 - y1)});
+            }
+            else if (!oldCursorRect.isEmpty())
+            {
+                invalidate(oldCursorRect);
+            }
+            else if (!newCursorRect.isEmpty())
+            {
+                invalidate(newCursorRect);
+            }
+        }
 
         // Keep hardware cursor position tightly synced to input events.
         // Do this without forcing a full compose/present.
@@ -580,12 +919,27 @@ namespace QW
 
                     const Rect oldDecoratedBounds = decoratedInvalidationRect(oldBounds);
                     const Rect newDecoratedBounds = decoratedInvalidationRect(newBounds);
-                    const bool usedRectCopy = m_compositor && m_compositor->rectCopy(oldDecoratedBounds, newDecoratedBounds);
+                    const bool usedRectCopy = m_compositor &&
+                                              m_compositor->rectCopy(oldDecoratedBounds, newDecoratedBounds);
 
-                    invalidate(oldDecoratedBounds);
                     m_dragWindow->setBounds(newBounds);
-                    if (!usedRectCopy)
-                        invalidate(newDecoratedBounds);
+
+                    if (usedRectCopy)
+                    {
+                        // Copy the moved window image immediately, then repaint the
+                        // destination and any newly exposed source strips for correctness.
+                        invalidateRectDifference(this, oldDecoratedBounds, newDecoratedBounds);
+                    }
+                    else
+                    {
+                        invalidate(oldDecoratedBounds);
+                    }
+
+                    // Even after a successful rect-copy, the destination window still
+                    // needs a real repaint. Without this, edge-local controls near the
+                    // title bar/right edge can retain stale pixels until a later hover
+                    // or expose invalidates them.
+                    invalidate(newDecoratedBounds);
                     postWindowEvent(QK::Event::Type::WindowMove, m_dragWindow);
 
                     syncRuntimeWindowRegistry(m_windows, m_focusedWindow);
@@ -751,6 +1105,88 @@ namespace QW
         if (!window)
             return;
         window->setStyleSnapshot(&snapshot);
+    }
+
+    void WindowManager::dumpDragReleaseBuffers(const char *phase,
+                                               QC::u32 sequence,
+                                               Window *window,
+                                               const Rect &windowBounds,
+                                               const Rect &decoratedBounds)
+    {
+        if (!phase || !m_framebuffer)
+            return;
+
+        auto &vfs = QFS::VFS::instance();
+        (void)vfs.createDir("/shared/dragdump");
+
+        char path[160] = {};
+        char meta[256] = {};
+        QC::usize metaPos = 0;
+        const bool metaOk = appendText(meta, sizeof(meta), metaPos, "seq=") &&
+                            appendUnsigned(meta, sizeof(meta), metaPos, sequence) &&
+                            appendText(meta, sizeof(meta), metaPos, " phase=") &&
+                            appendText(meta, sizeof(meta), metaPos, phase) &&
+                            appendText(meta, sizeof(meta), metaPos, " window=") &&
+                            appendSigned(meta, sizeof(meta), metaPos, windowBounds.x) &&
+                            appendChar(meta, sizeof(meta), metaPos, ',') &&
+                            appendSigned(meta, sizeof(meta), metaPos, windowBounds.y) &&
+                            appendChar(meta, sizeof(meta), metaPos, ' ') &&
+                            appendUnsigned(meta, sizeof(meta), metaPos, windowBounds.width) &&
+                            appendChar(meta, sizeof(meta), metaPos, 'x') &&
+                            appendUnsigned(meta, sizeof(meta), metaPos, windowBounds.height) &&
+                            appendText(meta, sizeof(meta), metaPos, " decorated=") &&
+                            appendSigned(meta, sizeof(meta), metaPos, decoratedBounds.x) &&
+                            appendChar(meta, sizeof(meta), metaPos, ',') &&
+                            appendSigned(meta, sizeof(meta), metaPos, decoratedBounds.y) &&
+                            appendChar(meta, sizeof(meta), metaPos, ' ') &&
+                            appendUnsigned(meta, sizeof(meta), metaPos, decoratedBounds.width) &&
+                            appendChar(meta, sizeof(meta), metaPos, 'x') &&
+                            appendUnsigned(meta, sizeof(meta), metaPos, decoratedBounds.height) &&
+                            appendChar(meta, sizeof(meta), metaPos, '\n');
+        if (metaOk && buildDragDumpPath(path, sizeof(path), sequence, phase, "meta.txt"))
+        {
+            QFS::File *metaFile = vfs.open(path,
+                                           QFS::OpenMode::Write |
+                                           QFS::OpenMode::Create |
+                                           QFS::OpenMode::Truncate);
+            if (metaFile)
+            {
+                (void)writeAll(metaFile, meta, metaPos);
+                vfs.close(metaFile);
+            }
+        }
+
+        if (window)
+        {
+            if (buildDragDumpPath(path, sizeof(path), sequence, phase, "window.ppm"))
+                (void)dumpWindowSurfaceToPpm(path, window);
+        }
+
+        if (buildDragDumpPath(path, sizeof(path), sequence, phase, "back.ppm"))
+        {
+            (void)dumpBufferCropToPpm(path,
+                                      m_framebuffer->backBuffer(),
+                                      m_framebuffer->width(),
+                                      m_framebuffer->height(),
+                                      m_framebuffer->pitch(),
+                                      m_framebuffer->bpp(),
+                                      m_framebuffer->format(),
+                                      decoratedBounds);
+        }
+
+        if (buildDragDumpPath(path, sizeof(path), sequence, phase, "front.ppm"))
+        {
+            (void)dumpBufferCropToPpm(path,
+                                      m_framebuffer->buffer(),
+                                      m_framebuffer->width(),
+                                      m_framebuffer->height(),
+                                      m_framebuffer->pitch(),
+                                      m_framebuffer->bpp(),
+                                      m_framebuffer->format(),
+                                      decoratedBounds);
+        }
+
+        QC_LOG_INFO("QWDragDump", "Captured drag dump seq=%u phase=%s to /shared", sequence, phase);
     }
 
     void WindowManager::onStyleChanged(const StyleSnapshot &snapshot)

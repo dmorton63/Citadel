@@ -1,5 +1,6 @@
 #pragma once
 
+#include "QDrvDisplayTypes.h"
 #include "QGfxTypes.h"
 
 namespace QGfx
@@ -11,6 +12,10 @@ namespace QGfx
         QC::u32 height = 0;
         PixelFormat format = PixelFormat::Unknown;
         SurfaceUsage usage = SurfaceUsage::Dynamic;
+        QDrv::Display::cvd_device_t displayDevice = nullptr;
+        QDrv::Display::cvd_swapchain_t displaySwapchain = nullptr;
+        QDrv::Display::cvd_surface_id_t displaySurfaceId{};
+        QDrv::Display::cvd_sync_value_t displayReadyValue = 0;
         ResourceHandle gpuHandle;
         QC::Rect dirtyRegion{0, 0, 0, 0};
 

@@ -7,6 +7,12 @@
 #include "QCBuiltins.h"
 #include "QKEventManager.h"
 
+namespace QK::Boot::Acpi
+{
+    using FLogFn = void (*)(const char *);
+    bool TryAcpiShutdown(FLogFn Log = nullptr);
+}
+
 namespace QK
 {
     namespace Shutdown
@@ -14,6 +20,13 @@ namespace QK
         namespace
         {
             constexpr const char *LOG_MODULE = "QShutdown";
+
+            void logAcpiShutdownMessage(const char *msg)
+            {
+                if (!msg || !*msg)
+                    return;
+                QC_LOG_INFO(LOG_MODULE, "%s", msg);
+            }
 
             inline void postShutdownPhaseEvent(QK::Event::Type type, Reason reason)
             {
@@ -209,8 +222,13 @@ namespace QK
         {
             QC_LOG_INFO(LOG_MODULE, "Issuing ACPI power-off sequence");
 
+            if (QK::Boot::Acpi::TryAcpiShutdown(&logAcpiShutdownMessage))
+            {
+                QC_LOG_INFO(LOG_MODULE, "ACPI PM1 sleep command issued");
+            }
+
             // Common hypervisor/firmware shutdown ports.
-            // QEMU (PC/i440fx) often reacts to 0x604; some setups require the full S5 value 0x3400.
+            // Keep these as a fallback for hypervisors and legacy test targets.
             // Bochs:               0xB004
             // VirtualBox:          0x4004 (expects 0x3400)
             // QEMU debug-exit:     0xF4 (requires -device isa-debug-exit)

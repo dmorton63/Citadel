@@ -1,0 +1,12 @@
+D:\quantum\CQL_Database__Engine\Database.cpp;D:\quantum\CQL_Database__Engine\CQL_Data.7c7486f7\x64\Debug\Database.obj
+D:\quantum\CQL_Database__Engine\DiagnosticDumper.cpp;D:\quantum\CQL_Database__Engine\CQL_Data.7c7486f7\x64\Debug\DiagnosticDumper.obj
+D:\quantum\CQL_Database__Engine\FileManager.cpp;D:\quantum\CQL_Database__Engine\CQL_Data.7c7486f7\x64\Debug\FileManager.obj
+D:\quantum\CQL_Database__Engine\imgui_impl_dx11.cpp;D:\quantum\CQL_Database__Engine\CQL_Data.7c7486f7\x64\Debug\imgui_impl_dx11.obj
+D:\quantum\CQL_Database__Engine\imgui_impl_win32.cpp;D:\quantum\CQL_Database__Engine\CQL_Data.7c7486f7\x64\Debug\imgui_impl_win32.obj
+D:\quantum\CQL_Database__Engine\main.cpp;D:\quantum\CQL_Database__Engine\CQL_Data.7c7486f7\x64\Debug\main.obj
+D:\quantum\CQL_Database__Engine\PageManager.cpp;D:\quantum\CQL_Database__Engine\CQL_Data.7c7486f7\x64\Debug\PageManager.obj
+D:\quantum\CQL_Database__Engine\QueryExecutor.cpp;D:\quantum\CQL_Database__Engine\CQL_Data.7c7486f7\x64\Debug\QueryExecutor.obj
+D:\quantum\CQL_Database__Engine\RowSerializer.cpp;D:\quantum\CQL_Database__Engine\CQL_Data.7c7486f7\x64\Debug\RowSerializer.obj
+D:\quantum\CQL_Database__Engine\SQLParser.cpp;D:\quantum\CQL_Database__Engine\CQL_Data.7c7486f7\x64\Debug\SQLParser.obj
+D:\quantum\CQL_Database__Engine\Table.cpp;D:\quantum\CQL_Database__Engine\CQL_Data.7c7486f7\x64\Debug\Table.obj
+D:\quantum\CQL_Database__Engine\WhereClauseEvaluator.cpp;D:\quantum\CQL_Database__Engine\CQL_Data.7c7486f7\x64\Debug\WhereClauseEvaluator.obj

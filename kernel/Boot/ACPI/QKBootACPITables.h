@@ -8,4 +8,5 @@ namespace QK::Boot::Acpi
     using FTpm2CrbStartupFn = void (*)(QC::u32 StartMethod, QC::PhysAddr ControlAreaPhys, FLogFn Log);
 
     void EnumerateTables(QC::PhysAddr RsdpPhys, FLogFn Log, FTpm2CrbStartupFn Tpm2CrbStartup);
+    bool TryAcpiShutdown(FLogFn Log = nullptr);
 }

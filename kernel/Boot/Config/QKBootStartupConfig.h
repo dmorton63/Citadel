@@ -32,6 +32,9 @@ namespace QK::Boot::Config
     StartupMode GetStartupMode();
     void SetStartupMode(StartupMode Mode);
     QC::Status PersistStartupMode(StartupMode Mode, FLogFn Log);
+    QC::u32 GetMouseSensitivityPercent();
+    void SetMouseSensitivityPercent(QC::u32 Percent);
+    QC::Status PersistMouseSensitivityPercent(QC::u32 Percent, FLogFn Log);
     QK::SecurityCenter::Mode GetSecurityCenterMode();
     bool GetIdeSharedProbeEnabled();
 

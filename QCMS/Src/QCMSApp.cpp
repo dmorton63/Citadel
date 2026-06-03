@@ -47,6 +47,9 @@ namespace QCMS
     {
         m_database = database;
 
+        m_dbBrowser.setDatabase(m_database);
+        m_queryStudio.setDatabase(m_database);
+
         if (isOpen())
         {
             QW::WindowManager::instance().bringToFront(m_window);

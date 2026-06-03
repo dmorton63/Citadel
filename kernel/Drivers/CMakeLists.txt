@@ -9,6 +9,7 @@ add_library(QKDrivers STATIC
     QKDrvManager.cpp
     QKStorageRegistry.cpp
     QKStorageProbe.cpp
+    AHCI/QKDrvAHCI.cpp
     IDE/QKDrvIDE.cpp
 )
 
@@ -22,6 +23,7 @@ target_link_libraries(QKDrivers PUBLIC
     QKDrvUHCI
     QKDrvXHCI
     QKDrvE1000
+    QKMemory
     QCommon
     QArch
 )

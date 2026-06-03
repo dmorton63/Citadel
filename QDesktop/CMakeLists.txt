@@ -3,6 +3,9 @@ add_library(QDesktop STATIC
     Src/QDBrowser.cpp
     Src/QDCuiMLViewer.cpp
     Src/QDDesktop.cpp
+    Src/QDDesktopDocument.cpp
+    Src/QDDesktopDocumentIO.cpp
+    Src/QDDesktopDocumentValidation.cpp
     Src/QDHtml.cpp
     Src/QDTheme.cpp
     Src/QDThemeAssets.cpp

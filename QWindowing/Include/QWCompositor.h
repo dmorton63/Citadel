@@ -35,6 +35,10 @@ namespace QW
     struct CompositorStats
     {
         QC::u64 lastComposeTimeMs = 0;
+        QC::u64 lastPresentTimeMs = 0;
+        QC::u64 maxPresentTimeMs = 0;
+        QC::u64 lastInputToPresentMs = 0;
+        QC::u64 maxInputToPresentMs = 0;
         QC::u32 frameCount = 0;
         QC::usize dirtyRegionCount = 0;
         QC::usize lastMergedDirtyRegionCount = 0;
@@ -84,6 +88,8 @@ namespace QW
         // Cursor
         void setCursor(const QC::u32 *pixels, QC::u32 width, QC::u32 height,
                        QC::i32 hotspotX, QC::i32 hotspotY);
+        bool hasHardwareCursor() const;
+        Rect cursorBoundsAt(QC::i32 x, QC::i32 y) const;
         void syncHardwareCursorPosition();
         void drawCursor(QC::i32 x, QC::i32 y);
         void saveCursorBackground(QC::i32 x, QC::i32 y);

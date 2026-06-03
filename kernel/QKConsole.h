@@ -26,6 +26,8 @@ namespace QK
         // This does not affect Console::write() logging.
         void setInputEnabled(bool enabled);
         bool inputEnabled();
+        void setSafeFallbackEnabled(bool enabled);
+        bool safeFallbackEnabled();
         void handleKeyEvent(const QKDrv::PS2::KeyEvent &event);
         bool registerCommand(const Command &cmd);
 
@@ -39,6 +41,7 @@ namespace QK
         bool readLineBlocking(char *out, QC::usize outSize, bool echo = true);
 
         void write(const char *msg);
+        void showPrompt();
         const char *cwd();
 
         // Console command access role (used when executing QC::Cmd registry commands).

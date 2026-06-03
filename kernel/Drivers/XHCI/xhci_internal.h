@@ -86,6 +86,14 @@ namespace QKDrv
             QC::u16 wDescriptorLength;
         } __attribute__((packed));
 
+        struct EndpointTransferState
+        {
+            TRB *ring = nullptr;
+            QC::PhysAddr ringPhys = 0;
+            QC::usize enqueue = 0;
+            bool cycle = true;
+        };
+
         struct DeviceInfo
         {
             QC::u8 slotId;
@@ -95,13 +103,20 @@ namespace QKDrv
             bool isTablet;
             bool isMouse;
             bool isKeyboard;
+            bool isMassStorage;
+            QC::u8 interfaceNumber;
             QC::u8 hidEndpoint;
             QC::u8 hidInterval;
             QC::u16 hidMaxPacket;
+            QC::u8 bulkInEndpoint;
+            QC::u8 bulkOutEndpoint;
+            QC::u32 storageBlockSize;
+            QC::u64 storageSectorCount;
             TRB *transferRing;
             QC::PhysAddr transferRingPhys;
             QC::usize transferEnqueue;
             bool transferCycle;
+            EndpointTransferState endpointStates[32];
             QC::u8 *hidBuffer;
             QC::PhysAddr hidBufferPhys;
             QC::u32 logicalMaxX;
@@ -136,6 +151,7 @@ namespace QKDrv
         constexpr QC::usize RING_SIZE = 256;
 
         class XHCIControllerImpl;
+        class USBMassStorageBlockDevice;
 
         class TabletDriver : public MouseDriver
         {
@@ -273,6 +289,8 @@ namespace QKDrv
                                 QC::u32 length,
                                 QC::u32 trbFlags) override;
 
+            friend class USBMassStorageBlockDevice;
+
         private:
             void takeOwnership();
             void initializeEventRing();
@@ -299,6 +317,9 @@ namespace QKDrv
             bool scheduleInterruptIn(DeviceInfo &dev);
             bool submitTransfer(DeviceInfo &dev, QC::u8 endpointId,
                                 QC::PhysAddr buffer, QC::u32 length, QC::u32 trbFlags);
+            bool submitTransferAndWait(DeviceInfo &dev, QC::u8 endpointId,
+                                       QC::PhysAddr buffer, QC::u32 length,
+                                       QC::u32 trbFlags, QC::u32 timeoutMs = 5000);
 
             void processEvents();
             void handleTransferEvent(const TRB &event);
@@ -308,11 +329,22 @@ namespace QKDrv
             void probeDevices();
             bool enumerateDevice(QC::u8 port);
             HIDDeviceKind identifyHID(QC::u8 slotId, DeviceInfo &dev, const QC::u8 *configData, QC::u16 length);
+            bool identifyMassStorage(QC::u8 slotId, DeviceInfo &dev, const QC::u8 *configData, QC::u16 length);
+            HIDDeviceKind inspectHIDPointerKind(QC::u8 slotId, QC::u8 interfaceNumber,
+                                                QC::u16 reportLength, QC::u32 &logicalMaxX,
+                                                QC::u32 &logicalMaxY);
             bool fetchHIDLogicalRanges(QC::u8 slotId, QC::u8 interfaceNumber,
                                        QC::u16 reportLength, QC::u32 &logicalMaxX,
                                        QC::u32 &logicalMaxY);
             void parseHIDLogicalRanges(const QC::u8 *descriptor, QC::u16 length,
                                        QC::u32 &logicalMaxX, QC::u32 &logicalMaxY);
+            DeviceInfo *findDevice(QC::u8 slotId);
+            bool bulkOnlyTransfer(DeviceInfo &dev, const QC::u8 *cdb, QC::u8 cdbLen,
+                                  void *data, QC::u32 dataLen, bool dataIn);
+            bool queryMassStorageCapacity(DeviceInfo &dev, QC::u32 &blockSize, QC::u64 &sectorCount);
+            QC::Status readMassStorageSectors(DeviceInfo &dev, QC::u64 lba, QC::usize count, void *buffer);
+            QC::Status writeMassStorageSectors(DeviceInfo &dev, QC::u64 lba, QC::usize count, const void *buffer);
+            bool registerMassStorageVolume(DeviceInfo &dev);
 
             void ringDoorbell(QC::u8 slot, QC::u8 target);
 
@@ -368,6 +400,8 @@ namespace QKDrv
             QC::u8 m_lastSlotId;
 
             bool m_transferPending;
+            QC::u8 m_transferPendingSlot;
+            QC::u8 m_transferPendingEndpoint;
             CompletionCode m_transferCompletionCode;
 
             MouseCallback m_mouseCallback;
@@ -382,6 +416,11 @@ namespace QKDrv
             QC::PhysAddr m_ep0RingPhys[MAX_DEVICES + 1];
             QC::usize m_ep0Enqueue[MAX_DEVICES + 1];
             bool m_ep0Cycle[MAX_DEVICES + 1];
+
+            QC::u8 *m_storageIoBuffer;
+            QC::PhysAddr m_storageIoBufferPhys;
+            QC::u32 m_bulkTagCounter;
+            QC::u32 m_usbStorageCount;
         };
     }
 } // namespace QKDrv

@@ -300,6 +300,16 @@ if [ -d "${RAMDISK_DIR}" ]; then
         fi
     fi
 
+    if [ -d "${RAMDISK_DIR}/system/fonts" ]; then
+        mdir -i "${RAMDISK_TEMP}" ::/FONTS >/dev/null 2>&1 || mmd -i "${RAMDISK_TEMP}" ::/FONTS >/dev/null 2>&1 || true
+        if compgen -G "${RAMDISK_DIR}/system/fonts/*" >/dev/null; then
+            if ! mcopy -s -o -i "${RAMDISK_TEMP}" ${RAMDISK_DIR}/system/fonts/* ::/FONTS >/dev/null 2>&1; then
+                echo -e "${RED}Failed to create /FONTS asset aliases in ramdisk image.${NC}"
+                exit 1
+            fi
+        fi
+    fi
+
     # Font aliases for FAT 8.3 (current VFS has no LFN support).
     # If you add RobotoMono static TTFs with long filenames, create a stable 8.3 alias
     # so runtime can open it reliably via "/system/fonts/RMONO.TTF".
@@ -310,6 +320,9 @@ if [ -d "${RAMDISK_DIR}" ]; then
             # mtools can prompt on /dev/tty if the directory exists, and we redirect stderr.
             if ! mcopy -o -i "${RAMDISK_TEMP}" "${ROBOTO_MONO_REG_SRC}" ::/system/fonts/RMONO.TTF >/dev/null 2>&1; then
                 echo -e "${YELLOW}WARNING: Failed to alias RobotoMono-Regular.ttf as /system/fonts/RMONO.TTF in ramdisk image${NC}"
+            fi
+            if ! mcopy -o -i "${RAMDISK_TEMP}" "${ROBOTO_MONO_REG_SRC}" ::/FONTS/RMONO.TTF >/dev/null 2>&1; then
+                echo -e "${YELLOW}WARNING: Failed to alias RobotoMono-Regular.ttf as /FONTS/RMONO.TTF in ramdisk image${NC}"
             fi
         fi
     }
@@ -394,6 +407,8 @@ if [ -d "${RAMDISK_DIR}" ]; then
     fi
 
     if [ -n "${SYSUI_DESKTOP_SRC}" ]; then
+        mcopy -o -i "${RAMDISK_TEMP}" "${SYSUI_DESKTOP_SRC}" ::/SYSTEM/UI/DESKTOP.CML >/dev/null 2>&1
+
         SYSUI_SIG_SRC=""
         if [ -f "${RAMDISK_DIR}/system/ui/DESKTOP.SIG" ]; then
             SYSUI_SIG_SRC="${RAMDISK_DIR}/system/ui/DESKTOP.SIG"
@@ -439,7 +454,25 @@ if [ -d "${RAMDISK_DIR}" ]; then
         fi
     fi
 
-    # Optional signatures for CUIMLSS styles under /SYSTEM/UI.
+    # Pack supporting UI source files into /UI so imported components and styles
+    # do not collide with the mounted /system volume. The trusted desktop entry
+    # point stays at /SYSTEM/UI/DESKTOP.CML, but its imports must use a distinct
+    # root because VFS mount matching is case-insensitive.
+    if [ -d "${RAMDISK_DIR}/system/ui" ]; then
+        mdir -i "${RAMDISK_TEMP}" ::/UI >/dev/null 2>&1 || mmd -i "${RAMDISK_TEMP}" ::/UI >/dev/null 2>&1 || true
+        for UI_SRC in "${RAMDISK_DIR}/system/ui/"*.cui "${RAMDISK_DIR}/system/ui/"*.CUI \
+                      "${RAMDISK_DIR}/system/ui/"*.cxs "${RAMDISK_DIR}/system/ui/"*.CXS; do
+            if [ ! -f "${UI_SRC}" ]; then
+                continue
+            fi
+
+            UI_BASE=$(basename "${UI_SRC}")
+            UI_UPPER=$(echo "${UI_BASE}" | tr '[:lower:]' '[:upper:]')
+            mcopy -o -i "${RAMDISK_TEMP}" "${UI_SRC}" "::/UI/${UI_UPPER}" >/dev/null 2>&1
+        done
+    fi
+
+    # Optional signatures for CUIMLSS styles under /UI.
     # In production mode, any .cxs present under ramdisk/system/ui must have a matching .sig
     # (or we must be able to generate one using keys/bootgate_rsa_priv.pem).
     if [ -d "${RAMDISK_DIR}/system/ui" ]; then
@@ -495,7 +528,7 @@ if [ -d "${RAMDISK_DIR}" ]; then
             fi
 
             if [ -n "${CXS_SIG_SRC}" ]; then
-                mcopy -o -i "${RAMDISK_TEMP}" "${CXS_SIG_SRC}" "::/SYSTEM/UI/${CXS_UPPER}.SIG" >/dev/null 2>&1
+                mcopy -o -i "${RAMDISK_TEMP}" "${CXS_SIG_SRC}" "::/UI/${CXS_UPPER}.SIG" >/dev/null 2>&1
             fi
         done
     fi
@@ -534,9 +567,14 @@ if [ -d "${RAMDISK_DIR}" ]; then
         mcopy -i "${RAMDISK_TEMP}" "${PROJECT_DIR}/desktop.json" ::/GOLDEN/DESKTOP.JSN >/dev/null 2>&1
     fi
 
-    if [ -n "${CUI_DESKTOP_SRC}" ]; then
-        mcopy -i "${RAMDISK_TEMP}" "${CUI_DESKTOP_SRC}" ::/PROD/DESKTOP.CML >/dev/null 2>&1
-        mcopy -i "${RAMDISK_TEMP}" "${CUI_DESKTOP_SRC}" ::/GOLDEN/DESKTOP.CML >/dev/null 2>&1
+    TIER_CUI_DESKTOP_SRC="${CUI_DESKTOP_SRC}"
+    if [ -z "${TIER_CUI_DESKTOP_SRC}" ] && [ -n "${SYSUI_DESKTOP_SRC}" ]; then
+        TIER_CUI_DESKTOP_SRC="${SYSUI_DESKTOP_SRC}"
+    fi
+
+    if [ -n "${TIER_CUI_DESKTOP_SRC}" ]; then
+        mcopy -i "${RAMDISK_TEMP}" "${TIER_CUI_DESKTOP_SRC}" ::/PROD/DESKTOP.CML >/dev/null 2>&1
+        mcopy -i "${RAMDISK_TEMP}" "${TIER_CUI_DESKTOP_SRC}" ::/GOLDEN/DESKTOP.CML >/dev/null 2>&1
     fi
 
     # Negative test hook: intentionally corrupt only the production tier desktop JSON so

@@ -35,7 +35,6 @@ namespace QD
     private:
         void createWindow();
         void setStatus(const char *text);
-        bool tryWriteOwnerMarker(const char *username);
 
         static void onCreateClick(QW::Controls::Button *button, void *userData);
         static void onCancelClick(QW::Controls::Button *button, void *userData);

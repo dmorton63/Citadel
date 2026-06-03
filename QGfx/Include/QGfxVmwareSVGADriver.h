@@ -32,6 +32,10 @@ namespace QGfx
         void queueDirtyRect(const QC::Rect &rect);
 
         DriverCapabilities m_capabilities;
+        QDrv::Display::cvd_device_t m_presentDevice = nullptr;
+        QDrv::Display::cvd_swapchain_t m_presentSwapchain = nullptr;
+        QDrv::Display::cvd_surface_id_t m_presentSurface{};
+        QDrv::Display::cvd_sync_value_t m_presentReadyValue = 0;
         QC::u32 m_nextSurfaceId = 1;
         bool m_initialized = false;
         ScanoutUploadCallback m_scanoutUploadCallback = nullptr;

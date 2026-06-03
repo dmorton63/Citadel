@@ -7,8 +7,6 @@
 
 #include "QCString.h"
 #include "QCLogger.h"
-#include "QFSVFS.h"
-#include "QFSFile.h"
 
 #include "QWWindowManager.h"
 #include "QWWindow.h"
@@ -28,10 +26,6 @@ namespace QD
         constexpr QC::i32 WIZARD_WIDTH = 640;
         constexpr QC::i32 WIZARD_HEIGHT = 420;
 
-        // FAT-backed /system volumes can enforce 8.3 names.
-        constexpr const char *OWNER_MARKER_PATH = "/system/OWNER.ENR";
-        constexpr const char *OWNER_INFO_PATH = "/system/OWNER.INF";
-
         static inline bool isEmpty(const char *s)
         {
             return !s || *s == '\0';
@@ -45,9 +39,6 @@ namespace QD
           m_title(nullptr),
           m_hint(nullptr),
           m_userLabel(nullptr),
-          m_userBox(nullptr),
-          m_pinLabel(nullptr),
-          m_pinBox(nullptr),
           m_questionLabel(nullptr),
           m_questionBox(nullptr),
           m_answerLabel(nullptr),
@@ -204,44 +195,6 @@ namespace QD
         }
     }
 
-    bool SetupWizard::tryWriteOwnerMarker(const char *username)
-    {
-        // v1 behavior: create a marker file only.
-        // Real key derivation / vault enrollment will live in SC.
-
-        QFS::VFS &vfs = QFS::VFS::instance();
-        if (!vfs.exists("/system"))
-        {
-            (void)vfs.createDir("/system");
-        }
-
-        {
-            QFS::File *f = vfs.open(OWNER_MARKER_PATH, QFS::OpenMode::Write | QFS::OpenMode::Create | QFS::OpenMode::Truncate);
-            if (!f)
-                return false;
-            const char *marker = "owner_enrolled=1\n";
-            (void)f->write(marker, QC::String::strlen(marker));
-            (void)vfs.close(f);
-        }
-
-        {
-            QFS::File *f = vfs.open(OWNER_INFO_PATH, QFS::OpenMode::Write | QFS::OpenMode::Create | QFS::OpenMode::Truncate);
-            if (!f)
-                return false;
-
-            const char *prefix = "username=";
-            (void)f->write(prefix, QC::String::strlen(prefix));
-            if (username)
-                (void)f->write(username, QC::String::strlen(username));
-            const char *newline = "\n";
-            (void)f->write(newline, 1);
-
-            (void)vfs.close(f);
-        }
-
-        return true;
-    }
-
     void SetupWizard::onCreateClick(QW::Controls::Button *button, void *userData)
     {
         (void)button;
@@ -261,29 +214,21 @@ namespace QD
 
         const bool bypass = QK::SecurityCenter::instance().bypassEnabled();
 
-        // Always persist enrollment state, even in bypass mode.
-        // Bypass is an enforcement mode, not a persistence disable.
-        const QC::Status st = QK::SecurityCenter::instance().ownerEnroll(username, pin);
+        const QC::Status st = QK::SecurityCenter::instance().ownerEnroll(username, pin, false);
         if (st != QC::Status::Success)
         {
-            const bool allowBypassCompat = bypass && (st == QC::Status::NotSupported || st == QC::Status::InvalidParam);
             const bool alreadyEnrolled = (st == QC::Status::Busy);
-            if (!allowBypassCompat && !alreadyEnrolled)
+            if (!alreadyEnrolled)
             {
-                // Most common cause during bring-up: /system isn't writable yet (e.g., system volume unformatted).
-                self->setStatus("Enrollment failed. If using --system-vol, format it first so /system/sc is writable.");
+                if (bypass)
+                    self->setStatus("Enrollment failed. Owner credentials were not persisted to /system/.sc.");
+                else
+                    self->setStatus("Enrollment failed. If using --system-vol, format it first so /system/.sc is writable.");
                 return;
             }
         }
 
-        if (!self->tryWriteOwnerMarker(username))
-        {
-            QC_LOG_ERROR(LOG_MODULE, "Failed to write owner marker files\n");
-            self->setStatus("Failed to save setup data. Check /system mount.");
-            return;
-        }
-
-        self->setStatus(bypass ? "Owner created (SC bypass compatibility)." : "Owner created.");
+        self->setStatus((st == QC::Status::Busy) ? "Owner already enrolled." : "Owner created.");
         self->close();
     }
 

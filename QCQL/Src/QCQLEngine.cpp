@@ -81,6 +81,58 @@ namespace QCQL
             return n == static_cast<QC::isize>(size);
         }
 
+        static Status loadPageFromFile(const Database &database, QFS::File *f, QC::u32 pageId, Page &outPage)
+        {
+            if (!f || database.path[0] == '\0' || pageId == 0 || database.pageSize < sizeof(PageHeader))
+                return Status::InvalidParam;
+
+            QC::Vector<QC::u8> buf;
+            buf.resize(database.pageSize);
+            const QC::u64 off = database.header.pageRegionOffset +
+                                static_cast<QC::u64>(pageId - 1) * static_cast<QC::u64>(database.pageSize);
+            if (!readAt(f, off, buf.data(), database.pageSize))
+                return Status::NotFound;
+
+            Page page{};
+            QC::String::memcpy(&page.header, buf.data(), sizeof(PageHeader));
+            if (page.header.pageId == 0 || page.header.pageId != pageId)
+                return Status::Corrupt;
+
+            const QC::usize offsetsBytes = static_cast<QC::usize>(page.header.rowCount) * sizeof(QC::u16);
+            const QC::usize offsetsStart = sizeof(PageHeader);
+            const QC::usize dataStart = offsetsStart + offsetsBytes;
+            if (dataStart > database.pageSize)
+                return Status::Corrupt;
+            if (page.header.freeOffset < dataStart || page.header.freeOffset > database.pageSize)
+                return Status::Corrupt;
+
+            page.rowOffsets.resize(page.header.rowCount);
+            if (page.header.rowCount > 0)
+            {
+                QC::String::memcpy(page.rowOffsets.data(),
+                                   buf.data() + offsetsStart,
+                                   offsetsBytes);
+            }
+
+            const QC::usize payloadBytes = static_cast<QC::usize>(page.header.freeOffset) - dataStart;
+            page.data.resize(payloadBytes);
+            if (payloadBytes > 0)
+            {
+                QC::String::memcpy(page.data.data(),
+                                   buf.data() + dataStart,
+                                   payloadBytes);
+            }
+
+            page.dirty = false;
+            outPage = static_cast<Page &&>(page);
+            return Status::Success;
+        }
+
+        static QC::usize schemaDiskSize(QC::u32 version)
+        {
+            return (version <= kFileVersion1) ? sizeof(TableSchemaDiskV1) : sizeof(TableSchemaDisk);
+        }
+
         static bool serializeRow(const Row &row, QC::Vector<QC::u8> &out)
         {
             if (row.cells.size() > 65535)
@@ -163,6 +215,48 @@ namespace QCQL
             return QC::String::strcmp(a, b) == 0;
         }
 
+        static QC::i32 findColumnIndex(const TableSchema &schema, const char *columnName)
+        {
+            if (!columnName || columnName[0] == '\0')
+                return -1;
+
+            for (QC::usize i = 0; i < schema.columns.size(); ++i)
+            {
+                if (tableNameEquals(schema.columns[i].name, columnName))
+                    return static_cast<QC::i32>(i);
+            }
+
+            return -1;
+        }
+
+        static Table *findTableByName(Database &database, const char *name)
+        {
+            if (!name)
+                return nullptr;
+
+            for (QC::usize i = 0; i < database.tables.size(); ++i)
+            {
+                if (tableNameEquals(database.tables[i].name, name))
+                    return &database.tables[i];
+            }
+
+            return nullptr;
+        }
+
+        static const Table *findTableByName(const Database &database, const char *name)
+        {
+            if (!name)
+                return nullptr;
+
+            for (QC::usize i = 0; i < database.tables.size(); ++i)
+            {
+                if (tableNameEquals(database.tables[i].name, name))
+                    return &database.tables[i];
+            }
+
+            return nullptr;
+        }
+
         static bool hasTable(const Database &database, const char *name)
         {
             for (QC::usize i = 0; i < database.tables.size(); ++i)
@@ -182,9 +276,13 @@ namespace QCQL
                 QC::String::strncpy(dst, src, cap - 1);
         }
 
-        static bool validateSchema(const TableSchema &schema, QC::u32 &outPrimaryKeyIndex)
+        static bool validateSchema(const Database &database,
+                                   const TableSchema &schema,
+                                   QC::u32 &outPrimaryKeyIndex)
         {
             if (schema.tableName[0] == '\0' || schema.columns.empty() || schema.columns.size() > kMaxColumnsPerTable)
+                return false;
+            if (schema.foreignKeys.size() > kMaxForeignKeysPerTable)
                 return false;
 
             QC::u32 pkCount = 0;
@@ -209,7 +307,102 @@ namespace QCQL
                 }
             }
 
-            return pkCount == 1;
+            if (pkCount != 1)
+                return false;
+
+            for (QC::usize i = 0; i < schema.foreignKeys.size(); ++i)
+            {
+                const ForeignKey &foreignKey = schema.foreignKeys[i];
+                if (foreignKey.columnName[0] == '\0' ||
+                    foreignKey.referencedTable[0] == '\0' ||
+                    foreignKey.referencedColumn[0] == '\0')
+                {
+                    return false;
+                }
+
+                if (foreignKey.onDelete != ReferentialAction::Restrict ||
+                    foreignKey.onUpdate != ReferentialAction::Restrict)
+                {
+                    return false;
+                }
+
+                const QC::i32 childColumnIndex = findColumnIndex(schema, foreignKey.columnName);
+                if (childColumnIndex < 0)
+                    return false;
+
+                const Table *parentTable = findTableByName(database, foreignKey.referencedTable);
+                if (!parentTable)
+                    return false;
+
+                const QC::i32 parentColumnIndex = findColumnIndex(parentTable->schema, foreignKey.referencedColumn);
+                if (parentColumnIndex < 0)
+                    return false;
+
+                const Column &parentColumn = parentTable->schema.columns[static_cast<QC::usize>(parentColumnIndex)];
+                const Column &childColumn = schema.columns[static_cast<QC::usize>(childColumnIndex)];
+                if (!parentColumn.isPrimaryKey)
+                    return false;
+                if (parentColumn.type != childColumn.type)
+                    return false;
+            }
+
+            return true;
+        }
+
+        static bool validateRowAgainstSchema(const TableSchema &schema, const Row &row)
+        {
+            if (row.cells.size() != schema.columns.size())
+                return false;
+
+            for (QC::usize i = 0; i < schema.columns.size(); ++i)
+            {
+                if (row.cells[i].type != schema.columns[i].type)
+                    return false;
+            }
+
+            return true;
+        }
+
+        static bool hasForeignKey(const TableSchema &schema,
+                                  const char *columnName,
+                                  const char *referencedTable,
+                                  const char *referencedColumn)
+        {
+            for (QC::usize i = 0; i < schema.foreignKeys.size(); ++i)
+            {
+                const ForeignKey &foreignKey = schema.foreignKeys[i];
+                if (!tableNameEquals(foreignKey.columnName, columnName))
+                    continue;
+                if (!tableNameEquals(foreignKey.referencedTable, referencedTable))
+                    continue;
+                if (!tableNameEquals(foreignKey.referencedColumn, referencedColumn))
+                    continue;
+                return true;
+            }
+
+            return false;
+        }
+
+        static void addForeignKey(TableSchema &schema,
+                                  const char *columnName,
+                                  const char *referencedTable,
+                                  const char *referencedColumn)
+        {
+            if (hasForeignKey(schema, columnName, referencedTable, referencedColumn))
+                return;
+
+            ForeignKey foreignKey{};
+            setFixedName(foreignKey.columnName, sizeof(foreignKey.columnName), columnName);
+            setFixedName(foreignKey.referencedTable, sizeof(foreignKey.referencedTable), referencedTable);
+            setFixedName(foreignKey.referencedColumn, sizeof(foreignKey.referencedColumn), referencedColumn);
+            schema.foreignKeys.push_back(static_cast<ForeignKey &&>(foreignKey));
+        }
+
+        static void applyBuiltInRelationshipMetadata(Database &database)
+        {
+            Table *themeTokens = findTableByName(database, "ThemeTokens");
+            if (themeTokens)
+                addForeignKey(themeTokens->schema, "themeId", "Themes", "id");
         }
 
         static QC::u32 nextTableId(const Database &database)
@@ -298,6 +491,98 @@ namespace QCQL
             }
             return false;
         }
+
+        static Status enforceForeignKeyConstraints(Engine &engine,
+                                                   const Database &database,
+                                                   const Table &table,
+                                                   const Row &row)
+        {
+            for (QC::usize i = 0; i < table.schema.foreignKeys.size(); ++i)
+            {
+                const ForeignKey &foreignKey = table.schema.foreignKeys[i];
+                const QC::i32 childColumnIndex = findColumnIndex(table.schema, foreignKey.columnName);
+                if (childColumnIndex < 0)
+                    return Status::Corrupt;
+
+                const QC::usize childIndex = static_cast<QC::usize>(childColumnIndex);
+                if (childIndex >= row.cells.size())
+                    return Status::InvalidParam;
+
+                const Table *parentTable = findTableByName(database, foreignKey.referencedTable);
+                if (!parentTable)
+                    return Status::Corrupt;
+
+                QC::u32 parentPageId = 0;
+                QC::u16 parentRowOffset = 0;
+                const Status parentSt = engine.findByPrimaryKey(database,
+                                                                parentTable->tableId,
+                                                                row.cells[childIndex].bytes,
+                                                                parentPageId,
+                                                                parentRowOffset);
+                if (parentSt == Status::Success)
+                    continue;
+                if (parentSt == Status::NotFound)
+                    return Status::ConstraintViolation;
+                return parentSt;
+            }
+
+            return Status::Success;
+        }
+
+        static Status enforceDeleteConstraints(Engine &engine,
+                                               const Database &database,
+                                               const Table &parentTable,
+                                               const QC::Vector<QC::u8> &parentKey)
+        {
+            for (QC::usize tableIndex = 0; tableIndex < database.tables.size(); ++tableIndex)
+            {
+                const Table &childTable = database.tables[tableIndex];
+                for (QC::usize fkIndex = 0; fkIndex < childTable.schema.foreignKeys.size(); ++fkIndex)
+                {
+                    const ForeignKey &foreignKey = childTable.schema.foreignKeys[fkIndex];
+                    if (!tableNameEquals(foreignKey.referencedTable, parentTable.name))
+                        continue;
+                    if (!tableNameEquals(foreignKey.referencedColumn,
+                                         parentTable.schema.columns[parentTable.schema.primaryKeyIndex].name))
+                    {
+                        continue;
+                    }
+
+                    const QC::i32 childColumnIndex = findColumnIndex(childTable.schema, foreignKey.columnName);
+                    if (childColumnIndex < 0)
+                        return Status::Corrupt;
+
+                    for (QC::usize pageIndex = 0; pageIndex < childTable.pages.size(); ++pageIndex)
+                    {
+                        Page page{};
+                        const Status loadSt = engine.loadPage(database, childTable.pages[pageIndex], page);
+                        if (loadSt != Status::Success)
+                            return loadSt;
+
+                        for (QC::usize rowIndex = 0; rowIndex < page.rowOffsets.size(); ++rowIndex)
+                        {
+                            Row childRow{};
+                            const Status readSt = engine.readRow(database,
+                                                                 page.header.pageId,
+                                                                 page.rowOffsets[rowIndex],
+                                                                 childRow);
+                            if (readSt != Status::Success)
+                                return readSt;
+                            if (childRow.tombstone)
+                                continue;
+
+                            const QC::usize childIndex = static_cast<QC::usize>(childColumnIndex);
+                            if (childIndex >= childRow.cells.size())
+                                return Status::Corrupt;
+                            if (compareByteVectors(childRow.cells[childIndex].bytes, parentKey) == 0)
+                                return Status::ConstraintViolation;
+                        }
+                    }
+                }
+            }
+
+            return Status::Success;
+        }
     }
 
     Engine &Engine::instance()
@@ -346,7 +631,7 @@ namespace QCQL
         return Status::Success;
     }
 
-    Status Engine::openDatabase(const char *path, Database &outDatabase)
+    Status Engine::openDatabase(const char *path, Database &outDatabase, OpenStats *outStats)
     {
         if (!path || path[0] == '\0')
             return Status::InvalidParam;
@@ -367,7 +652,7 @@ namespace QCQL
 
         if (hdr.magic[0] != 'C' || hdr.magic[1] != 'Q' || hdr.magic[2] != 'L' || hdr.magic[3] != 'D' || hdr.magic[4] != 'B')
             return Status::Corrupt;
-        if (hdr.version != 1 || hdr.pageSize == 0)
+        if ((hdr.version != kFileVersion1 && hdr.version != kFileVersion2) || hdr.pageSize == 0)
             return Status::NotSupported;
 
         Database db{};
@@ -387,13 +672,16 @@ namespace QCQL
             db.nextPageId = 1;
         }
 
-        const Status metaSt = loadMetadata(db);
+        OpenStats localStats{};
+        OpenStats *stats = outStats ? outStats : &localStats;
+
+        const Status metaSt = loadMetadata(db, stats);
         if (metaSt != Status::Success)
             return metaSt;
 
         for (QC::usize i = 0; i < db.tables.size(); ++i)
         {
-            const Status idxSt = rebuildPrimaryKeyIndex(db, db.tables[i].tableId);
+            const Status idxSt = rebuildPrimaryKeyIndex(db, db.tables[i].tableId, stats);
             if (idxSt != Status::Success)
                 return idxSt;
         }
@@ -418,7 +706,7 @@ namespace QCQL
             return Status::AlreadyExists;
 
         QC::u32 primaryKeyIndex = 0;
-        if (!validateSchema(schema, primaryKeyIndex))
+        if (!validateSchema(database, schema, primaryKeyIndex))
             return Status::InvalidParam;
 
         Table table{};
@@ -435,6 +723,11 @@ namespace QCQL
             col.type = schema.columns[i].type;
             col.isPrimaryKey = schema.columns[i].isPrimaryKey;
             table.schema.columns.push_back(static_cast<Column &&>(col));
+        }
+
+        for (QC::usize i = 0; i < schema.foreignKeys.size(); ++i)
+        {
+            table.schema.foreignKeys.push_back(schema.foreignKeys[i]);
         }
 
         Page root{};
@@ -456,10 +749,11 @@ namespace QCQL
     Status Engine::initializeDatabaseHeader(Database &database) const
     {
         database.header = FileHeader{};
+        database.header.version = kCurrentFileVersion;
         database.pageSize = database.header.pageSize;
         database.header.tableDirOffset = sizeof(FileHeader);
         database.header.schemaOffset = database.header.tableDirOffset + static_cast<QC::u64>(sizeof(TableEntry) * kMaxTables);
-        database.header.pageRegionOffset = database.header.schemaOffset + static_cast<QC::u64>(sizeof(TableSchemaDisk) * kMaxTables);
+        database.header.pageRegionOffset = database.header.schemaOffset + static_cast<QC::u64>(schemaDiskSize(database.header.version) * kMaxTables);
         database.nextPageId = 1;
         return Status::Success;
     }
@@ -477,43 +771,95 @@ namespace QCQL
             return Status::Error;
 
         QC::Vector<TableEntry> tableEntries;
-        QC::Vector<TableSchemaDisk> schemas;
         tableEntries.resize(kMaxTables);
-        schemas.resize(kMaxTables);
         QC::String::memset(tableEntries.data(), 0, tableEntries.size() * sizeof(TableEntry));
-        QC::String::memset(schemas.data(), 0, schemas.size() * sizeof(TableSchemaDisk));
+
+        const bool persistV1 = (database.header.version <= kFileVersion1);
+        QC::Vector<TableSchemaDiskV1> schemasV1;
+        QC::Vector<TableSchemaDisk> schemasV2;
+        if (persistV1)
+        {
+            schemasV1.resize(kMaxTables);
+            QC::String::memset(schemasV1.data(), 0, schemasV1.size() * sizeof(TableSchemaDiskV1));
+        }
+        else
+        {
+            schemasV2.resize(kMaxTables);
+            QC::String::memset(schemasV2.data(), 0, schemasV2.size() * sizeof(TableSchemaDisk));
+        }
 
         for (QC::usize i = 0; i < database.tables.size(); ++i)
         {
             const Table &t = database.tables[i];
             TableEntry &te = tableEntries[i];
-            TableSchemaDisk &sd = schemas[i];
 
             QC::String::strncpy(te.name, t.name, sizeof(te.name) - 1);
             te.rootPage = t.rootPage;
             te.flags = t.flags;
-            te.schemaOffset = database.header.schemaOffset + static_cast<QC::u64>(i * sizeof(TableSchemaDisk));
+            te.schemaOffset = database.header.schemaOffset + static_cast<QC::u64>(i * schemaDiskSize(database.header.version));
 
-            QC::String::strncpy(sd.tableName, t.schema.tableName, sizeof(sd.tableName) - 1);
-            sd.tableId = t.tableId;
-            sd.columnCount = static_cast<QC::u32>(t.schema.columns.size());
-            if (sd.columnCount > kMaxColumnsPerTable)
+            if (persistV1)
             {
-                QFS::VFS::instance().close(f);
-                return Status::OutOfMemory;
+                TableSchemaDiskV1 &sd = schemasV1[i];
+                QC::String::strncpy(sd.tableName, t.schema.tableName, sizeof(sd.tableName) - 1);
+                sd.tableId = t.tableId;
+                sd.columnCount = static_cast<QC::u32>(t.schema.columns.size());
+                if (sd.columnCount > kMaxColumnsPerTable)
+                {
+                    QFS::VFS::instance().close(f);
+                    return Status::OutOfMemory;
+                }
+                sd.primaryKeyIndex = t.schema.primaryKeyIndex;
+
+                for (QC::usize c = 0; c < t.schema.columns.size(); ++c)
+                {
+                    QC::String::strncpy(sd.columns[c].name, t.schema.columns[c].name, sizeof(sd.columns[c].name) - 1);
+                    sd.columns[c].type = static_cast<QC::u8>(t.schema.columns[c].type);
+                    sd.columns[c].isPrimaryKey = t.schema.columns[c].isPrimaryKey ? 1 : 0;
+                }
             }
-            sd.primaryKeyIndex = t.schema.primaryKeyIndex;
-
-            for (QC::usize c = 0; c < t.schema.columns.size(); ++c)
+            else
             {
-                QC::String::strncpy(sd.columns[c].name, t.schema.columns[c].name, sizeof(sd.columns[c].name) - 1);
-                sd.columns[c].type = static_cast<QC::u8>(t.schema.columns[c].type);
-                sd.columns[c].isPrimaryKey = t.schema.columns[c].isPrimaryKey ? 1 : 0;
+                TableSchemaDisk &sd = schemasV2[i];
+                QC::String::strncpy(sd.tableName, t.schema.tableName, sizeof(sd.tableName) - 1);
+                sd.tableId = t.tableId;
+                sd.columnCount = static_cast<QC::u32>(t.schema.columns.size());
+                if (sd.columnCount > kMaxColumnsPerTable)
+                {
+                    QFS::VFS::instance().close(f);
+                    return Status::OutOfMemory;
+                }
+                sd.foreignKeyCount = static_cast<QC::u32>(t.schema.foreignKeys.size());
+                if (sd.foreignKeyCount > kMaxForeignKeysPerTable)
+                {
+                    QFS::VFS::instance().close(f);
+                    return Status::OutOfMemory;
+                }
+                sd.primaryKeyIndex = t.schema.primaryKeyIndex;
+
+                for (QC::usize c = 0; c < t.schema.columns.size(); ++c)
+                {
+                    QC::String::strncpy(sd.columns[c].name, t.schema.columns[c].name, sizeof(sd.columns[c].name) - 1);
+                    sd.columns[c].type = static_cast<QC::u8>(t.schema.columns[c].type);
+                    sd.columns[c].isPrimaryKey = t.schema.columns[c].isPrimaryKey ? 1 : 0;
+                }
+
+                for (QC::usize fk = 0; fk < t.schema.foreignKeys.size(); ++fk)
+                {
+                    QC::String::strncpy(sd.foreignKeys[fk].columnName, t.schema.foreignKeys[fk].columnName, sizeof(sd.foreignKeys[fk].columnName) - 1);
+                    QC::String::strncpy(sd.foreignKeys[fk].referencedTable, t.schema.foreignKeys[fk].referencedTable, sizeof(sd.foreignKeys[fk].referencedTable) - 1);
+                    QC::String::strncpy(sd.foreignKeys[fk].referencedColumn, t.schema.foreignKeys[fk].referencedColumn, sizeof(sd.foreignKeys[fk].referencedColumn) - 1);
+                    sd.foreignKeys[fk].onDelete = static_cast<QC::u8>(t.schema.foreignKeys[fk].onDelete);
+                    sd.foreignKeys[fk].onUpdate = static_cast<QC::u8>(t.schema.foreignKeys[fk].onUpdate);
+                }
             }
         }
 
-        if (!writeAt(f, database.header.tableDirOffset, tableEntries.data(), tableEntries.size() * sizeof(TableEntry)) ||
-            !writeAt(f, database.header.schemaOffset, schemas.data(), schemas.size() * sizeof(TableSchemaDisk)))
+        const bool wroteTables = writeAt(f, database.header.tableDirOffset, tableEntries.data(), tableEntries.size() * sizeof(TableEntry));
+        const bool wroteSchemas = persistV1
+                                      ? writeAt(f, database.header.schemaOffset, schemasV1.data(), schemasV1.size() * sizeof(TableSchemaDiskV1))
+                                      : writeAt(f, database.header.schemaOffset, schemasV2.data(), schemasV2.size() * sizeof(TableSchemaDisk));
+        if (!wroteTables || !wroteSchemas)
         {
             QFS::VFS::instance().close(f);
             return Status::Error;
@@ -523,7 +869,7 @@ namespace QCQL
         return Status::Success;
     }
 
-    Status Engine::loadMetadata(Database &database) const
+    Status Engine::loadMetadata(Database &database, OpenStats *outStats) const
     {
         if (database.path[0] == '\0')
             return Status::InvalidParam;
@@ -534,6 +880,9 @@ namespace QCQL
         if (database.header.tableCount == 0)
             return Status::Success;
 
+        OpenStats localStats{};
+        OpenStats *stats = outStats ? outStats : &localStats;
+
         QFS::File *f = QFS::VFS::instance().open(database.path, QFS::OpenMode::Read);
         if (!f)
             return Status::NotFound;
@@ -541,17 +890,8 @@ namespace QCQL
         for (QC::u32 i = 0; i < database.header.tableCount; ++i)
         {
             TableEntry te{};
-            TableSchemaDisk sd{};
             const QC::u64 teOff = database.header.tableDirOffset + static_cast<QC::u64>(i * sizeof(TableEntry));
-            const QC::u64 sdOff = database.header.schemaOffset + static_cast<QC::u64>(i * sizeof(TableSchemaDisk));
-
-            if (!readAt(f, teOff, &te, sizeof(TableEntry)) || !readAt(f, sdOff, &sd, sizeof(TableSchemaDisk)))
-            {
-                QFS::VFS::instance().close(f);
-                return Status::Corrupt;
-            }
-
-            if (sd.columnCount > kMaxColumnsPerTable)
+            if (!readAt(f, teOff, &te, sizeof(TableEntry)))
             {
                 QFS::VFS::instance().close(f);
                 return Status::Corrupt;
@@ -561,22 +901,80 @@ namespace QCQL
             QC::String::strncpy(t.name, te.name, sizeof(t.name) - 1);
             t.rootPage = te.rootPage;
             t.flags = te.flags;
-            t.tableId = sd.tableId;
 
-            QC::String::strncpy(t.schema.tableName, sd.tableName, sizeof(t.schema.tableName) - 1);
-            t.schema.primaryKeyIndex = sd.primaryKeyIndex;
-
-            for (QC::u32 c = 0; c < sd.columnCount; ++c)
+            if (database.header.version <= kFileVersion1)
             {
-                Column col{};
-                QC::String::strncpy(col.name, sd.columns[c].name, sizeof(col.name) - 1);
-                col.type = static_cast<ColumnType>(sd.columns[c].type);
-                col.isPrimaryKey = (sd.columns[c].isPrimaryKey != 0);
-                t.schema.columns.push_back(static_cast<Column &&>(col));
+                TableSchemaDiskV1 sd{};
+                if (!readAt(f, te.schemaOffset, &sd, sizeof(TableSchemaDiskV1)))
+                {
+                    QFS::VFS::instance().close(f);
+                    return Status::Corrupt;
+                }
+
+                if (sd.columnCount > kMaxColumnsPerTable)
+                {
+                    QFS::VFS::instance().close(f);
+                    return Status::Corrupt;
+                }
+
+                t.tableId = sd.tableId;
+                QC::String::strncpy(t.schema.tableName, sd.tableName, sizeof(t.schema.tableName) - 1);
+                t.schema.primaryKeyIndex = sd.primaryKeyIndex;
+
+                for (QC::u32 c = 0; c < sd.columnCount; ++c)
+                {
+                    Column col{};
+                    QC::String::strncpy(col.name, sd.columns[c].name, sizeof(col.name) - 1);
+                    col.type = static_cast<ColumnType>(sd.columns[c].type);
+                    col.isPrimaryKey = (sd.columns[c].isPrimaryKey != 0);
+                    t.schema.columns.push_back(static_cast<Column &&>(col));
+                }
+            }
+            else
+            {
+                TableSchemaDisk sd{};
+                if (!readAt(f, te.schemaOffset, &sd, sizeof(TableSchemaDisk)))
+                {
+                    QFS::VFS::instance().close(f);
+                    return Status::Corrupt;
+                }
+
+                if (sd.columnCount > kMaxColumnsPerTable || sd.foreignKeyCount > kMaxForeignKeysPerTable)
+                {
+                    QFS::VFS::instance().close(f);
+                    return Status::Corrupt;
+                }
+
+                t.tableId = sd.tableId;
+                QC::String::strncpy(t.schema.tableName, sd.tableName, sizeof(t.schema.tableName) - 1);
+                t.schema.primaryKeyIndex = sd.primaryKeyIndex;
+
+                for (QC::u32 c = 0; c < sd.columnCount; ++c)
+                {
+                    Column col{};
+                    QC::String::strncpy(col.name, sd.columns[c].name, sizeof(col.name) - 1);
+                    col.type = static_cast<ColumnType>(sd.columns[c].type);
+                    col.isPrimaryKey = (sd.columns[c].isPrimaryKey != 0);
+                    t.schema.columns.push_back(static_cast<Column &&>(col));
+                }
+
+                for (QC::u32 fk = 0; fk < sd.foreignKeyCount; ++fk)
+                {
+                    ForeignKey foreignKey{};
+                    QC::String::strncpy(foreignKey.columnName, sd.foreignKeys[fk].columnName, sizeof(foreignKey.columnName) - 1);
+                    QC::String::strncpy(foreignKey.referencedTable, sd.foreignKeys[fk].referencedTable, sizeof(foreignKey.referencedTable) - 1);
+                    QC::String::strncpy(foreignKey.referencedColumn, sd.foreignKeys[fk].referencedColumn, sizeof(foreignKey.referencedColumn) - 1);
+                    foreignKey.onDelete = static_cast<ReferentialAction>(sd.foreignKeys[fk].onDelete);
+                    foreignKey.onUpdate = static_cast<ReferentialAction>(sd.foreignKeys[fk].onUpdate);
+                    t.schema.foreignKeys.push_back(static_cast<ForeignKey &&>(foreignKey));
+                }
             }
 
             database.tables.push_back(static_cast<Table &&>(t));
+            ++stats->metadataTablesLoaded;
         }
+
+        applyBuiltInRelationshipMetadata(database);
 
         for (QC::usize i = 0; i < database.tables.size(); ++i)
             database.tables[i].pages.clear();
@@ -586,6 +984,7 @@ namespace QCQL
             PageHeader ph{};
             if (!readAt(f, pageOffset(database, pageId), &ph, sizeof(PageHeader)))
                 continue;
+            ++stats->metadataPageHeadersScanned;
             if (ph.pageId != pageId || ph.tableId == 0)
                 continue;
 
@@ -636,51 +1035,12 @@ namespace QCQL
         if (!f)
             return Status::NotFound;
 
-        const QC::u64 off = pageOffset(database, pageId);
-        if (f->seek(static_cast<QC::i64>(off), QFS::SeekOrigin::Begin) < 0)
-        {
-            QFS::VFS::instance().close(f);
-            return Status::NotFound;
-        }
-
-        QC::Vector<QC::u8> buf;
-        buf.resize(database.pageSize);
-        const QC::isize n = f->read(buf.data(), database.pageSize);
-        QFS::VFS::instance().close(f);
-        if (n != static_cast<QC::isize>(database.pageSize))
-            return Status::NotFound;
-
         Page page{};
-        QC::String::memcpy(&page.header, buf.data(), sizeof(PageHeader));
-        if (page.header.pageId == 0 || page.header.pageId != pageId)
-            return Status::Corrupt;
+        const Status st = loadPageFromFile(database, f, pageId, page);
+        QFS::VFS::instance().close(f);
+        if (st != Status::Success)
+            return st;
 
-        const QC::usize offsetsBytes = static_cast<QC::usize>(page.header.rowCount) * sizeof(QC::u16);
-        const QC::usize offsetsStart = sizeof(PageHeader);
-        const QC::usize dataStart = offsetsStart + offsetsBytes;
-        if (dataStart > database.pageSize)
-            return Status::Corrupt;
-        if (page.header.freeOffset < dataStart || page.header.freeOffset > database.pageSize)
-            return Status::Corrupt;
-
-        page.rowOffsets.resize(page.header.rowCount);
-        if (page.header.rowCount > 0)
-        {
-            QC::String::memcpy(page.rowOffsets.data(),
-                               buf.data() + offsetsStart,
-                               offsetsBytes);
-        }
-
-        const QC::usize payloadBytes = static_cast<QC::usize>(page.header.freeOffset) - dataStart;
-        page.data.resize(payloadBytes);
-        if (payloadBytes > 0)
-        {
-            QC::String::memcpy(page.data.data(),
-                               buf.data() + dataStart,
-                               payloadBytes);
-        }
-
-        page.dirty = false;
         outPage = static_cast<Page &&>(page);
         return Status::Success;
     }
@@ -785,6 +1145,7 @@ namespace QCQL
                 addColumn("themeId", ColumnType::Text, false);
                 addColumn("tokenKey", ColumnType::Text, false);
                 addColumn("tokenValue", ColumnType::Text, false);
+                addForeignKey(t.schema, "themeId", "Themes", "id");
             }
             else
             {
@@ -807,6 +1168,10 @@ namespace QCQL
             database.tables.push_back(static_cast<Table &&>(t));
             database.header.tableCount = static_cast<QC::u32>(database.tables.size());
         }
+
+        Table *themeTokens = findTableByName(database, "ThemeTokens");
+        if (themeTokens)
+            addForeignKey(themeTokens->schema, "themeId", "Themes", "id");
 
         if (!writeHeader(database))
             return Status::Error;
@@ -874,10 +1239,16 @@ namespace QCQL
         Table *table = findTableById(database, tableId);
         if (!table)
             return Status::NotFound;
+        if (!validateRowAgainstSchema(table->schema, row))
+            return Status::InvalidParam;
 
         QC::Vector<QC::u8> encoded;
         if (!serializeRow(row, encoded))
             return Status::InvalidParam;
+
+        const Status fkSt = enforceForeignKeyConstraints(*this, database, *table, row);
+        if (fkSt != Status::Success)
+            return fkSt;
 
         if (table->schema.primaryKeyIndex < row.cells.size())
         {
@@ -896,7 +1267,8 @@ namespace QCQL
         if (findSt != Status::Success)
             return findSt;
 
-        const Status insSt = insertRow(database, pageId, row, outRowOffset);
+        QC::u16 insertedRowOffset = 0;
+        const Status insSt = insertRow(database, pageId, row, &insertedRowOffset);
         if (insSt != Status::Success)
             return insSt;
 
@@ -906,12 +1278,14 @@ namespace QCQL
             PrimaryKeyIndexEntry idx{};
             idx.key = pkCell.bytes;
             idx.pageId = pageId;
-            idx.rowOffset = outRowOffset ? *outRowOffset : 0;
+            idx.rowOffset = insertedRowOffset;
             insertPkEntrySorted(table->primaryKeyIndex, static_cast<PrimaryKeyIndexEntry &&>(idx));
         }
 
         if (outPageId)
             *outPageId = pageId;
+        if (outRowOffset)
+            *outRowOffset = insertedRowOffset;
         return Status::Success;
     }
 
@@ -972,7 +1346,7 @@ namespace QCQL
         return Status::Success;
     }
 
-    Status Engine::rebuildPrimaryKeyIndex(Database &database, QC::u32 tableId)
+    Status Engine::rebuildPrimaryKeyIndex(Database &database, QC::u32 tableId, OpenStats *outStats)
     {
         Table *table = nullptr;
         for (QC::usize i = 0; i < database.tables.size(); ++i)
@@ -986,20 +1360,36 @@ namespace QCQL
         if (!table)
             return Status::NotFound;
 
+        OpenStats localStats{};
+        OpenStats *stats = outStats ? outStats : &localStats;
+
         table->primaryKeyIndex.entries.clear();
+
+        QFS::File *f = QFS::VFS::instance().open(database.path, QFS::OpenMode::Read);
+        if (!f)
+            return Status::NotFound;
 
         for (QC::usize p = 0; p < table->pages.size(); ++p)
         {
             Page page{};
-            const Status st = loadPage(database, table->pages[p], page);
+            const Status st = loadPageFromFile(database, f, table->pages[p], page);
             if (st != Status::Success)
+            {
+                QFS::VFS::instance().close(f);
                 return st;
+            }
+            ++stats->pkPagesLoaded;
 
             for (QC::usize r = 0; r < page.rowOffsets.size(); ++r)
             {
                 Row row{};
-                const Status rowSt = readRow(database, page.header.pageId, page.rowOffsets[r], row);
-                if (rowSt != Status::Success || row.tombstone)
+                ++stats->pkRowsScanned;
+                const QC::u16 rowOffset = page.rowOffsets[r];
+                if (rowOffset >= page.data.size())
+                    continue;
+                if (!deserializeRow(page.data.data() + rowOffset,
+                                    page.data.size() - rowOffset,
+                                    row) || row.tombstone)
                     continue;
                 if (table->schema.primaryKeyIndex >= row.cells.size())
                     continue;
@@ -1007,10 +1397,14 @@ namespace QCQL
                 PrimaryKeyIndexEntry idx{};
                 idx.key = row.cells[table->schema.primaryKeyIndex].bytes;
                 idx.pageId = page.header.pageId;
-                idx.rowOffset = page.rowOffsets[r];
+                idx.rowOffset = rowOffset;
                 insertPkEntrySorted(table->primaryKeyIndex, static_cast<PrimaryKeyIndexEntry &&>(idx));
+                ++stats->pkRowsIndexed;
             }
         }
+
+        QFS::VFS::instance().close(f);
+        ++stats->pkTablesRebuilt;
 
         return Status::Success;
     }
@@ -1069,6 +1463,10 @@ namespace QCQL
         if (!table)
             return Status::NotFound;
 
+        const Status restrictSt = enforceDeleteConstraints(*this, database, *table, key);
+        if (restrictSt != Status::Success)
+            return restrictSt;
+
         QC::u32 pageId = 0;
         QC::u16 rowOffset = 0;
         const Status lookupSt = findByPrimaryKey(database, tableId, key, pageId, rowOffset);
@@ -1101,11 +1499,17 @@ namespace QCQL
         Table *table = findTableById(database, tableId);
         if (!table)
             return Status::NotFound;
+        if (!validateRowAgainstSchema(table->schema, updatedRow))
+            return Status::InvalidParam;
 
         if (table->schema.primaryKeyIndex >= updatedRow.cells.size())
             return Status::InvalidParam;
         if (compareByteVectors(updatedRow.cells[table->schema.primaryKeyIndex].bytes, key) != 0)
             return Status::InvalidParam;
+
+        const Status fkSt = enforceForeignKeyConstraints(*this, database, *table, updatedRow);
+        if (fkSt != Status::Success)
+            return fkSt;
 
         QC::u32 oldPageId = 0;
         QC::u16 oldRowOffset = 0;

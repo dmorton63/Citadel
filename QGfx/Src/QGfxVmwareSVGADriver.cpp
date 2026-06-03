@@ -1,7 +1,7 @@
 #include "QGfxVmwareSVGADriver.h"
 
 #include "QGfxBatch.h"
-#include "QDrvVmwareSVGA.h"
+#include "QDrvDisplayBootstrap.h"
 
 namespace QGfx
 {
@@ -30,13 +30,12 @@ namespace QGfx
 
     bool VmwareSVGADriver::initialize()
     {
-        auto &svga = QDrv::VmwareSVGA::instance();
-        const bool available = svga.initialize() && (svga.has2D() || svga.initialize2D());
+        const bool available = QDrv::Display::cvd_has_accelerated_present();
 
         m_capabilities = DriverCapabilities{};
         m_capabilities.supportsScanoutUploads = available;
         m_capabilities.supportsPresent = available;
-        m_capabilities.supportsScreenRectCopy = available;
+        m_capabilities.supportsScreenRectCopy = QDrv::Display::cvd_has_accelerated_rect_copy();
 
         m_initialized = available;
         return m_initialized;
@@ -85,6 +84,14 @@ namespace QGfx
         if (!m_scanoutUploadCallback(rect, pixels, stridePixels, m_scanoutUploadUserData))
             return false;
 
+        if (surface.displayDevice && surface.displaySwapchain && surface.displaySurfaceId.isValid())
+        {
+            m_presentDevice = surface.displayDevice;
+            m_presentSwapchain = surface.displaySwapchain;
+            m_presentSurface = surface.displaySurfaceId;
+            m_presentReadyValue = surface.displayReadyValue;
+        }
+
         queueDirtyRect(rect);
         return true;
     }
@@ -111,16 +118,20 @@ namespace QGfx
                 return false;
         }
 
-        auto &svga = QDrv::VmwareSVGA::instance();
         for (QC::usize i = 0; i < batch.ops().size(); ++i)
         {
             const DrawOp &op = batch.ops()[i];
-            svga.rectCopy(static_cast<QC::u32>(op.srcRect.x),
-                          static_cast<QC::u32>(op.srcRect.y),
-                          static_cast<QC::u32>(op.dstRect.x),
-                          static_cast<QC::u32>(op.dstRect.y),
-                          op.srcRect.width,
-                          op.srcRect.height);
+            if (!m_presentDevice || !m_presentSwapchain || !m_presentSurface.isValid())
+                return false;
+
+            if (QDrv::Display::cvd_rect_copy(m_presentDevice,
+                                             m_presentSwapchain,
+                                             m_presentSurface,
+                                             op.srcRect,
+                                             op.dstRect) != QDrv::Display::CVD_OK)
+            {
+                return false;
+            }
         }
 
         return true;
@@ -134,19 +145,19 @@ namespace QGfx
         if (m_pendingDirtyCount == 0)
             return true;
 
-        auto &svga = QDrv::VmwareSVGA::instance();
-        if (m_pendingDirtyCount == 1)
-        {
-            const QC::Rect &rect = m_pendingDirtyRects[0];
-            svga.updateRect(static_cast<QC::u32>(rect.x),
-                            static_cast<QC::u32>(rect.y),
-                            rect.width,
-                            rect.height);
-        }
-        else
-        {
-            svga.updateRects(m_pendingDirtyRects, m_pendingDirtyCount);
-        }
+        if (!m_presentDevice || !m_presentSwapchain || !m_presentSurface.isValid())
+            return false;
+
+        const QDrv::Display::cvd_result_t presentResult =
+            QDrv::Display::cvd_present_regions(m_presentDevice,
+                                               m_presentSwapchain,
+                                               m_presentSurface,
+                                               m_presentReadyValue,
+                                               m_pendingDirtyRects,
+                                               m_pendingDirtyCount,
+                                               QDrv::Display::CVD_PRESENT_VSYNC);
+        if (presentResult != QDrv::Display::CVD_OK)
+            return false;
 
         m_pendingDirtyCount = 0;
         return true;

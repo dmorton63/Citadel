@@ -9,6 +9,7 @@
 #include "QWControls/Containers/Panel.h"
 #include "QWInterfaces/IControl.h"
 #include "QG/PainterSurface.h"
+#include "QGfxSurface.h"
 #include "QWStyleRenderer.h"
 #include "QWStyleTypes.h"
 #include "QWSurfaceBackend.h"
@@ -87,6 +88,8 @@ namespace QW
         QC::u32 bufferWidth() const;
         QC::u32 bufferHeight() const;
         QC::u32 bufferPitchBytes() const;
+        const QGfx::Surface &graphicsSurface() const { return m_qgfxSurface; }
+        QGfx::Surface &graphicsSurface() { return m_qgfxSurface; }
 
         // invalidation
         void invalidate();
@@ -123,6 +126,7 @@ namespace QW
         StyleRenderer m_styleRenderer;
         QG::PainterSurface m_painter;
         QC::Vector<QC::u32> m_surfacePixels;
+        QGfx::Surface m_qgfxSurface;
         QC::u32 m_bufferWidth;
         QC::u32 m_bufferHeight;
         QC::u32 m_bufferPitchBytes;

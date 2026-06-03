@@ -4,18 +4,18 @@
         <meta name="cuiml-version" content="1.0" />
 
         <!-- Import shared components -->
-        <Import src="/system/ui/common.cui" />
+        <Import src="/UI/COMMON.CUI" />
 
         <!-- Spring theme stylesheet -->
         <link rel="stylesheet"
               type="text/cuimlss"
-              href="/system/ui/SPRING.CXS" />
+              href="/UI/SPRING.CXS" />
     </head>
 
     <body>
         <Desktop>
             <Background type="image"
-                        path="/system/wall/SPRING.PNG"
+                        path="/WALL/SPRING.PNG"
                         mode="stretch" />
 
             <Layout type="absolute">

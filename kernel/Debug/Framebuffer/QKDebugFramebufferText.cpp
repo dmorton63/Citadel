@@ -48,6 +48,8 @@ namespace
     static constexpr QC::u32 kFg = 0xFFFFFFFF; // white
     static constexpr QC::u32 kBg = 0xFF000000; // black
 
+    static void renderViewport();
+
     static QC::u32 tailTop()
     {
         if (g_Rows == 0)
@@ -84,6 +86,52 @@ namespace
             volatile QC::u32 *row = reinterpret_cast<volatile QC::u32 *>(rowBytes);
             for (QC::u32 x = 0; x < fb.width; ++x)
                 row[x] = argb;
+        }
+    }
+
+    static void copyRowBytesUp(QC::u8 *dst, const QC::u8 *src, QC::u32 count)
+    {
+        QC::u32 offset = 0;
+
+        while (offset + sizeof(QC::u64) <= count)
+        {
+            *reinterpret_cast<volatile QC::u64 *>(dst + offset) = *reinterpret_cast<const volatile QC::u64 *>(src + offset);
+            offset += static_cast<QC::u32>(sizeof(QC::u64));
+        }
+
+        while (offset + sizeof(QC::u32) <= count)
+        {
+            *reinterpret_cast<volatile QC::u32 *>(dst + offset) = *reinterpret_cast<const volatile QC::u32 *>(src + offset);
+            offset += static_cast<QC::u32>(sizeof(QC::u32));
+        }
+
+        while (offset < count)
+        {
+            dst[offset] = src[offset];
+            ++offset;
+        }
+    }
+
+    static void fillRowBytes(QC::u8 *dst, QC::u32 count, QC::u32 argb)
+    {
+        QC::u32 offset = 0;
+        const QC::u64 pattern = (static_cast<QC::u64>(argb) << 32) | static_cast<QC::u64>(argb);
+
+        while (offset + sizeof(QC::u64) <= count)
+        {
+            *reinterpret_cast<volatile QC::u64 *>(dst + offset) = pattern;
+            offset += static_cast<QC::u32>(sizeof(QC::u64));
+        }
+
+        while (offset + sizeof(QC::u32) <= count)
+        {
+            *reinterpret_cast<volatile QC::u32 *>(dst + offset) = argb;
+            offset += static_cast<QC::u32>(sizeof(QC::u32));
+        }
+
+        while (offset < count)
+        {
+            dst[offset++] = static_cast<QC::u8>(argb & 0xffu);
         }
     }
 
@@ -240,25 +288,13 @@ namespace
 
     static void scrollUpOneLine()
     {
-        if (!g_Fb.address)
-            return;
-        if (g_Fb.height <= kCharH || g_Fb.pitch == 0)
+        if (!g_Ready || !g_Enabled)
             return;
 
-        volatile QC::u8 *base = reinterpret_cast<volatile QC::u8 *>(g_Fb.address);
-
-        // Move framebuffer contents up by 16 scanlines.
-        for (QC::u32 y = kCharH; y < g_Fb.height; ++y)
-        {
-            volatile QC::u8 *src = base + static_cast<QC::usize>(y) * g_Fb.pitch;
-            volatile QC::u8 *dst = base + static_cast<QC::usize>(y - kCharH) * g_Fb.pitch;
-            for (QC::u32 i = 0; i < g_Fb.pitch; ++i)
-                dst[i] = src[i];
-        }
-
-        // Clear the bottom 16px band.
-        const QC::u32 clearY = g_Fb.height - kCharH;
-        drawRect(g_Fb, 0, clearY, g_Fb.width, kCharH, kBg);
+        // Re-render from the logical line buffer instead of physically shifting
+        // the framebuffer one scanline band at a time. This keeps terminal-mode
+        // rollover bound to the buffered text state rather than a full pixel copy.
+        renderViewport();
     }
 
     static void renderViewport()

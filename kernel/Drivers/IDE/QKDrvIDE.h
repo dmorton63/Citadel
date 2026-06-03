@@ -9,8 +9,29 @@ namespace QKDrv
 {
     namespace IDE
     {
+        struct DetectedDeviceInfo
+        {
+            QC::u16 base = 0;
+            QC::u16 ctrl = 0;
+            QC::u32 sectors = 0;
+            QC::u8 channelIndex = 0;
+            bool present = false;
+            bool slave = false;
+            bool mountableFat = false;
+            bool hasMbrSignature = false;
+            bool hasPartitionTable = false;
+            bool hasFatBootSector = false;
+            bool isSystemBinding = false;
+            bool isSharedBinding = false;
+            char model[41] = {};
+        };
+
         // Enable/disable shared-volume probe (default disabled for boot safety).
         void setSharedProbeEnabled(bool enabled);
+
+        // Enumerate legacy IDE disks that Citadel can currently see.
+        // Returns the number of present disks written to outDevices.
+        QC::usize enumerateDetectedDevices(DetectedDeviceInfo *outDevices, QC::usize capacity);
 
         // Probe legacy primary/secondary IDE channels for an ATA disk that looks like FAT32
         // and register it as QFS_SHARED mounted at /shared.
@@ -32,5 +53,9 @@ namespace QKDrv
         // Safety: refuses to format if the disk already appears to contain an MBR partition table
         // or an existing FAT boot sector.
         QC::Status formatSystemVolumeFAT32();
+
+        // Partition and format the selected detected disk as a FAT32 volume.
+        // The deviceIndex matches the numbering printed by sysdisks (disk0, disk1, ...).
+        QC::Status formatDetectedDeviceFAT32(QC::usize deviceIndex);
     }
 }

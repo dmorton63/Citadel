@@ -12,6 +12,11 @@ namespace QC
     }
 }
 
+namespace QCQL
+{
+    struct Database;
+}
+
 namespace QD
 {
     struct ThemeLoadResult
@@ -25,6 +30,9 @@ namespace QD
     {
     public:
         bool loadTheme(const QC::JSON::Value *themeValue, ThemeLoadResult &outResult) const;
+        bool loadThemeFromDatabase(const QCQL::Database &database,
+                                   ThemeID themeId,
+                                   ThemeLoadResult &outResult) const;
         QW::StyleSnapshot buildStyleSnapshot(const DesktopColors &colors,
                                              const ThemeOverrides &overrides,
                                              const QC::Color &accentColor) const;

@@ -12,7 +12,9 @@
       "generator": "Unix Makefiles",
       "binaryDir": "${sourceDir}/build/cmake-dev",
       "cacheVariables": {
-        "CITADEL_PRODUCTION": "OFF"
+        "CITADEL_PRODUCTION": "OFF",
+        "CITADEL_QCSQL_USE_QCQL_ENGINE": "OFF",
+        "CITADEL_QCSQL_USE_CQL_ENGINE": "ON"
       }
     },
     {
@@ -21,7 +23,9 @@
       "generator": "Unix Makefiles",
       "binaryDir": "${sourceDir}/build/cmake-prod",
       "cacheVariables": {
-        "CITADEL_PRODUCTION": "ON"
+        "CITADEL_PRODUCTION": "ON",
+        "CITADEL_QCSQL_USE_QCQL_ENGINE": "OFF",
+        "CITADEL_QCSQL_USE_CQL_ENGINE": "ON"
       }
     }
   ],

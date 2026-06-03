@@ -1,9 +1,41 @@
 # TODO (Main)
 
-Do not deviate from this list until it is done!
+Use this file for the broader expand-vs-tighten product backlog.
+Use `TODO_INBOX.md` only for the active near-term execution queue.
+Use `CITADEL_CURRENT_STATE.md` when the question is current behavior rather than planned work.
 
-Generated: 2026-03-25
-Sources scanned: 28 Markdown files (excluding build/, backups/, .git/; including backups/todo_archive_*/)
+Maintenance rule:
+- keep subsystem roadmap, larger product direction, and deferred work here
+- move items into `TODO_INBOX.md` when they turn into the current execution batch
+- move implementation truth back into `CITADEL_CURRENT_STATE.md` once work lands
+
+## Current Action Plan
+
+This section is the concrete execution map for the current codebase state.
+The goal is to separate missing depth (`Expand`) from hardening/cleanup (`Tighten`).
+
+### Expand Next
+
+- [ ] Expand storage provenance and persistence reporting so `/system`, `/shared`, ramdisk mounts, and discovered block devices clearly identify their source, backing device, and persistence level.
+- [ ] Expand removable-media support so USB mass-storage devices can be discovered, mounted, and used as durable export targets.
+- [ ] Expand log/export tooling so boot and audit output have a clear durable-save path without relying on ad hoc ramdisk workflows.
+- [ ] Expand real-hardware SecureStore/TPM parity so certified TPM-backed systems consistently use the TPM anchor path without falling back to recovery behavior unexpectedly.
+- [ ] Expand device-configuration surfaces for keyboard/mouse/hardware tuning so bring-up settings become user-manageable runtime controls.
+
+### Tighten Next
+
+- [ ] Tighten the pre-desktop boot/session flow so DHCP, SecureStore, owner unlock, console ownership, and desktop handoff have clearer boundaries and fewer timing regressions.
+- [ ] Tighten console ownership so boot logs, hidden input, prompt rendering, and terminal-only mode each have a single explicit owner.
+- [ ] Tighten ACPI/power behavior around validation, diagnostics, and fallback policy so the current shutdown success on real hardware stays robust across more firmware variants.
+- [ ] Tighten filesystem/export ergonomics so persistent-vs-ephemeral write targets are obvious at the command level.
+- [ ] Tighten backlog hygiene by keeping near-term stabilization in `TODO_INBOX.md` and leaving this file for subsystem-level roadmap work.
+
+### Sequence
+
+- [ ] Phase 1: storage provenance, log persistence defaults, and command-level export clarity.
+- [ ] Phase 2: USB/removable-media support and related filesystem ergonomics.
+- [ ] Phase 3: pre-desktop boot/session hardening and SecureStore/TPM parity.
+- [ ] Phase 4: device tuning and broader desktop/input robustness.
 
 ## Critical
 - [x] Create a signing/hash check so only trusted modules load during secure boot. (sources: [backups/todo_archive_2026-03-25/TODO_MAIN.md](backups/todo_archive_2026-03-25/TODO_MAIN.md#L43))
@@ -29,13 +61,13 @@ Sources scanned: 28 Markdown files (excluding build/, backups/, .git/; including
 - [x] Update build scripts to emit module bundles separately from the core kernel image. (build artifacts now emit separately under `build/artifacts/kernel/` and `build/artifacts/modules/`, with ISO staging consuming those outputs while preserving legacy compatibility copies). (sources: [backups/todo_archive_2026-03-25/TODO_MAIN.md](backups/todo_archive_2026-03-25/TODO_MAIN.md#L41))
 
 ## Needed (Non-Critical)
-- [ ] Sketch and stage a unified button model so one base button implementation can support text, icon-only, and text+icon variants without a boolean-flag sprawl. (dev note: prefer shared button state/input handling with content/variant modes; `IconButton` can remain as a thin wrapper if that keeps call sites clearer.)
-- [ ] Restore desktop icon actions to use `IconButton` controls instead of plain buttons once the current database work is complete. (dev note: rounded-button testing temporarily replaced icons with buttons; keep the icon path as the intended UI control model.)
-- [ ] Hold off further Citadel-side CQL service-port work until indexes and relationships are finished in the standalone Visual Studio 2026 model, then resume the service integration against that shape.
-- [ ] Add a database-driven theme runtime path so desktop theme resolution can come from QCQL/CQL tables at boot instead of external files. (dev note: do not start this until CQL is fully integrated into the system; target end state is trusted boot-time theme queries/materialization with builtin fallback.)
-- [ ] After the database work is in a stable place, revisit the low-level video/rendering path (`QDrvSVGA`, compositor, present/update flow) for robustness and efficiency under current desktop usage.
-- [ ] Audit the current video stack to determine whether shape/style limits (round, ellipse, square, rectangle, solid, transparent, glass) come from window/control design, style/render abstractions, or the low-level drawing/video path.
-- [ ] Explore a future higher-end graphics path after the robustness pass: verts/frags/shader-like primitives or an equivalent Citadel-native rendering abstraction that can grow beyond the current immediate-mode path.
+- [x] Sketch and stage a unified button model so one base button implementation can support text, icon-only, and text+icon variants without a boolean-flag sprawl. (implemented in `QW::Controls::Button` via `ButtonContentMode` + `ButtonVariant`; `IconButton` behavior now rides the shared button path rather than a separate feature fork.)
+- [x] Restore desktop icon actions to use `IconButton` controls instead of plain buttons once the current database work is complete. (implemented by routing icon-style desktop/taskbar actions through the shared button path with icon-only content/variant settings; legacy `IconButton` markup is preserved as a compatibility alias.)
+- [ ] Finish the CQL relational model first so Citadel-side service/runtime integration is built against the intended shape rather than a temporary one. Priority gaps include indexes, relationships, foreign-key behavior, and stable schema modeling for desktop/runtime data.
+- [ ] Add a database-driven desktop runtime path so themes, layout specifications, control metadata, and related desktop design data are read from QCQL/CQL tables at boot instead of treating external `.json`/`.cml` files as the long-term runtime source. (dev note: the existing parser work still matters as the import/bootstrap path for initial assets and fallback recovery, but full desktop integration should wait until CQL is mature enough to model these relationships cleanly.)
+- [ ] After the database work is in a stable place, revisit the low-level video/rendering path (`QDrvSVGA`, compositor, present/update flow) for robustness and efficiency under current desktop usage. (dev note: keep this scoped to surfaces, uploads, dirty-region present, compositor behavior, and driver/present correctness; do not mix shape/effect feature work into this item.)
+- [ ] Audit the current video stack and classify current shape/style limits by layer: window/control design, style/render abstractions, painter primitive support, compositor behavior, or the low-level drawing/video path. (target questions: which missing effects are blocked by API shape vs software raster capability vs present/composition constraints.)
+- [ ] After the robustness pass, prototype a Citadel-native higher-level rendering path as a software rendering library that can grow beyond the current immediate-mode path. Start with CPU-side primitives/pipeline stages (transforms, triangles, depth, shading/material rules) that render into existing surfaces and flow through the current compositor/present path; treat hardware 3D as a separate later concern.
 - [ ] Fix keyboard dual-state and key-combination handling, including incorrect grave/tilde mapping so the backtick/tilde key no longer renders as `?`.
 - [x] AI integration: define stable function identity + canonical input representation (bytes + schema/version). (implemented in `QJFunctions` as validated `stableIdentity` generation plus `Engine::encodeCanonicalInputs(...)`, with registry dedupe on stable identity and a versioned canonical input byte format.)
 - [x] AI integration: implement signature hash + input hash (e.g., SHA-256) and log per-call identity + timing. (implemented in `QJFunctions` as SHA-256 signature hashing over validated function schema, SHA-256 hashing of canonical input bytes, and per-call execution logging with stable identity, hashes, status, and cycle timing.)
