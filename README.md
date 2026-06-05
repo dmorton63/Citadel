@@ -58,6 +58,7 @@ The screenshot above reflects the current desktop shell with the latest console-
 - `CITADEL_CURRENT_STATE.md`: authoritative working-state snapshot
 - `TODO_MAIN.md`: broader subsystem/product backlog
 - `TODO_INBOX.md`: active stabilization queue
+- `docs/CQL_REPO_BOUNDARY.md`: boundary between the external CQL project and Citadel's service/runtime integration
 - `docs/`: subsystem specs, plans, and reference documents
 
 ## Screenshots
