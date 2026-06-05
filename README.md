@@ -1,6 +1,6 @@
 # CITADEL Kernel
 
-<img width="975" height="645" alt="qaiosDesktop" src="https://github.com/user-attachments/assets/31138a6a-9323-4621-8ea2-d8f82a41f69c" />
+![Citadel Setup](READMEImages/Citadel_HERO.png)
 
 A modular x86-64 kernel and desktop environment built with the Limine bootloader.
 
