@@ -63,11 +63,17 @@ The screenshot above reflects the current desktop shell with the latest console-
 
 ## Screenshots
 
-![Citadel Setup](docs/screenshots/CitadelSetup.png)
+![Citadel Setup](READMEImages/CitadelSetup.png)
 
-![Citadel Terminal](docs/screenshots/CitadelTerminal.png)
+![Citadel Desktop](READMEImages/CitadelDesktop.png)
 
-![Citadel Shutdown](docs/screenshots/CitadelShutDown.png)
+![Citadel Terminal](READMEImages/CitadelTerminal.png)
+
+![Citadel Terminal Listing](READMEImages/CitadelTerminal_FolderListing.png)
+
+![Citadel CMMS](READMEImages/Citadel_CMMS.png)
+
+![Citadel Shutdown](READMEImages/CitadelShutDown.png)
 
 ## Project Structure
 
