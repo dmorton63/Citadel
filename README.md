@@ -73,7 +73,7 @@ The screenshot above reflects the current desktop shell with the latest console-
 
 ![Citadel CMMS](READMEImages/Citadel_CMMS.png)
 
-![Citadel Shutdown](READMEImages/CitadelShutDown.png)
+![Citadel Shutdown](READMEImages/Citadel_ShutDown.png)
 
 ## Project Structure
 
