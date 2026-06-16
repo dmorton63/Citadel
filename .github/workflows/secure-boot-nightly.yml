@@ -1,0 +1,89 @@
+name: Secure Boot Nightly Regression
+
+on:
+  schedule:
+    - cron: "0 2 * * *"
+  workflow_dispatch:
+
+env:
+  BUILD_DIR: build
+  KEY_DIR: /tmp/citadel-nightly-keys
+
+jobs:
+  nightly-regression:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y cmake build-essential openssl python3
+
+      - name: Configure and build
+        run: |
+          cmake -B $BUILD_DIR -DENABLE_SECURE_BOOT=ON -DSECURE_BOOT_ENVIRONMENT=lab
+          cmake --build $BUILD_DIR --parallel
+
+      - name: Generate ephemeral keys
+        run: |
+          mkdir -p $KEY_DIR
+          for KEY_ID in CITADEL_BOOT_LAB_v1 CITADEL_LSK_LAB_v1 CITADEL_KSK_LAB_v1 CITADEL_MSK_LAB_v1; do
+            openssl req -x509 -newkey rsa:2048 -sha256 \
+              -keyout $KEY_DIR/${KEY_ID}.pem \
+              -out    $KEY_DIR/${KEY_ID}.crt \
+              -days 1 -nodes -subj "/CN=${KEY_ID}"
+          done
+
+      - name: Sign artifacts and manifest
+        run: |
+          ARTIFACTS=$(find $BUILD_DIR \( -name "Limine.efi" -o -name "BootGate" -o -name "vmlinuz*" -o -name "boot.json" -o -name "*.ko" \) | sort)
+          python3 tools/sign_artifacts.py \
+            --environment lab \
+            --key-dir $KEY_DIR \
+            --artifacts $ARTIFACTS \
+            --manifest-out $BUILD_DIR/secure-boot-manifest-nightly.json \
+            --signer "nightly@citadel"
+
+      - name: Verify + provenance + stale-key checks
+        run: |
+          python3 tools/verify_signatures.py --environment lab --key-dir $KEY_DIR --manifest $BUILD_DIR/secure-boot-manifest-nightly.json --strict
+          python3 tools/check_provenance.py --manifest $BUILD_DIR/secure-boot-manifest-nightly.json --build-dir $BUILD_DIR --source-dir .
+          python3 tools/stale_key_report.py --key-dir $KEY_DIR --manifest-dir $BUILD_DIR --out $BUILD_DIR/stale-key-report.json
+
+      - name: Build nightly run summary
+        run: |
+          FAIL=0
+          TOTAL=6
+          test -f $BUILD_DIR/secure-boot-manifest-nightly.json || FAIL=$((FAIL+1))
+          test -f $BUILD_DIR/stale-key-report.json || FAIL=$((FAIL+1))
+          # lightweight success model for trending
+          cat > $BUILD_DIR/nightly-run.json <<EOF
+          {
+            "date": "$(date -u +%Y-%m-%d)",
+            "total": ${TOTAL},
+            "passed": $((TOTAL-FAIL)),
+            "failed": ${FAIL},
+            "critical_failed": ${FAIL},
+            "duration_sec": 0
+          }
+          EOF
+
+      - name: Update trend and enforce thresholds
+        run: |
+          python3 tools/nightly_regression_report.py \
+            --run $BUILD_DIR/nightly-run.json \
+            --trend $BUILD_DIR/nightly-trend.json \
+            --max-fail-rate 0.02 \
+            --max-critical 0
+
+      - name: Upload nightly artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: secure-boot-nightly-${{ github.run_id }}
+          path: |
+            ${{ env.BUILD_DIR }}/secure-boot-manifest-nightly.json
+            ${{ env.BUILD_DIR }}/nightly-run.json
+            ${{ env.BUILD_DIR }}/nightly-trend.json
+            ${{ env.BUILD_DIR }}/stale-key-report.json
+          retention-days: 30

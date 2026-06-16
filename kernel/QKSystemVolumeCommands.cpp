@@ -11,6 +11,8 @@
 #include "QKMemTranslator.h"
 #include "AHCI/QKDrvAHCI.h"
 #include "IDE/QKDrvIDE.h"
+#include "QFSDirectory.h"
+#include "QFSVFS.h"
 #include "QFSVolumeManager.h"
 
 namespace QK
@@ -121,6 +123,75 @@ namespace QK
                     return false;
 
                 outIndex = value;
+                return true;
+            }
+
+            static bool tokenEqualsIgnoreCase(const char *begin, QC::usize len, const char *word)
+            {
+                if (!begin || !word)
+                    return false;
+
+                for (QC::usize index = 0; index < len; ++index)
+                {
+                    const char a = begin[index];
+                    const char b = word[index];
+                    if (b == '\0')
+                        return false;
+
+                    const char lowerA = (a >= 'A' && a <= 'Z') ? static_cast<char>(a - 'A' + 'a') : a;
+                    const char lowerB = (b >= 'A' && b <= 'Z') ? static_cast<char>(b - 'A' + 'a') : b;
+                    if (lowerA != lowerB)
+                        return false;
+                }
+
+                return word[len] == '\0';
+            }
+
+            static bool parseSysformatArgs(const char *args, bool &outForce, bool &outHasIndex, QC::usize &outIndex)
+            {
+                outForce = false;
+                outHasIndex = false;
+                outIndex = 0;
+
+                if (!args)
+                    return true;
+
+                while (*args)
+                {
+                    while (*args && isSpaceChar(*args))
+                        ++args;
+                    if (*args == '\0')
+                        break;
+
+                    const char *token = args;
+                    QC::usize len = 0;
+                    while (args[len] && !isSpaceChar(args[len]))
+                        ++len;
+
+                    if (tokenEqualsIgnoreCase(token, len, "force"))
+                    {
+                        outForce = true;
+                    }
+                    else
+                    {
+                        char tokenBuffer[32];
+                        if (len == 0 || len >= sizeof(tokenBuffer))
+                            return false;
+
+                        QC::String::memcpy(tokenBuffer, token, len);
+                        tokenBuffer[len] = '\0';
+
+                        QC::usize parsedIndex = 0;
+                        if (!parseDeviceIndexArg(tokenBuffer, parsedIndex) || outHasIndex)
+                            return false;
+
+                        outHasIndex = true;
+                        outIndex = parsedIndex;
+                    }
+
+                    args += len;
+                }
+
                 return true;
             }
 
@@ -445,10 +516,169 @@ namespace QK
                 ctx.writeLine(line);
             }
 
+            static void writeInstallerLine(const QC::Cmd::Context &ctx, const char *line)
+            {
+                if (!line)
+                    return;
+                ctx.writeLine(line);
+                QC_LOG_INFO("QKInstaller", "%s", line);
+            }
+
+            static void writeInstallerStage(const QC::Cmd::Context &ctx, const char *stage, const char *status)
+            {
+                char line[160];
+                QC::usize pos = 0;
+                QC::String::memset(line, 0, sizeof(line));
+                appendText(line, sizeof(line), pos, "installer: stage=");
+                appendText(line, sizeof(line), pos, stage ? stage : "unknown");
+                if (status && *status)
+                {
+                    appendText(line, sizeof(line), pos, " status=");
+                    appendText(line, sizeof(line), pos, status);
+                }
+                writeInstallerLine(ctx, line);
+            }
+
+            static bool isPathOfType(const char *path, QFS::FileType type)
+            {
+                if (!path || !*path)
+                    return false;
+                QFS::FileInfo info{};
+                if (QFS::VFS::instance().stat(path, &info) != QC::Status::Success)
+                    return false;
+                return info.type == type;
+            }
+
+            static bool fileReadable(const char *path)
+            {
+                if (!path || !*path)
+                    return false;
+                QFS::File *file = QFS::VFS::instance().open(path, QFS::OpenMode::Read);
+                if (!file)
+                    return false;
+                (void)QFS::VFS::instance().close(file);
+                return true;
+            }
+
+            static bool directoryNonEmpty(const char *path)
+            {
+                if (!path || !*path)
+                    return false;
+
+                QFS::Directory *dir = QFS::VFS::instance().openDir(path);
+                if (!dir)
+                    return false;
+
+                bool hasEntry = false;
+                QFS::DirEntry entry{};
+                while (dir->read(&entry))
+                {
+                    if ((entry.name[0] == '.' && entry.name[1] == '\0') ||
+                        (entry.name[0] == '.' && entry.name[1] == '.' && entry.name[2] == '\0'))
+                    {
+                        continue;
+                    }
+                    hasEntry = true;
+                    break;
+                }
+
+                (void)QFS::VFS::instance().closeDir(dir);
+                return hasEntry;
+            }
+
+            static bool verifyInstallerPayload(const QC::Cmd::Context &ctx)
+            {
+                static const char *kRequiredDirs[] = {
+                    "/system/ui",
+                    "/system/wall",
+                    "/system/icons",
+                    "/system/icons/svg",
+                    "/system/fonts",
+                    "/system/fonts/static",
+                    "/system/.sc",
+                    "/system/config/apps",
+                };
+
+                static const char *kRequiredFiles[] = {
+                    "/system/ui/DESKTOP.CML",
+                    "/system/ui/SPRING.CXS",
+                    "/system/ui/common.cui",
+                };
+
+                static const char *kRequiredNonEmptyDirs[] = {
+                    "/system/wall",
+                    "/system/icons",
+                    "/system/icons/svg",
+                    "/system/fonts",
+                    "/system/fonts/static",
+                };
+
+                writeInstallerStage(ctx, "verify_payload", "begin");
+
+                QC::u32 checks = 0;
+                QC::u32 failures = 0;
+                char firstFailure[160];
+                QC::String::memset(firstFailure, 0, sizeof(firstFailure));
+
+                auto recordFailure = [&](const char *kind, const char *path) {
+                    ++failures;
+                    if (firstFailure[0] == '\0')
+                    {
+                        QC::usize pos = 0;
+                        appendText(firstFailure, sizeof(firstFailure), pos, kind);
+                        appendText(firstFailure, sizeof(firstFailure), pos, ":");
+                        appendText(firstFailure, sizeof(firstFailure), pos, path ? path : "(null)");
+                    }
+                };
+
+                for (QC::usize i = 0; i < (sizeof(kRequiredDirs) / sizeof(kRequiredDirs[0])); ++i)
+                {
+                    ++checks;
+                    if (!isPathOfType(kRequiredDirs[i], QFS::FileType::Directory))
+                        recordFailure("missing_dir", kRequiredDirs[i]);
+                }
+
+                for (QC::usize i = 0; i < (sizeof(kRequiredFiles) / sizeof(kRequiredFiles[0])); ++i)
+                {
+                    ++checks;
+                    if (!fileReadable(kRequiredFiles[i]))
+                        recordFailure("missing_or_unreadable_file", kRequiredFiles[i]);
+                }
+
+                for (QC::usize i = 0; i < (sizeof(kRequiredNonEmptyDirs) / sizeof(kRequiredNonEmptyDirs[0])); ++i)
+                {
+                    ++checks;
+                    if (!directoryNonEmpty(kRequiredNonEmptyDirs[i]))
+                        recordFailure("empty_dir", kRequiredNonEmptyDirs[i]);
+                }
+
+                char line[256];
+                QC::usize pos = 0;
+                QC::String::memset(line, 0, sizeof(line));
+                if (failures != 0)
+                {
+                    writeInstallerLine(ctx, "installer: payload verification failed");
+                    appendText(line, sizeof(line), pos, "installer: stage=verify_payload status=failure first_failure=");
+                    appendText(line, sizeof(line), pos, firstFailure);
+                    appendText(line, sizeof(line), pos, " failed_checks=");
+                    appendUnsigned(line, sizeof(line), pos, failures);
+                    appendText(line, sizeof(line), pos, " total_checks=");
+                    appendUnsigned(line, sizeof(line), pos, checks);
+                    writeInstallerLine(ctx, line);
+                    return false;
+                }
+
+                appendText(line, sizeof(line), pos, "installer: stage=verify_payload status=success failed_checks=0 total_checks=");
+                appendUnsigned(line, sizeof(line), pos, checks);
+                writeInstallerLine(ctx, line);
+                return true;
+            }
+
             static bool cmdSysdisks(const char *args, const QC::Cmd::Context &ctx, void *)
             {
                 (void)args;
 
+                writeInstallerStage(ctx, "discover", "begin");
                 ctx.writeLine("sysdisks: listing detected legacy IDE disks");
 
                 QKDrv::AHCI::DetectedDeviceInfo ahciDevices[8];
@@ -567,6 +797,7 @@ namespace QK
                 }
 
                 writeStorageControllerReport(ctx);
+                writeInstallerStage(ctx, "discover", "complete");
 
                 return true;
             }
@@ -574,12 +805,16 @@ namespace QK
             static bool cmdSysformat(const char *args, const QC::Cmd::Context &ctx, void *)
             {
                 QC::usize deviceIndex = 0;
-                const bool hasExplicitTarget = parseDeviceIndexArg(args, deviceIndex);
+                bool force = false;
+                bool hasExplicitTarget = false;
 
-                if (args && *args && !hasExplicitTarget)
+                writeInstallerStage(ctx, "discover", "begin");
+
+                if (!parseSysformatArgs(args, force, hasExplicitTarget, deviceIndex))
                 {
-                    ctx.writeLine("sysformat: usage: sysformat [diskN|N]");
+                    ctx.writeLine("sysformat: usage: sysformat [force] [diskN|N]");
                     ctx.writeLine("sysformat: example: sysformat disk0");
+                    ctx.writeLine("sysformat: example: sysformat force disk0");
                     return true;
                 }
 
@@ -591,24 +826,49 @@ namespace QK
                     appendText(line, sizeof(line), pos, "sysformat: formatting disk");
                     appendUnsigned(line, sizeof(line), pos, deviceIndex);
                     appendText(line, sizeof(line), pos, " as FAT32");
+                    if (force)
+                        appendText(line, sizeof(line), pos, " (forced)");
                     ctx.writeLine(line);
                 }
                 else
                 {
-                    ctx.writeLine("sysformat: formatting first eligible detected disk as FAT32");
+                    ctx.writeLine(force ? "sysformat: force formatting first eligible detected disk as FAT32"
+                                        : "sysformat: formatting first eligible detected disk as FAT32");
                 }
 
                 QKDrv::AHCI::DetectedDeviceInfo ahciDevices[8];
                 const QC::usize ahciCount = QKDrv::AHCI::enumerateDetectedDevices(ahciDevices, 8);
+
+                {
+                    char line[256];
+                    QC::usize pos = 0;
+                    QC::String::memset(line, 0, sizeof(line));
+                    appendText(line, sizeof(line), pos, "installer: stage=select status=");
+                    appendText(line, sizeof(line), pos, hasExplicitTarget ? "selected" : "auto");
+                    appendText(line, sizeof(line), pos, " disk=");
+                    if (hasExplicitTarget)
+                        appendUnsigned(line, sizeof(line), pos, deviceIndex);
+                    else
+                        appendText(line, sizeof(line), pos, "auto");
+                    appendText(line, sizeof(line), pos, " controller=");
+                    if (hasExplicitTarget)
+                        appendText(line, sizeof(line), pos, (deviceIndex < ahciCount) ? "ahci" : "ide");
+                    else
+                        appendText(line, sizeof(line), pos, "auto");
+                    appendText(line, sizeof(line), pos, " fs=fat32 mount=/system");
+                    writeInstallerLine(ctx, line);
+                }
+
+                writeInstallerStage(ctx, "format", "begin");
                 const QC::Status st = hasExplicitTarget
                                           ? (deviceIndex < ahciCount
-                                                 ? QKDrv::AHCI::formatDetectedDeviceFAT32(deviceIndex)
-                                                 : QKDrv::IDE::formatDetectedDeviceFAT32(deviceIndex - ahciCount))
+                                                 ? QKDrv::AHCI::formatDetectedDeviceFAT32(deviceIndex, force)
+                                                 : QKDrv::IDE::formatDetectedDeviceFAT32(deviceIndex - ahciCount, force))
                                           : ([&]() -> QC::Status {
-                                                const QC::Status ahciSt = QKDrv::AHCI::formatSystemVolumeFAT32();
+                                                const QC::Status ahciSt = QKDrv::AHCI::formatSystemVolumeFAT32(force);
                                                 if (ahciSt == QC::Status::Success || ahciSt == QC::Status::Busy)
                                                     return ahciSt;
-                                                return QKDrv::IDE::formatSystemVolumeFAT32();
+                                                return QKDrv::IDE::formatSystemVolumeFAT32(force);
                                             })();
                 if (st == QC::Status::Busy)
                 {
@@ -619,24 +879,55 @@ namespace QK
                     ctx.writeLine("sysformat: format failed");
                     writeStatusLine(ctx, "sysformat: status=", st);
                     writeAhciFailureLine(ctx);
+                    char line[160];
+                    QC::usize pos = 0;
+                    QC::String::memset(line, 0, sizeof(line));
+                    appendText(line, sizeof(line), pos, "installer: status=failure stage=format code=");
+                    appendUnsigned(line, sizeof(line), pos, static_cast<QC::u64>(static_cast<int>(st)));
+                    appendText(line, sizeof(line), pos, " recovery=sysdisks|sysformat");
+                    writeInstallerLine(ctx, line);
                     return true;
                 }
                 else
                 {
                     ctx.writeLine("sysformat: format ok");
+                    writeInstallerStage(ctx, "format", "success");
                 }
 
                 // Re-run system volume probe and mount pending volumes so /system becomes available immediately.
+                writeInstallerStage(ctx, "probe_mount", "begin");
                 QKDrv::AHCI::resetSystemProbe();
                 QKDrv::IDE::resetSystemProbe();
                 if (!QKDrv::AHCI::probeAndRegisterSystemVolume())
                     QKDrv::IDE::probeAndRegisterSystemVolume();
                 (void)QFS::VolumeManager::instance().mountPending();
 
-                if (QFS::VolumeManager::instance().isMounted("QFS_SYSTEM"))
+                const bool mounted = QFS::VolumeManager::instance().isMounted("QFS_SYSTEM");
+                if (mounted)
+                {
                     ctx.writeLine("sysformat: /system mounted");
+                    writeInstallerStage(ctx, "probe_mount", "success");
+                }
                 else
+                {
                     ctx.writeLine("sysformat: /system not mounted (probe or mount failed)");
+                    writeInstallerLine(ctx, "installer: status=failure stage=probe_mount operation=/system mount recovery=sysmount|sysformat");
+                }
+
+                writeInstallerLine(ctx, "installer: stage=copy_payload status=skipped source=unavailable dest=/system reason=sysformat_only");
+
+                bool payloadOk = false;
+                if (mounted)
+                    payloadOk = verifyInstallerPayload(ctx);
+
+                if (mounted && payloadOk)
+                {
+                    writeInstallerLine(ctx, "installer: stage=complete status=success mount=/system next=reboot");
+                }
+                else
+                {
+                    writeInstallerLine(ctx, "installer: stage=complete status=failure failed_stage=verify_payload recovery=sysmount|sysformat");
+                }
 
                 return true;
             }
@@ -645,6 +936,7 @@ namespace QK
             {
                 (void)args;
 
+                writeInstallerStage(ctx, "probe_mount", "begin");
                 ctx.writeLine("sysmount: probing for system volume and mounting /system");
 
                 QKDrv::AHCI::resetSystemProbe();
@@ -654,9 +946,30 @@ namespace QK
                 (void)QFS::VolumeManager::instance().mountPending();
 
                 if (QFS::VolumeManager::instance().isMounted("QFS_SYSTEM"))
+                {
                     ctx.writeLine("sysmount: /system mounted");
+                    writeInstallerStage(ctx, "probe_mount", "success");
+                }
                 else
+                {
                     ctx.writeLine("sysmount: /system not mounted (probe or mount failed)");
+                    writeInstallerLine(ctx, "installer: status=failure stage=probe_mount operation=/system mount recovery=sysdisks|sysformat");
+                }
+
+                return true;
+            }
+
+            static bool cmdSysverify(const char *args, const QC::Cmd::Context &ctx, void *)
+            {
+                (void)args;
+
+                if (!QFS::VolumeManager::instance().isMounted("QFS_SYSTEM"))
+                {
+                    writeInstallerLine(ctx, "installer: status=failure stage=verify_payload operation=/system not-mounted recovery=sysmount|sysformat");
+                    return true;
+                }
+
+                (void)verifyInstallerPayload(ctx);
 
                 return true;
             }
@@ -689,6 +1002,13 @@ namespace QK
                 &cmdSysmount,
                 nullptr,
                 "Probe and mount the system disk at /system (sysmount)");
+
+            (void)reg.registerCommandExAccess(
+                "sysverify",
+                QC::Cmd::AccessLevel::Admin,
+                &cmdSysverify,
+                nullptr,
+                "Verify installer-required payload paths under /system (sysverify)");
 
             QC_LOG_INFO("QKCmd", "Registered system volume commands");
             registered = true;

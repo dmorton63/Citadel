@@ -597,9 +597,7 @@ namespace
             QC::usize remaining = count;
             while (remaining)
             {
-                const QC::u16 chunk = write
-                                           ? 1
-                                           : static_cast<QC::u16>((remaining > kMaxTransferSectors) ? kMaxTransferSectors : remaining);
+                const QC::u16 chunk = static_cast<QC::u16>((remaining > kMaxTransferSectors) ? kMaxTransferSectors : remaining);
                 const QC::u32 byteCount = static_cast<QC::u32>(chunk) * 512u;
 
                 if (write)
@@ -827,6 +825,50 @@ namespace
         return dev->writeSector(0, mbr);
     }
 
+    static bool chooseFat32Layout(QC::u32 partSectors, QC::u8 &outSectorsPerCluster, QC::u32 &outSectorsPerFat)
+    {
+        constexpr QC::u16 kReserved = 32;
+        constexpr QC::u8 kFatCount = 2;
+        constexpr QC::u32 kMinFat32Clusters = 65525;
+        constexpr QC::u32 kMaxFat32Clusters = 0x0FFFFFF5U;
+        const QC::u8 candidates[] = {1, 2, 4, 8, 16, 32, 64};
+
+        for (QC::u8 sectorsPerCluster : candidates)
+        {
+            QC::u32 sectorsPerFat = 1;
+            for (int iter = 0; iter < 8; ++iter)
+            {
+                const QC::u32 fatArea = static_cast<QC::u32>(kFatCount) * sectorsPerFat;
+                if (partSectors <= static_cast<QC::u32>(kReserved) + fatArea)
+                    return false;
+
+                const QC::u32 dataSectors = partSectors - static_cast<QC::u32>(kReserved) - fatArea;
+                const QC::u32 totalClusters = dataSectors / sectorsPerCluster;
+                const QC::u32 fatEntries = totalClusters + 2;
+                const QC::u32 fatBytes = fatEntries * 4;
+                const QC::u32 newSpf = (fatBytes + 511U) / 512U;
+                if (newSpf == sectorsPerFat)
+                    break;
+                sectorsPerFat = (newSpf == 0) ? 1 : newSpf;
+            }
+
+            const QC::u32 fatArea = static_cast<QC::u32>(kFatCount) * sectorsPerFat;
+            if (partSectors <= static_cast<QC::u32>(kReserved) + fatArea)
+                continue;
+
+            const QC::u32 dataSectors = partSectors - static_cast<QC::u32>(kReserved) - fatArea;
+            const QC::u32 totalClusters = dataSectors / sectorsPerCluster;
+            if (totalClusters < kMinFat32Clusters || totalClusters > kMaxFat32Clusters)
+                continue;
+
+            outSectorsPerCluster = sectorsPerCluster;
+            outSectorsPerFat = sectorsPerFat;
+            return true;
+        }
+
+        return false;
+    }
+
     static bool hasMountableFatLayout(QFS::BlockDevice *dev)
     {
         if (!dev)
@@ -853,30 +895,10 @@ namespace
         constexpr QC::u16 kFsInfoSector = 1;
         constexpr QC::u16 kBackupBoot = 6;
 
-        QC::u8 sectorsPerCluster = 8;
-        if (partSectors < 131072)
-            sectorsPerCluster = 4;
-        if (partSectors < 65536)
-            sectorsPerCluster = 2;
-        if (partSectors < 32768)
-            sectorsPerCluster = 1;
-
-        QC::u32 sectorsPerFat = 1;
-        for (int iter = 0; iter < 8; ++iter)
-        {
-            const QC::u32 fatArea = static_cast<QC::u32>(kFatCount) * sectorsPerFat;
-            if (partSectors <= static_cast<QC::u32>(kReserved) + fatArea)
-                return QC::Status::InvalidParam;
-
-            const QC::u32 dataSectors = partSectors - static_cast<QC::u32>(kReserved) - fatArea;
-            const QC::u32 totalClusters = dataSectors / sectorsPerCluster;
-            const QC::u32 fatEntries = totalClusters + 2;
-            const QC::u32 fatBytes = fatEntries * 4;
-            const QC::u32 newSpf = (fatBytes + 511U) / 512U;
-            if (newSpf == sectorsPerFat)
-                break;
-            sectorsPerFat = (newSpf == 0) ? 1 : newSpf;
-        }
+        QC::u8 sectorsPerCluster = 0;
+        QC::u32 sectorsPerFat = 0;
+        if (!chooseFat32Layout(partSectors, sectorsPerCluster, sectorsPerFat))
+            return QC::Status::InvalidParam;
 
         const QC::u32 totalSectors = partSectors;
         const QC::u32 fatStart = static_cast<QC::u32>(kReserved);
@@ -989,18 +1011,29 @@ namespace
         st = dev->writeSector(fat1Lba, fat0);
         if (st != QC::Status::Success)
             return st;
+        if (sectorsPerFat > 1)
+        {
+            writeFormatStage("zero fat1 tail");
+            st = writeZeroSectors(dev, fat1Lba + 1, sectorsPerFat - 1);
+            if (st != QC::Status::Success)
+                return st;
+        }
 
         writeFormatStage("write fat2 header");
         st = dev->writeSector(fat2Lba, fat0);
         if (st != QC::Status::Success)
             return st;
+        if (sectorsPerFat > 1)
+        {
+            writeFormatStage("zero fat2 tail");
+            st = writeZeroSectors(dev, fat2Lba + 1, sectorsPerFat - 1);
+            if (st != QC::Status::Success)
+                return st;
+        }
 
         writeFormatStage("zero root");
-        QC::u8 root[512];
-        QC::String::memset(root, 0, sizeof(root));
         const QC::u32 rootLba = partStartLba + dataStart;
-        writeFormatStage("write root");
-        st = dev->writeSector(rootLba, root);
+        st = writeZeroSectors(dev, rootLba, sectorsPerCluster);
         if (st != QC::Status::Success)
             return st;
 
@@ -1093,7 +1126,7 @@ namespace QKDrv
             return written;
         }
 
-        QC::Status formatSystemVolumeFAT32()
+        QC::Status formatSystemVolumeFAT32(bool force)
         {
             auto &pci = QArch::PCI::instance();
             const auto &devices = pci.devices();
@@ -1161,9 +1194,17 @@ namespace QKDrv
 
                     if (hasMountableFatLayout(rawDev))
                     {
+                        if (force)
+                        {
+                            QC_LOG_WARN("QKDrvAHCI", "Forcing format of AHCI port %u despite existing mountable FAT layout",
+                                        static_cast<unsigned>(port));
+                        }
+                        else
+                        {
                         QC_LOG_WARN("QKDrvAHCI", "Refusing to format AHCI port %u: disk already appears partitioned/formatted",
                                     static_cast<unsigned>(port));
                         return QC::Status::Busy;
+                        }
                     }
 
                     if (mbrHasPartitionTable(sector0) || looksLikeFatBootSector(sector0) || looksLikeMbr(sector0))
@@ -1206,7 +1247,7 @@ namespace QKDrv
             return lastError;
         }
 
-        QC::Status formatDetectedDeviceFAT32(QC::usize deviceIndex)
+        QC::Status formatDetectedDeviceFAT32(QC::usize deviceIndex, bool force)
         {
             ResolvedAhciDisk resolved{};
             if (!resolveDetectedDeviceIndex(deviceIndex, resolved))
@@ -1238,8 +1279,15 @@ namespace QKDrv
 
             if (hasMountableFatLayout(&dev))
             {
-                QC_LOG_WARN("QKDrvAHCI", "Refusing to format disk%u: AHCI device already appears partitioned/formatted", static_cast<unsigned>(deviceIndex));
-                return QC::Status::Busy;
+                if (force)
+                {
+                    QC_LOG_WARN("QKDrvAHCI", "Forcing format of disk%u despite existing mountable FAT layout", static_cast<unsigned>(deviceIndex));
+                }
+                else
+                {
+                    QC_LOG_WARN("QKDrvAHCI", "Refusing to format disk%u: AHCI device already appears partitioned/formatted", static_cast<unsigned>(deviceIndex));
+                    return QC::Status::Busy;
+                }
             }
 
             if (mbrHasPartitionTable(sector0) || looksLikeFatBootSector(sector0) || looksLikeMbr(sector0))

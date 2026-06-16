@@ -58,9 +58,9 @@ namespace QD
         constexpr const char *CMMS_DESKTOP_LAYOUT_PRODUCTION = "production";
         constexpr const char *CMMS_DESKTOP_LAYOUT_GOLDEN = "golden";
         constexpr QC::u32 CMMS_DESKTOP_DOCUMENT_CHUNK_BYTES = 1024;
-        constexpr QC::u32 CMMS_LAYOUT_MATERIALIZATION_SCHEMA_VERSION = 1;
+        constexpr QC::u32 CMMS_LAYOUT_MATERIALIZATION_SCHEMA_VERSION = 2;
         constexpr bool CMMS_MATERIALIZE_RUNTIME_ON_BOOT = false;
-        constexpr bool CMMS_ENSURE_ACTIVE_RUNTIME_ON_BOOT = true;
+        constexpr bool CMMS_ENSURE_ACTIVE_RUNTIME_ON_BOOT = false;
         constexpr float BASE_THEME_FONT_SIZE = 12.0f;
         static bool g_imageCorpusChecked = false;
 
@@ -2707,6 +2707,14 @@ namespace QD
                 }
 
                 QCQL::Row newMaterializationRow{};
+                DesktopDocumentSaveResult cuimlSaveResult{};
+                if (!DesktopDocumentIO::saveCmmsCuiml(m_cmmsDatabase, importResult.document, cuimlSaveResult) ||
+                    !cuimlSaveResult.saved)
+                {
+                    QC_LOG_WARN(LOG_MODULE, "CMMS runtime materialization CUI-ML cache refresh failed layout=%s error='%s'", layoutId, cuimlSaveResult.error);
+                    return false;
+                }
+
                 newMaterializationRow.cells.push_back(makeTextCell(layoutId));
                 newMaterializationRow.cells.push_back(makeTextCell(layoutId));
                 newMaterializationRow.cells.push_back(makeTextCell(layoutSourcePath));
@@ -3015,6 +3023,7 @@ namespace QD
     {
         const QC::Rect area = workArea();
         QCQL::Database *database = nullptr;
+
         if (ensureCmmsDatabaseReady())
         {
             (void)ThemeImporter::importBuiltinThemes(m_cmmsDatabase);
@@ -4936,6 +4945,7 @@ namespace QD
 
     bool Desktop::tryInitializeFromCuiML()
     {
+        const QC::u64 cuimlInitStartMs = QDrv::Timer::instance().milliseconds();
         resetThemeOverrides();
         resetBackgroundConfig();
 
@@ -6106,6 +6116,7 @@ namespace QD
 
         if (ensureCmmsDatabaseReady())
         {
+            const QC::u64 sourceLoadStartMs = QDrv::Timer::instance().milliseconds();
             const char *documentIdsProdFirst[] = {CMMS_DESKTOP_LAYOUT_PRODUCTION, CMMS_DESKTOP_LAYOUT_GOLDEN};
             const char *documentIdsGoldenOnly[] = {CMMS_DESKTOP_LAYOUT_GOLDEN};
 
@@ -6115,6 +6126,46 @@ namespace QD
 
             for (QC::usize i = 0; i < documentIdCount; ++i)
             {
+                const QCQL::Cell keyCell = makeTextCell(documentIds[i]);
+                QCQL::Row row{};
+                const QCQL::Status rowSt = QCQL::Engine::instance().selectRowByPrimaryKeyByName(
+                    m_cmmsDatabase,
+                    CMMS_DESKTOP_CUIML_TABLE,
+                    keyCell.bytes,
+                    row);
+                if (rowSt == QCQL::Status::Success && !row.tombstone && row.cells.size() >= 3 && row.cells[2].type == QCQL::ColumnType::Text)
+                {
+                    QC::u32 chunkCount = 0;
+                    if (parseUnsignedTextCell(row.cells[2], chunkCount) && chunkCount > 0)
+                    {
+                        QC::Vector<QC::u8> payloadBytes;
+                        if (loadChunkedDocumentPayload(m_cmmsDatabase, CMMS_DESKTOP_CUIML_CHUNK_TABLE, documentIds[i], chunkCount, payloadBytes))
+                        {
+                            const QC::usize size = payloadBytes.size();
+                            if (size > 0 && size <= 1024 * 1024)
+                            {
+                                char *text = static_cast<char *>(operator new[](size + 1));
+                                for (QC::usize n = 0; n < size; ++n)
+                                    text[n] = static_cast<char>(payloadBytes[n]);
+                                text[size] = '\0';
+
+                                if (!copyCellText(row.cells[1], openedPathStorage, sizeof(openedPathStorage)) || !openedPathStorage[0])
+                                {
+                                    QC::String::strncpy(openedPathStorage, "CMMS DB", sizeof(openedPathStorage) - 1);
+                                    openedPathStorage[sizeof(openedPathStorage) - 1] = '\0';
+                                }
+
+                                openedPath = openedPathStorage;
+                                openedBytes = size;
+                                openedIoMs = 0;
+                                cuimlText = text;
+                                openedFromDatabase = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+
                 DesktopDocumentImportResult runtimeImport{};
                 DesktopDocumentExportResult runtimeExport{};
                 if (DesktopDocumentIO::importCmmsRuntime(m_cmmsDatabase, documentIds[i], runtimeImport) &&
@@ -6153,47 +6204,11 @@ namespace QD
                         break;
                     }
                 }
-
-                const QCQL::Cell keyCell = makeTextCell(documentIds[i]);
-                QCQL::Row row{};
-                const QCQL::Status rowSt = QCQL::Engine::instance().selectRowByPrimaryKeyByName(
-                    m_cmmsDatabase,
-                    CMMS_DESKTOP_CUIML_TABLE,
-                    keyCell.bytes,
-                    row);
-                if (rowSt != QCQL::Status::Success || row.tombstone || row.cells.size() < 3 || row.cells[2].type != QCQL::ColumnType::Text)
-                    continue;
-
-                QC::u32 chunkCount = 0;
-                if (!parseUnsignedTextCell(row.cells[2], chunkCount) || chunkCount == 0)
-                    continue;
-
-                QC::Vector<QC::u8> payloadBytes;
-                if (!loadChunkedDocumentPayload(m_cmmsDatabase, CMMS_DESKTOP_CUIML_CHUNK_TABLE, documentIds[i], chunkCount, payloadBytes))
-                    continue;
-
-                const QC::usize size = payloadBytes.size();
-                if (size == 0 || size > 1024 * 1024)
-                    continue;
-
-                char *text = static_cast<char *>(operator new[](size + 1));
-                for (QC::usize n = 0; n < size; ++n)
-                    text[n] = static_cast<char>(payloadBytes[n]);
-                text[size] = '\0';
-
-                if (!copyCellText(row.cells[1], openedPathStorage, sizeof(openedPathStorage)) || !openedPathStorage[0])
-                {
-                    QC::String::strncpy(openedPathStorage, "CMMS DB", sizeof(openedPathStorage) - 1);
-                    openedPathStorage[sizeof(openedPathStorage) - 1] = '\0';
-                }
-
-                openedPath = openedPathStorage;
-                openedBytes = size;
-                openedIoMs = 0;
-                cuimlText = text;
-                openedFromDatabase = true;
-                break;
             }
+
+            QC_LOG_INFO(LOG_MODULE, "CUI-ML stage source_load=%llums source=%s\n",
+                        static_cast<unsigned long long>(QDrv::Timer::instance().milliseconds() - sourceLoadStartMs),
+                        openedFromRuntimeRows ? "runtime_rows" : (openedFromDatabase ? "cmms_db" : "vfs"));
         }
 
         for (QC::usize i = 0; !openedPath && i < cuimlPathCount; ++i)
@@ -6238,6 +6253,13 @@ namespace QD
 
         if (!openedPath || !cuimlText)
             return false;
+
+        if (!openedFromDatabase && !openedFromRuntimeRows)
+        {
+            QC_LOG_INFO(LOG_MODULE, "CUI-ML stage source_load=%llums source=%s\n",
+                        static_cast<unsigned long long>(openedIoMs),
+                        "vfs");
+        }
 
         if (openedFromRuntimeRows)
         {
@@ -6298,8 +6320,11 @@ namespace QD
             }
         }
 
+        const QC::u64 styleScanStartMs = QDrv::Timer::instance().milliseconds();
         scanStyleImports(cuimlText);
         QC_LOG_INFO(LOG_MODULE, "CUIMLSS: parsed %u style rules\n", static_cast<unsigned>(styleRules.size()));
+        QC_LOG_INFO(LOG_MODULE, "CUI-ML stage style_scan=%llums\n",
+                static_cast<unsigned long long>(QDrv::Timer::instance().milliseconds() - styleScanStartMs));
 
         // ----------------------------
         // Optional imports: icon aliases, roles, components
@@ -6921,11 +6946,14 @@ namespace QD
         };
 
         // Build optional maps from the main CUIML and any imported .cui files.
+        const QC::u64 importScanStartMs = QDrv::Timer::instance().milliseconds();
         scanCuimlImportsForIcons(cuimlText);
         scanIconAliasesFromText(cuimlText);
         scanRoleDefsFromText(cuimlText);
         scanComponentsFromText(cuimlText);
         applyRoleDefsToThemeOverrides();
+        QC_LOG_INFO(LOG_MODULE, "CUI-ML stage import_scan=%llums\n",
+                static_cast<unsigned long long>(QDrv::Timer::instance().milliseconds() - importScanStartMs));
 
         auto lookupComponentTemplate = [&](const char *token) -> const CuiMLComponentTemplate *
         {
@@ -6940,6 +6968,7 @@ namespace QD
         };
 
         // Derive a global theme font family/size based on CUIMLSS defaults.
+        const QC::u64 themeDeriveStartMs = QDrv::Timer::instance().milliseconds();
         // CUIMLSS uses a simple token like: <family>-<style>-<sizePx>, e.g. OpenSans-regular-14.
         // The family is taken from the first token before '-' ("system" -> built-in).
         bool haveDerivedThemeFont = false;
@@ -7036,8 +7065,12 @@ namespace QD
             }
         }
 
+        QC_LOG_INFO(LOG_MODULE, "CUI-ML stage theme_derive=%llums\n",
+                static_cast<unsigned long long>(QDrv::Timer::instance().milliseconds() - themeDeriveStartMs));
+
         // Preload the derived theme font (if any) before creating controls.
         // This lets auto-sizing use real font metrics instead of the bitmap fallback.
+        const QC::u64 themePreloadStartMs = QDrv::Timer::instance().milliseconds();
         if (haveDerivedThemeFont)
         {
             if (!streqIgnoreCaseAscii(derivedThemeFontFamily, "system") && !streqIgnoreCaseAscii(derivedThemeFontFamily, "System"))
@@ -7045,21 +7078,36 @@ namespace QD
                 QC::Vector<QC::u8> bytes;
                 if (tryLoadFontFamilyFromVfs(derivedThemeFontFamily, bytes))
                 {
-                    if (!QG::FontManager::instance().setDefaultFontFromBytes(bytes))
+                    if (QG::FontManager::instance().setDefaultFontFromBytes(bytes))
+                    {
+                        m_lastAppliedFontFamilySet = true;
+                        QC::String::strncpy(m_lastAppliedFontFamily, derivedThemeFontFamily, sizeof(m_lastAppliedFontFamily) - 1);
+                        m_lastAppliedFontFamily[sizeof(m_lastAppliedFontFamily) - 1] = '\0';
+                    }
+                    else
                     {
                         QG::FontManager::instance().clearDefaultFont();
+                        m_lastAppliedFontFamilySet = false;
+                        m_lastAppliedFontFamily[0] = '\0';
                     }
                 }
                 else
                 {
                     QG::FontManager::instance().clearDefaultFont();
+                    m_lastAppliedFontFamilySet = false;
+                    m_lastAppliedFontFamily[0] = '\0';
                 }
             }
             else
             {
                 QG::FontManager::instance().clearDefaultFont();
+                m_lastAppliedFontFamilySet = true;
+                QC::String::strncpy(m_lastAppliedFontFamily, "System", sizeof(m_lastAppliedFontFamily) - 1);
+                m_lastAppliedFontFamily[sizeof(m_lastAppliedFontFamily) - 1] = '\0';
             }
         }
+        QC_LOG_INFO(LOG_MODULE, "CUI-ML stage theme_preload=%llums\n",
+                    static_cast<unsigned long long>(QDrv::Timer::instance().milliseconds() - themePreloadStartMs));
 
         auto classListContains = [&](const char *classList, const char *key) -> bool
         {
@@ -7160,6 +7208,7 @@ namespace QD
             stack.push_back(f);
         }
 
+        const QC::u64 controlBuildStartMs = QDrv::Timer::instance().milliseconds();
         const char *p = cuimlText;
         while (*p)
         {
@@ -8237,6 +8286,8 @@ namespace QD
                 stack.push_back(f);
             }
         }
+        QC_LOG_INFO(LOG_MODULE, "CUI-ML stage control_build=%llums\n",
+                static_cast<unsigned long long>(QDrv::Timer::instance().milliseconds() - controlBuildStartMs));
 
         operator delete[](cuimlText);
 
@@ -8250,6 +8301,7 @@ namespace QD
 
         // Optional runtime overrides (validated early by BootGate if present in production).
         // Applies to both CUI-ML and JSON desktop layouts.
+        const QC::u64 overrideStageStartMs = QDrv::Timer::instance().milliseconds();
         {
             bool backgroundApplied = false;
             QC::JSON::Value ovrRoot;
@@ -8260,6 +8312,8 @@ namespace QD
                 applyDesktopOverridesObject(ovrRoot, backgroundApplied);
             }
         }
+        QC_LOG_INFO(LOG_MODULE, "CUI-ML stage overrides=%llums\n",
+                    static_cast<unsigned long long>(QDrv::Timer::instance().milliseconds() - overrideStageStartMs));
 
         // Apply CUIMLSS-derived font family/size last so it wins over seasonal theme presets.
         if (haveDerivedThemeFont)
@@ -8316,8 +8370,12 @@ namespace QD
             m_desktopWindow->root()->addChild(btn);
         }
 
+        const QC::u64 finalizeStageStartMs = QDrv::Timer::instance().milliseconds();
         recomputeTaskbarWindowBase();
         applyColors();
+        QC_LOG_INFO(LOG_MODULE, "CUI-ML stage finalize=%llums total=%llums\n",
+                static_cast<unsigned long long>(QDrv::Timer::instance().milliseconds() - finalizeStageStartMs),
+                static_cast<unsigned long long>(QDrv::Timer::instance().milliseconds() - cuimlInitStartMs));
 
         QC_LOG_INFO(LOG_MODULE, "Desktop initialized from CUI-ML (%u controls)\n", static_cast<unsigned>(m_jsonControls.size()));
         return true;

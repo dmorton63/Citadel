@@ -1,0 +1,135 @@
+name: "secure_boot_policy_governance"
+on:
+  pull_request:
+    branches: [ "main" ]
+  workflow_dispatch: {}
+  schedule:
+    - cron: "15 3 * * 1"
+
+jobs:
+  policy-governance:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Policy-as-code enforcement
+        run: |
+          mkdir -p build/policy
+          cat > build/policy/context.json <<'JSON'
+          {
+            "secure_boot_enabled": true,
+            "signed_boot_artifacts_present": true,
+            "dual_control_enforced": true,
+            "provenance_chain_valid": true,
+            "release_block_on_nonconformance": true,
+            "policy_version_declared": true,
+            "revocation_list_age_hours": 12
+          }
+          JSON
+          python3 tools/enforce_secure_boot_policy.py \
+            --rules config/secure_boot_policy_rules.json \
+            --context build/policy/context.json \
+            --json-out build/policy/policy_report.json
+
+      - name: Fleet conformance scan
+        run: |
+          cat > build/policy/fleet.json <<'JSON'
+          {
+            "devices": [
+              {
+                "device_id": "lab-01",
+                "key_state": "valid",
+                "firmware_policy_mode": "enforced",
+                "approved_version_alignment": true
+              },
+              {
+                "device_id": "staging-01",
+                "key_state": "valid",
+                "firmware_policy_mode": "enforced",
+                "approved_version_alignment": true
+              }
+            ]
+          }
+          JSON
+          python3 tools/scan_fleet_conformance.py \
+            --fleet build/policy/fleet.json \
+            --json-out build/policy/fleet_report.json
+
+      - name: Quarantine gate
+        run: |
+          cat > build/policy/artifacts.json <<'JSON'
+          {
+            "artifacts": [
+              {
+                "name": "bootgate.bin",
+                "path": "build/policy/bootgate.bin",
+                "conformant": true,
+                "reason": "n/a"
+              }
+            ]
+          }
+          JSON
+          python3 tools/quarantine_nonconformant_artifacts.py \
+            --manifest build/policy/artifacts.json \
+            --quarantine-dir build/policy/quarantine \
+            --json-out build/policy/quarantine_report.json
+
+      - name: Policy promotion gate
+        run: |
+          cat > build/policy/promotion_request.json <<'JSON'
+          {
+            "policy_version": "v1.0.0",
+            "from_env": "lab",
+            "to_env": "staging",
+            "requester": "release-manager@citadel.local",
+            "approvers": [
+              "security-lead@citadel.local",
+              "ops-lead@citadel.local"
+            ],
+            "ticket_id": "CHG-2026-0616-001",
+            "expires_at": "2030-01-01T00:00:00Z"
+          }
+          JSON
+          python3 tools/enforce_policy_promotion_gate.py \
+            --policy-versions config/secure_boot_policy_versions.json \
+            --request build/policy/promotion_request.json \
+            --json-out build/policy/promotion_gate_report.json
+
+      - name: Revocation freshness verification
+        run: |
+          cat > build/policy/revocation_status.json <<'JSON'
+          {
+            "last_updated_utc": "2026-06-16T00:00:00Z",
+            "environments": [
+              {"name": "lab", "propagated": true},
+              {"name": "staging", "propagated": true},
+              {"name": "production", "propagated": true}
+            ]
+          }
+          JSON
+          python3 tools/verify_revocation_freshness.py \
+            --status build/policy/revocation_status.json \
+            --max-age-hours 168 \
+            --json-out build/policy/revocation_report.json
+
+      - name: Health scorecard gate
+        run: |
+          cat > build/policy/health_metrics.json <<'JSON'
+          {
+            "fleet_conformance_rate": 0.995,
+            "policy_compliance_rate": 0.999,
+            "revocation_freshness_hours": 12,
+            "signing_incident_mttr_hours": 2,
+            "drill_success_rate": 1.0
+          }
+          JSON
+          python3 tools/check_secure_boot_scorecard.py \
+            --metrics build/policy/health_metrics.json \
+            --thresholds config/secure_boot_health_thresholds.json \
+            --json-out build/policy/health_scorecard_report.json

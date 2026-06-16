@@ -1,0 +1,10 @@
+{
+  "os": "Linux",
+  "kernel_prefix": "5.",
+  "require_efi": true,
+  "required_tools": [
+    "openssl",
+    "python3",
+    "git"
+  ]
+}

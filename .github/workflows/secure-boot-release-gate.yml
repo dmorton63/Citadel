@@ -1,0 +1,262 @@
+name: Secure Boot Release Guard
+
+# Blocks any release tag from being published when Secure Boot profile
+# checks are red.  Runs on push of version tags (v*.*.*).
+# Must pass before the release workflow can proceed.
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to validate"
+        required: true
+
+env:
+  BUILD_DIR: build
+  KEY_DIR: /tmp/citadel-lab-keys
+
+jobs:
+  # --------------------------------------------------------------------------
+  # 1. Build release artifacts
+  # --------------------------------------------------------------------------
+  build-release:
+    name: Build Release Artifacts
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.get-tag.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Get tag
+        id: get-tag
+        run: |
+          TAG="${GITHUB_REF_NAME:-${{ inputs.tag }}}"
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+          echo "Building release: $TAG"
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y cmake build-essential openssl python3
+
+      - name: Configure (Secure Boot profile)
+        run: |
+          cmake -B $BUILD_DIR \
+            -DENABLE_SECURE_BOOT=ON \
+            -DSECURE_BOOT_ENVIRONMENT=lab \
+            -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build $BUILD_DIR --parallel
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-raw-artifacts
+          path: |
+            ${{ env.BUILD_DIR }}/limine/Limine.efi
+            ${{ env.BUILD_DIR }}/BootGate/BootGate
+            ${{ env.BUILD_DIR }}/kernel/vmlinuz*
+            ${{ env.BUILD_DIR }}/boot.json
+            ${{ env.BUILD_DIR }}/QFileSystem/*.ko
+            ${{ env.BUILD_DIR }}/QNetwork/*.ko
+            ${{ env.BUILD_DIR }}/QGraphics/*.ko
+
+  # --------------------------------------------------------------------------
+  # 2. Sign + verify
+  # --------------------------------------------------------------------------
+  sign-and-verify:
+    name: Sign and Verify Artifacts
+    needs: build-release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-raw-artifacts
+          path: ${{ env.BUILD_DIR }}
+
+      - name: Install dependencies
+        run: sudo apt-get update -qq && sudo apt-get install -y openssl python3
+
+      - name: Generate ephemeral lab keys
+        run: |
+          mkdir -p $KEY_DIR
+          for KEY_ID in CITADEL_BOOT_LAB_v1 CITADEL_LSK_LAB_v1 \
+                        CITADEL_KSK_LAB_v1 CITADEL_MSK_LAB_v1; do
+            openssl req -x509 -newkey rsa:2048 -sha256 \
+              -keyout $KEY_DIR/${KEY_ID}.pem \
+              -out    $KEY_DIR/${KEY_ID}.crt \
+              -days 1 -nodes \
+              -subj "/CN=Citadel-${KEY_ID}"
+          done
+
+      - name: Sign artifacts
+        run: |
+          ARTIFACTS=$(find $BUILD_DIR \
+            \( -name "Limine.efi" -o -name "BootGate" -o -name "vmlinuz*" \
+               -o -name "boot.json" -o -name "*.ko" \) | sort)
+          python3 tools/sign_artifacts.py \
+            --environment lab \
+            --key-dir $KEY_DIR \
+            --artifacts $ARTIFACTS \
+            --signer "ci-release@citadel" \
+            --manifest-out $BUILD_DIR/secure-boot-manifest-release.json
+
+      - name: Installer media gate (if media directory exists)
+        run: |
+          if [[ -d installer-media ]]; then
+            python3 tools/verify_installer_media.py \
+              --manifest $BUILD_DIR/secure-boot-manifest-release.json \
+              --media-root installer-media
+          else
+            echo "No installer-media directory present; skipping installer-media gate."
+          fi
+
+      - name: Evidence freshness check
+        run: |
+          python3 tools/check_evidence_freshness.py --max-age-hours 24 \
+            $BUILD_DIR/secure-boot-manifest-release.json
+
+      - name: Verify signatures (strict)
+        run: |
+          python3 tools/verify_signatures.py \
+            --environment lab \
+            --key-dir $KEY_DIR \
+            --manifest $BUILD_DIR/secure-boot-manifest-release.json \
+            --strict
+
+      - name: Check provenance
+        run: |
+          python3 tools/check_provenance.py \
+            --manifest $BUILD_DIR/secure-boot-manifest-release.json \
+            --build-dir $BUILD_DIR \
+            --source-dir .
+
+      - name: Tag artifact identity
+        run: |
+          python3 tools/tag_artifact_identity.py \
+            --manifest $BUILD_DIR/secure-boot-manifest-release.json \
+            --update-manifest
+
+      - name: Upload signed manifest
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-signed-manifest
+          path: ${{ env.BUILD_DIR }}/secure-boot-manifest-release.json
+          retention-days: 90
+
+  # --------------------------------------------------------------------------
+  # 3. Reproducibility check (two clean builds)
+  # --------------------------------------------------------------------------
+  reproducibility:
+    name: Reproducibility Check
+    needs: build-release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: sudo apt-get update -qq && sudo apt-get install -y cmake build-essential openssl python3
+
+      - name: Run 1
+        run: |
+          cmake -B build/run1 -DENABLE_SECURE_BOOT=ON -DSECURE_BOOT_ENVIRONMENT=lab
+          cmake --build build/run1 --parallel
+          mkdir -p /tmp/keys-repro
+          for KEY_ID in CITADEL_BOOT_LAB_v1 CITADEL_LSK_LAB_v1 \
+                        CITADEL_KSK_LAB_v1 CITADEL_MSK_LAB_v1; do
+            openssl req -x509 -newkey rsa:2048 -sha256 \
+              -keyout /tmp/keys-repro/${KEY_ID}.pem \
+              -out    /tmp/keys-repro/${KEY_ID}.crt \
+              -days 1 -nodes -subj "/CN=${KEY_ID}"
+          done
+          ARTIFACTS=$(find build/run1 -name "*.efi" -o -name "BootGate" \
+                          -o -name "vmlinuz*" -o -name "boot.json" | sort)
+          python3 tools/sign_artifacts.py --environment lab \
+            --key-dir /tmp/keys-repro --artifacts $ARTIFACTS \
+            --manifest-out build/run1/manifest.json --signer "repro-run1"
+
+      - name: Run 2 (same source, same keys)
+        run: |
+          cmake -B build/run2 -DENABLE_SECURE_BOOT=ON -DSECURE_BOOT_ENVIRONMENT=lab
+          cmake --build build/run2 --parallel
+          # Reuse same keys from run1 for deterministic comparison
+          ARTIFACTS=$(find build/run2 -name "*.efi" -o -name "BootGate" \
+                          -o -name "vmlinuz*" -o -name "boot.json" | sort)
+          python3 tools/sign_artifacts.py --environment lab \
+            --key-dir /tmp/keys-repro --artifacts $ARTIFACTS \
+            --manifest-out build/run2/manifest.json --signer "repro-run2"
+
+      - name: Compare manifests
+        run: |
+          python3 tools/check_reproducibility.py \
+            --manifest-a build/run1/manifest.json \
+            --manifest-b build/run2/manifest.json \
+            --json-out build/reproducibility-report.json
+
+      - name: Upload reproducibility report
+        uses: actions/upload-artifact@v4
+        with:
+          name: reproducibility-report
+          path: build/reproducibility-report.json
+
+  # --------------------------------------------------------------------------
+  # 4. Validate canonical boot log (if present)
+  # --------------------------------------------------------------------------
+  validate-boot-log:
+    name: Validate Boot Log Markers
+    needs: sign-and-verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check golden log exists
+        id: check
+        run: |
+          test -f logs/SECURE_BOOT_CANONICAL_LOG_POSITIVE.txt && \
+            echo "exists=true" >> $GITHUB_OUTPUT || \
+            echo "exists=false" >> $GITHUB_OUTPUT
+
+      - name: Validate canonical log
+        if: steps.check.outputs.exists == 'true'
+        run: |
+          python3 tools/parse_boot_log.py \
+            --log logs/SECURE_BOOT_CANONICAL_LOG_POSITIVE.txt \
+            --json-out build/boot-log-report.json
+
+  # --------------------------------------------------------------------------
+  # 5. Release gate — all jobs must pass
+  # --------------------------------------------------------------------------
+  release-gate:
+    name: "🔒 Secure Boot Release Gate"
+    needs: [build-release, sign-and-verify, reproducibility, validate-boot-log]
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Evaluate gate
+        run: |
+          STATUS_BUILD="${{ needs.build-release.result }}"
+          STATUS_SIGN="${{ needs.sign-and-verify.result }}"
+          STATUS_REPRO="${{ needs.reproducibility.result }}"
+
+          echo "build-release:    $STATUS_BUILD"
+          echo "sign-and-verify:  $STATUS_SIGN"
+          echo "reproducibility:  $STATUS_REPRO"
+
+          if [[ "$STATUS_BUILD" != "success" ||
+                "$STATUS_SIGN"  != "success" ||
+                "$STATUS_REPRO" != "success" ]]; then
+            echo ""
+            echo "❌ Secure Boot release gate FAILED."
+            echo "   Release tag ${{ needs.build-release.outputs.tag }} is BLOCKED."
+            exit 1
+          fi
+
+          echo ""
+          echo "✅ Secure Boot release gate PASSED."
+          echo "   Release tag ${{ needs.build-release.outputs.tag }} may proceed."

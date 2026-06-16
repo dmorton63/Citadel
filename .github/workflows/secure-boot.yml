@@ -1,0 +1,190 @@
+name: Secure Boot Profile (Lab)
+
+# Runs on every push and pull-request.
+# Builds, signs, verifies, and publishes a signature manifest
+# for all Secure Boot artifacts using lab keys.
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: ["**"]
+  workflow_dispatch:
+
+env:
+  SB_ENV: lab
+  BUILD_DIR: build
+  KEY_DIR: /tmp/citadel-lab-keys
+
+jobs:
+  # --------------------------------------------------------------------------
+  # 1. Build all Secure Boot artifacts
+  # --------------------------------------------------------------------------
+  build-artifacts:
+    name: Build Secure Boot Artifacts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y cmake build-essential openssl python3
+
+      - name: Configure (Secure Boot profile)
+        run: |
+          cmake -B $BUILD_DIR \
+            -DENABLE_SECURE_BOOT=ON \
+            -DSECURE_BOOT_ENVIRONMENT=lab \
+            -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build $BUILD_DIR --parallel
+
+      - name: Upload raw artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: sb-raw-artifacts
+          path: |
+            ${{ env.BUILD_DIR }}/limine/Limine.efi
+            ${{ env.BUILD_DIR }}/BootGate/BootGate
+            ${{ env.BUILD_DIR }}/kernel/vmlinuz*
+            ${{ env.BUILD_DIR }}/boot.json
+            ${{ env.BUILD_DIR }}/QFileSystem/*.ko
+            ${{ env.BUILD_DIR }}/QNetwork/*.ko
+            ${{ env.BUILD_DIR }}/QGraphics/*.ko
+          retention-days: 14
+
+  # --------------------------------------------------------------------------
+  # 2. Generate lab keys and sign all artifacts
+  # --------------------------------------------------------------------------
+  sign-artifacts:
+    name: Sign Artifacts (Lab Keys)
+    needs: build-artifacts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Restore raw artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: sb-raw-artifacts
+          path: ${{ env.BUILD_DIR }}
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y openssl python3
+
+      - name: Generate ephemeral lab keys
+        # Lab keys are disposable/per-build; generate fresh each CI run.
+        # The public certs are kept for verification; private keys are
+        # discarded after signing (never uploaded as artifacts).
+        run: |
+          mkdir -p $KEY_DIR
+
+          for KEY_ID in \
+            CITADEL_BOOT_LAB_v1 \
+            CITADEL_LSK_LAB_v1  \
+            CITADEL_KSK_LAB_v1  \
+            CITADEL_MSK_LAB_v1; do
+
+            openssl req -x509 -newkey rsa:2048 -sha256 \
+              -keyout $KEY_DIR/${KEY_ID}.pem \
+              -out    $KEY_DIR/${KEY_ID}.crt \
+              -days 1 -nodes \
+              -subj "/CN=Citadel-${KEY_ID}/O=CitadelOS/C=US"
+
+          done
+          echo "Lab keys generated."
+
+      - name: Sign artifacts
+        run: |
+          # Collect artifacts into a list
+          ARTIFACTS=$(find $BUILD_DIR -name "Limine.efi" -o -name "BootGate" \
+                          -o -name "vmlinuz*" -o -name "boot.json" \
+                          -o -name "*.ko" | sort)
+
+          python3 tools/sign_artifacts.py \
+            --environment lab \
+            --key-dir $KEY_DIR \
+            --artifacts $ARTIFACTS \
+            --signer "ci@citadel-lab" \
+            --manifest-out $BUILD_DIR/secure-boot-manifest-lab.json
+
+      - name: Verify signatures (build-time check)
+        run: |
+          python3 tools/verify_signatures.py \
+            --environment lab \
+            --key-dir $KEY_DIR \
+            --manifest $BUILD_DIR/secure-boot-manifest-lab.json \
+            --strict
+
+      - name: Upload signed artifacts and manifest
+        uses: actions/upload-artifact@v4
+        with:
+          name: sb-signed-artifacts
+          path: |
+            ${{ env.BUILD_DIR }}/**/*.sig
+            ${{ env.BUILD_DIR }}/secure-boot-manifest-lab.json
+          retention-days: 30
+
+      - name: Upload key certs only (no private keys)
+        uses: actions/upload-artifact@v4
+        with:
+          name: sb-lab-certs
+          path: /tmp/citadel-lab-keys/*.crt
+          retention-days: 30
+
+  # --------------------------------------------------------------------------
+  # 3. Parse and validate boot log (if a reference log exists)
+  # --------------------------------------------------------------------------
+  validate-boot-log:
+    name: Validate Boot Log Markers
+    needs: sign-artifacts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check for canonical positive log
+        id: check_log
+        run: |
+          if [ -f logs/SECURE_BOOT_CANONICAL_LOG_POSITIVE.txt ]; then
+            echo "log_exists=true" >> $GITHUB_OUTPUT
+          else
+            echo "log_exists=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Validate canonical boot log
+        if: steps.check_log.outputs.log_exists == 'true'
+        run: |
+          python3 tools/parse_boot_log.py \
+            --log logs/SECURE_BOOT_CANONICAL_LOG_POSITIVE.txt \
+            --verbose \
+            --json-out build/boot-log-report.json
+
+      - name: Upload boot log report
+        if: steps.check_log.outputs.log_exists == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: boot-log-report
+          path: build/boot-log-report.json
+          retention-days: 30
+
+  # --------------------------------------------------------------------------
+  # 4. Summary job: gate on all prior checks
+  # --------------------------------------------------------------------------
+  secure-boot-gate:
+    name: Secure Boot Gate
+    needs: [build-artifacts, sign-artifacts, validate-boot-log]
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Check all jobs passed
+        run: |
+          if [[ "${{ needs.build-artifacts.result }}"   != "success" ||
+                "${{ needs.sign-artifacts.result }}"    != "success" ]]; then
+            echo "Secure Boot gate FAILED."
+            exit 1
+          fi
+          echo "Secure Boot gate PASSED."

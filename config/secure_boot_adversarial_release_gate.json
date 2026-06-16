@@ -1,0 +1,12 @@
+{
+  "schema_version": "1.0",
+  "required_reports": [
+    "replay",
+    "chain_confusion",
+    "fault_injection",
+    "rollback_safety",
+    "soak_cycle"
+  ],
+  "require_all_pass": true,
+  "require_certificate_signoff": true
+}

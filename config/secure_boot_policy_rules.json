@@ -1,0 +1,13 @@
+{
+  "schema_version": "1.0",
+  "rules": {
+    "require_secure_boot_enabled": true,
+    "require_signed_boot_artifacts": true,
+    "require_dual_control_for_production_signing": true,
+    "require_provenance_chain": true,
+    "require_revocation_list_fresh": true,
+    "max_revocation_list_age_hours": 168,
+    "block_release_on_nonconformance": true,
+    "require_policy_version_declaration": true
+  }
+}

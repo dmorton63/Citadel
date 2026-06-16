@@ -93,6 +93,214 @@ namespace QK::Boot::Security
             return s ? static_cast<QC::usize>(QC::String::strlen(s)) : 0;
         }
 
+        struct RsaBigInt33
+        {
+            QC::u64 limbs[33]{};
+        };
+
+        static void RsaZero(RsaBigInt33 &value)
+        {
+            QC::String::memset(value.limbs, 0, sizeof(value.limbs));
+        }
+
+        static void RsaLoadBe256(RsaBigInt33 &outValue, const QC::u8 bytes[256])
+        {
+            RsaZero(outValue);
+            if (!bytes)
+                return;
+
+            for (QC::usize limbIndex = 0; limbIndex < 32; ++limbIndex)
+            {
+                const QC::usize byteBase = 256 - ((limbIndex + 1) * 8);
+                QC::u64 limb = 0;
+                for (QC::usize byteIndex = 0; byteIndex < 8; ++byteIndex)
+                    limb = (limb << 8) | static_cast<QC::u64>(bytes[byteBase + byteIndex]);
+                outValue.limbs[limbIndex] = limb;
+            }
+        }
+
+        static void RsaStoreBe256(QC::u8 outBytes[256], const RsaBigInt33 &value)
+        {
+            if (!outBytes)
+                return;
+
+            for (QC::usize limbIndex = 0; limbIndex < 32; ++limbIndex)
+            {
+                const QC::u64 limb = value.limbs[31 - limbIndex];
+                const QC::usize byteBase = limbIndex * 8;
+                for (QC::usize byteIndex = 0; byteIndex < 8; ++byteIndex)
+                {
+                    const QC::usize shift = (7 - byteIndex) * 8;
+                    outBytes[byteBase + byteIndex] = static_cast<QC::u8>((limb >> shift) & 0xFFu);
+                }
+            }
+        }
+
+        static int RsaCompare(const RsaBigInt33 &left, const RsaBigInt33 &right)
+        {
+            for (QC::usize i = 33; i > 0; --i)
+            {
+                const QC::usize idx = i - 1;
+                if (left.limbs[idx] < right.limbs[idx])
+                    return -1;
+                if (left.limbs[idx] > right.limbs[idx])
+                    return 1;
+            }
+            return 0;
+        }
+
+        static void RsaSubtract(RsaBigInt33 &inOut, const RsaBigInt33 &subtrahend)
+        {
+            QC::u64 borrow = 0;
+            for (QC::usize i = 0; i < 33; ++i)
+            {
+                const QC::u64 rhs = subtrahend.limbs[i] + borrow;
+                const QC::u64 lhs = inOut.limbs[i];
+                inOut.limbs[i] = lhs - rhs;
+                borrow = (lhs < rhs) ? 1 : 0;
+            }
+        }
+
+        static void RsaAdd(RsaBigInt33 &outValue, const RsaBigInt33 &left, const RsaBigInt33 &right)
+        {
+            unsigned __int128 carry = 0;
+            for (QC::usize i = 0; i < 33; ++i)
+            {
+                const unsigned __int128 sum = static_cast<unsigned __int128>(left.limbs[i]) +
+                                              static_cast<unsigned __int128>(right.limbs[i]) + carry;
+                outValue.limbs[i] = static_cast<QC::u64>(sum);
+                carry = sum >> 64;
+            }
+        }
+
+        static void RsaShiftLeft1(RsaBigInt33 &outValue, const RsaBigInt33 &input)
+        {
+            QC::u64 carry = 0;
+            for (QC::usize i = 0; i < 33; ++i)
+            {
+                const QC::u64 nextCarry = (input.limbs[i] >> 63) & 1u;
+                outValue.limbs[i] = (input.limbs[i] << 1) | carry;
+                carry = nextCarry;
+            }
+        }
+
+        static void RsaModAdd(RsaBigInt33 &inOut, const RsaBigInt33 &addend, const RsaBigInt33 &modulus)
+        {
+            RsaBigInt33 sum{};
+            RsaAdd(sum, inOut, addend);
+            if (RsaCompare(sum, modulus) >= 0)
+                RsaSubtract(sum, modulus);
+            inOut = sum;
+        }
+
+        static void RsaModDouble(RsaBigInt33 &inOut, const RsaBigInt33 &modulus)
+        {
+            RsaBigInt33 doubled{};
+            RsaShiftLeft1(doubled, inOut);
+            if (RsaCompare(doubled, modulus) >= 0)
+                RsaSubtract(doubled, modulus);
+            inOut = doubled;
+        }
+
+        static bool RsaGetBit(const RsaBigInt33 &value, QC::usize bitIndex)
+        {
+            const QC::usize limbIndex = bitIndex / 64;
+            const QC::usize bitOffset = bitIndex % 64;
+            if (limbIndex >= 32)
+                return false;
+            return ((value.limbs[limbIndex] >> bitOffset) & 1u) != 0;
+        }
+
+        static void RsaModMultiply(RsaBigInt33 &outValue,
+                                   const RsaBigInt33 &left,
+                                   const RsaBigInt33 &right,
+                                   const RsaBigInt33 &modulus)
+        {
+            RsaBigInt33 result{};
+            RsaZero(result);
+            RsaBigInt33 addend = left;
+
+            for (QC::usize bit = 0; bit < 2048; ++bit)
+            {
+                if (RsaGetBit(right, bit))
+                    RsaModAdd(result, addend, modulus);
+                RsaModDouble(addend, modulus);
+            }
+
+            outValue = result;
+        }
+
+        static bool VerifyRsassaPkcs1V15Sha256Software(const QC::u8 modulusBytes[256],
+                                                       const QC::u8 digest[32],
+                                                       const QC::u8 signature[256])
+        {
+            if (!modulusBytes || !digest || !signature)
+                return false;
+
+            static constexpr QC::u8 kSha256DigestInfoPrefix[] = {
+                0x30, 0x31, 0x30, 0x0D, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01,
+                0x65, 0x03, 0x04, 0x02, 0x01, 0x05, 0x00, 0x04, 0x20};
+
+            RsaBigInt33 modulus{};
+            RsaBigInt33 sig{};
+            RsaLoadBe256(modulus, modulusBytes);
+            RsaLoadBe256(sig, signature);
+            if (RsaCompare(sig, modulus) >= 0)
+                return false;
+
+            RsaBigInt33 em = sig;
+            for (QC::usize i = 0; i < 16; ++i)
+            {
+                RsaBigInt33 squared{};
+                RsaModMultiply(squared, em, em, modulus);
+                em = squared;
+            }
+
+            RsaBigInt33 decoded{};
+            RsaModMultiply(decoded, em, sig, modulus);
+
+            QC::u8 encoded[256]{};
+            RsaStoreBe256(encoded, decoded);
+
+            const QC::usize digestInfoLen = sizeof(kSha256DigestInfoPrefix) + 32;
+            if (encoded[0] != 0x00 || encoded[1] != 0x01)
+                return false;
+
+            QC::usize separator = 2;
+            while (separator < 256 && encoded[separator] == 0xFF)
+                ++separator;
+            if (separator < 10 || separator >= 256 || encoded[separator] != 0x00)
+                return false;
+            ++separator;
+
+            if (separator + digestInfoLen != 256)
+                return false;
+            if (QC::String::memcmp(encoded + separator, kSha256DigestInfoPrefix, sizeof(kSha256DigestInfoPrefix)) != 0)
+                return false;
+            if (QC::String::memcmp(encoded + separator + sizeof(kSha256DigestInfoPrefix), digest, 32) != 0)
+                return false;
+
+            return true;
+        }
+
+        static bool VerifySignatureWithFallback(const QC::u8 modulus[256],
+                                                const QC::u8 digest[32],
+                                                const QC::u8 signature[256],
+                                                FLogFn Log,
+                                                const char *label)
+        {
+            if (QK::Boot::Tpm::IsReady())
+                return QK::Boot::Tpm::VerifyRsa2048RsassaSha256Digest(modulus, digest, signature, Log);
+
+            if (Log)
+            {
+                Log(label ? label : "BootSig");
+                Log(": TPM not ready; using software RSA verification\r\n");
+            }
+
+            return VerifyRsassaPkcs1V15Sha256Software(modulus, digest, signature);
+        }
+
         static void MeasureDigest(FLogFn Log, QC::u32 Pcr, const char *Label, const QC::u8 Digest[32])
         {
             if (!QK::Boot::Tpm::IsReady())
@@ -1217,7 +1425,7 @@ namespace QK::Boot::Security
 
             QC::u8 digest[32];
             Sha256(buf, len, digest);
-            const bool ok = QK::Boot::Tpm::VerifyRsa2048RsassaSha256Digest(kBootJsonRsa2048Modulus, digest, sigBuf, Log);
+            const bool ok = VerifySignatureWithFallback(kBootJsonRsa2048Modulus, digest, sigBuf, Log, "DesktopSig");
 
             operator delete[](buf);
             operator delete[](sigBuf);
@@ -1422,20 +1630,6 @@ namespace QK::Boot::Security
             return false;
         }
 
-        if (!QK::Boot::Tpm::IsReady())
-        {
-            operator delete[](bootBuf);
-            operator delete[](sigBuf);
-            if (!kProductionMode)
-            {
-                LogStr(Log, "BootSig: TPM not ready; skipping BOOT.SIG verification (dev mode)\r\n");
-                return true;
-            }
-
-            LogStr(Log, "BootSig: TPM not ready; refusing (production mode)\r\n");
-            return false;
-        }
-
         QC::u8 digest[32];
         Sha256(bootBuf, bootLen, digest);
 
@@ -1449,7 +1643,7 @@ namespace QK::Boot::Security
             MeasureDigest(Log, 7, "BOOT.SIG", sigDigest);
         }
 
-        const bool ok = QK::Boot::Tpm::VerifyRsa2048RsassaSha256Digest(kBootJsonRsa2048Modulus, digest, sigBuf, Log);
+        const bool ok = VerifySignatureWithFallback(kBootJsonRsa2048Modulus, digest, sigBuf, Log, "BootSig");
 
         operator delete[](bootBuf);
         operator delete[](sigBuf);
@@ -1501,20 +1695,6 @@ namespace QK::Boot::Security
             return false;
         }
 
-        if (!QK::Boot::Tpm::IsReady())
-        {
-            operator delete[](sysBuf);
-            operator delete[](sysSigBuf);
-            if (!kProductionMode)
-            {
-                LogStr(Log, "BootSig: TPM not ready; skipping SYSCFG.SIG verification (dev mode)\r\n");
-                return true;
-            }
-
-            LogStr(Log, "BootSig: TPM not ready; refusing (production mode)\r\n");
-            return false;
-        }
-
         QC::u8 sysDigest[32];
         Sha256(sysBuf, sysLen, sysDigest);
         MeasureDigest(Log, 7, "SYSCFG.JSN", sysDigest);
@@ -1525,7 +1705,7 @@ namespace QK::Boot::Security
             MeasureDigest(Log, 7, "SYSCFG.SIG", sigDigest);
         }
 
-        const bool sysOk = QK::Boot::Tpm::VerifyRsa2048RsassaSha256Digest(kBootJsonRsa2048Modulus, sysDigest, sysSigBuf, Log);
+        const bool sysOk = VerifySignatureWithFallback(kBootJsonRsa2048Modulus, sysDigest, sysSigBuf, Log, "BootSig");
 
         operator delete[](sysBuf);
         operator delete[](sysSigBuf);
@@ -1561,18 +1741,6 @@ namespace QK::Boot::Security
             LogStr(Log, "DesktopSig: enforcement=on\r\n");
         else
             LogStr(Log, "DesktopSig: enforcement=off\r\n");
-
-        if (!QK::Boot::Tpm::IsReady())
-        {
-            if (!enforce)
-            {
-                LogStr(Log, "DesktopSig: TPM not ready; skipping verification (dev mode)\r\n");
-                return true;
-            }
-
-            LogStr(Log, "DesktopSig: TPM not ready; refusing (production mode)\r\n");
-            return false;
-        }
 
         bool sawDesktop = false;
         for (QC::usize i = 0; i < (sizeof(kDesktopCandidates) / sizeof(kDesktopCandidates[0])); ++i)
@@ -1617,7 +1785,7 @@ namespace QK::Boot::Security
             // Measurement: record the chosen desktop definition into PCR7 for attestation.
             MeasureDigest(Log, 7, "DESKTOP.CML", digest);
 
-            const bool ok = QK::Boot::Tpm::VerifyRsa2048RsassaSha256Digest(kBootJsonRsa2048Modulus, digest, sigBuf, Log);
+            const bool ok = VerifySignatureWithFallback(kBootJsonRsa2048Modulus, digest, sigBuf, Log, "DesktopSig");
 
             // Keep desktopBuf around until we finish verifying referenced imports.
             operator delete[](sigBuf);

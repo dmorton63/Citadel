@@ -1,0 +1,64 @@
+name: secure-boot-signing-controls
+
+"on":
+  pull_request:
+    branches: [ "main" ]
+  workflow_dispatch: {}
+
+jobs:
+  signing-controls:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Validate signer host baseline policy
+        run: |
+          python3 tools/check_signer_environment.py \
+            --policy signing/signer_host_baseline.json \
+            --json-out build/signing/signer_env_report.json
+
+      - name: Validate dual-control workflow fixture
+        run: |
+          python3 tools/dual_control_approve.py \
+            --requester eng-lead@citadel.local \
+            --approver security-lead@citadel.local \
+            --roster signing/production_approver_roster.json \
+            --out build/signing/dual_control_token.json
+
+      - name: Verify signer image digest pinning
+        run: |
+          if grep -v '^#' signing/signer-images.lock | grep -q '@'; then
+            echo "[FAIL] lock file must use '=' and digest-only format, not image@digest";
+            exit 1;
+          fi
+          if grep -v '^#' signing/signer-images.lock | grep -v 'sha256:' >/dev/null; then
+            echo "[FAIL] all signer images must be pinned with sha256 digest";
+            exit 1;
+          fi
+
+      - name: Verify provenance chain fixture
+        run: |
+          cat > build/signing/provenance_fixture.json <<'JSON'
+          {
+            "artifacts": [
+              {
+                "name": "bootgate.bin",
+                "build_id": "ci-123",
+                "git_sha": "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+                "manifest_id": "manifest-v1",
+                "signing_key_id": "ksk-prod-2026q1",
+                "hash_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "signature_file": "bootgate.bin.sig"
+              }
+            ]
+          }
+          JSON
+          python3 tools/verify_provenance_chain.py \
+            --manifest build/signing/provenance_fixture.json \
+            --json-out build/signing/provenance_report.json

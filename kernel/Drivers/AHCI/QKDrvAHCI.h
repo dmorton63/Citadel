@@ -46,11 +46,11 @@ namespace QKDrv
 
         // Partition and format the first detected blank AHCI SATA disk as FAT32.
         // Safety: refuses to format if the disk already appears partitioned/formatted.
-        QC::Status formatSystemVolumeFAT32();
+        QC::Status formatSystemVolumeFAT32(bool force = false);
 
         // Partition and format the selected detected AHCI disk as FAT32.
         // The deviceIndex matches the AHCI portion of sysdisks numbering.
-        QC::Status formatDetectedDeviceFAT32(QC::usize deviceIndex);
+        QC::Status formatDetectedDeviceFAT32(QC::usize deviceIndex, bool force = false);
 
         // Probe AHCI SATA ports for a FAT32 system volume and register it at /system.
         // Returns true if a candidate volume was registered.

@@ -1795,6 +1795,21 @@ namespace QD
     {
         initializeDocument(outResult, documentId, "CMMS runtime rows", DesktopDocumentFormat::Unknown);
 
+        struct RuntimeControlState
+        {
+            char rowId[128]{};
+            QC::i32 x = 0;
+            QC::i32 y = 0;
+            QC::u32 width = 0;
+            QC::u32 height = 0;
+            QC::i32 zIndex = 0;
+            bool visible = true;
+            bool enabled = true;
+            char styleClass[96]{};
+            char text[192]{};
+            char iconPath[192]{};
+        };
+
         const QCQL::Cell layoutKeyCell = makeTextCell(documentId);
         QCQL::Row layoutRow{};
         const QCQL::Status layoutSt = QCQL::Engine::instance().selectRowByPrimaryKeyByName(database,
@@ -1819,6 +1834,64 @@ namespace QD
         }
 
         QC::Vector<RuntimeControlRecord> runtimeControls;
+        QC::Vector<RuntimeControlState> runtimeStates;
+
+        for (QC::usize pageIndex = 0; pageIndex < runtimeTable->pages.size(); ++pageIndex)
+        {
+            QCQL::Page page{};
+            if (QCQL::Engine::instance().loadPage(database, runtimeTable->pages[pageIndex], page) != QCQL::Status::Success)
+                continue;
+
+            for (QC::usize rowIndex = 0; rowIndex < page.rowOffsets.size(); ++rowIndex)
+            {
+                QCQL::Row row{};
+                if (QCQL::Engine::instance().readRow(database, page.header.pageId, page.rowOffsets[rowIndex], row) != QCQL::Status::Success)
+                    continue;
+                if (row.tombstone || row.cells.size() < 13)
+                    continue;
+
+                RuntimeControlState state{};
+                if (!copyCellText(row.cells[0], state.rowId, sizeof(state.rowId)) || !state.rowId[0])
+                    continue;
+
+                char textValue[192]{};
+                QC::i32 signedValue = 0;
+                QC::u32 unsignedValue = 0;
+                bool boolValue = true;
+
+                if (copyCellText(row.cells[3], textValue, sizeof(textValue)) && tryParseI32(textValue, signedValue))
+                    state.x = signedValue;
+                if (copyCellText(row.cells[4], textValue, sizeof(textValue)) && tryParseI32(textValue, signedValue))
+                    state.y = signedValue;
+                if (parseUnsignedTextCell(row.cells[5], unsignedValue))
+                    state.width = unsignedValue;
+                if (parseUnsignedTextCell(row.cells[6], unsignedValue))
+                    state.height = unsignedValue;
+                if (copyCellText(row.cells[7], textValue, sizeof(textValue)) && tryParseI32(textValue, signedValue))
+                    state.zIndex = signedValue;
+                if (parseBoolTextCell(row.cells[8], boolValue))
+                    state.visible = boolValue;
+                if (parseBoolTextCell(row.cells[9], boolValue))
+                    state.enabled = boolValue;
+                (void)copyCellText(row.cells[10], state.styleClass, sizeof(state.styleClass));
+                (void)copyCellText(row.cells[11], state.text, sizeof(state.text));
+                (void)copyCellText(row.cells[12], state.iconPath, sizeof(state.iconPath));
+
+                runtimeStates.push_back(state);
+            }
+        }
+
+        auto findRuntimeState = [&](const char *rowId) -> const RuntimeControlState *
+        {
+            if (!rowId || !*rowId)
+                return nullptr;
+            for (QC::usize i = 0; i < runtimeStates.size(); ++i)
+            {
+                if (equalsIgnoreCaseAscii(runtimeStates[i].rowId, rowId))
+                    return &runtimeStates[i];
+            }
+            return nullptr;
+        };
 
         for (QC::usize pageIndex = 0; pageIndex < controlTable->pages.size(); ++pageIndex)
         {
@@ -1847,43 +1920,24 @@ namespace QD
                 copyText(record.control.id, sizeof(record.control.id), controlKey[0] ? controlKey : record.rowId);
                 copyText(record.control.name, sizeof(record.control.name), controlKey[0] ? controlKey : controlType);
 
-                QCQL::Row runtimeRow{};
-                const QCQL::Cell runtimeKeyCell = makeTextCell(record.rowId);
-                const QCQL::Status runtimeSt = QCQL::Engine::instance().selectRowByPrimaryKeyByName(database,
-                                                                                                      CMMS_DESKTOP_CONTROL_RUNTIME_TABLE,
-                                                                                                      runtimeKeyCell.bytes,
-                                                                                                      runtimeRow);
-                if (runtimeSt != QCQL::Status::Success || runtimeRow.tombstone || runtimeRow.cells.size() < 13)
+                const RuntimeControlState *runtimeState = findRuntimeState(record.rowId);
+                if (!runtimeState)
                     continue;
 
-                char textValue[192]{};
-                char styleClass[96]{};
-                char iconPath[192]{};
-                QC::i32 signedValue = 0;
-                QC::u32 unsignedValue = 0;
-                bool boolValue = true;
-
-                if (copyCellText(runtimeRow.cells[3], textValue, sizeof(textValue)) && tryParseI32(textValue, signedValue))
-                    record.control.layout.x = signedValue;
-                if (copyCellText(runtimeRow.cells[4], textValue, sizeof(textValue)) && tryParseI32(textValue, signedValue))
-                    record.control.layout.y = signedValue;
-                if (parseUnsignedTextCell(runtimeRow.cells[5], unsignedValue))
-                    record.control.layout.width = unsignedValue;
-                if (parseUnsignedTextCell(runtimeRow.cells[6], unsignedValue))
-                    record.control.layout.height = unsignedValue;
-                if (copyCellText(runtimeRow.cells[7], textValue, sizeof(textValue)) && tryParseI32(textValue, signedValue))
-                    record.control.zIndex = signedValue;
-                if (parseBoolTextCell(runtimeRow.cells[8], boolValue))
-                    record.control.visible = boolValue;
-                if (parseBoolTextCell(runtimeRow.cells[9], boolValue))
-                    record.control.enabled = boolValue;
-                if (copyCellText(runtimeRow.cells[10], styleClass, sizeof(styleClass)))
-                    copyText(record.control.styleClass, sizeof(record.control.styleClass), styleClass);
-                if (copyCellText(runtimeRow.cells[11], textValue, sizeof(textValue)))
-                    copyText(record.control.text, sizeof(record.control.text), textValue);
-                if (copyCellText(runtimeRow.cells[12], iconPath, sizeof(iconPath)))
+                record.control.layout.x = runtimeState->x;
+                record.control.layout.y = runtimeState->y;
+                record.control.layout.width = runtimeState->width;
+                record.control.layout.height = runtimeState->height;
+                record.control.zIndex = runtimeState->zIndex;
+                record.control.visible = runtimeState->visible;
+                record.control.enabled = runtimeState->enabled;
+                if (runtimeState->styleClass[0])
+                    copyText(record.control.styleClass, sizeof(record.control.styleClass), runtimeState->styleClass);
+                if (runtimeState->text[0])
+                    copyText(record.control.text, sizeof(record.control.text), runtimeState->text);
+                if (runtimeState->iconPath[0])
                 {
-                    copyText(record.control.iconRef.path, sizeof(record.control.iconRef.path), iconPath);
+                    copyText(record.control.iconRef.path, sizeof(record.control.iconRef.path), runtimeState->iconPath);
                     record.control.iconRef.kind = DesktopAssetKind::Icon;
                 }
 

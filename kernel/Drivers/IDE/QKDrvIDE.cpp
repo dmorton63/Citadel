@@ -856,6 +856,50 @@ namespace
         return dev->writeSector(0, mbr);
     }
 
+    static bool chooseFat32Layout(QC::u32 partSectors, QC::u8 &outSectorsPerCluster, QC::u32 &outSectorsPerFat)
+    {
+        constexpr QC::u16 kReserved = 32;
+        constexpr QC::u8 kFatCount = 2;
+        constexpr QC::u32 kMinFat32Clusters = 65525;
+        constexpr QC::u32 kMaxFat32Clusters = 0x0FFFFFF5U;
+        const QC::u8 candidates[] = {1, 2, 4, 8, 16, 32, 64};
+
+        for (QC::u8 sectorsPerCluster : candidates)
+        {
+            QC::u32 sectorsPerFat = 1;
+            for (int iter = 0; iter < 8; ++iter)
+            {
+                const QC::u32 fatArea = static_cast<QC::u32>(kFatCount) * sectorsPerFat;
+                if (partSectors <= static_cast<QC::u32>(kReserved) + fatArea)
+                    return false;
+
+                const QC::u32 dataSectors = partSectors - static_cast<QC::u32>(kReserved) - fatArea;
+                const QC::u32 totalClusters = dataSectors / sectorsPerCluster;
+                const QC::u32 fatEntries = totalClusters + 2;
+                const QC::u32 fatBytes = fatEntries * 4;
+                const QC::u32 newSpf = (fatBytes + 511U) / 512U;
+                if (newSpf == sectorsPerFat)
+                    break;
+                sectorsPerFat = (newSpf == 0) ? 1 : newSpf;
+            }
+
+            const QC::u32 fatArea = static_cast<QC::u32>(kFatCount) * sectorsPerFat;
+            if (partSectors <= static_cast<QC::u32>(kReserved) + fatArea)
+                continue;
+
+            const QC::u32 dataSectors = partSectors - static_cast<QC::u32>(kReserved) - fatArea;
+            const QC::u32 totalClusters = dataSectors / sectorsPerCluster;
+            if (totalClusters < kMinFat32Clusters || totalClusters > kMaxFat32Clusters)
+                continue;
+
+            outSectorsPerCluster = sectorsPerCluster;
+            outSectorsPerFat = sectorsPerFat;
+            return true;
+        }
+
+        return false;
+    }
+
     static QC::Status formatFat32At(QFS::BlockDevice *dev, QC::u32 partStartLba, QC::u32 partSectors)
     {
         if (!dev)
@@ -876,32 +920,10 @@ namespace
         constexpr QC::u16 kFsInfoSector = 1;
         constexpr QC::u16 kBackupBoot = 6;
 
-        // Pick a reasonable default (4KiB clusters), but clamp for very small images.
-        QC::u8 sectorsPerCluster = 8;
-        if (partSectors < 131072)
-            sectorsPerCluster = 4;
-        if (partSectors < 65536)
-            sectorsPerCluster = 2;
-        if (partSectors < 32768)
-            sectorsPerCluster = 1;
-
-        // Compute sectors per FAT iteratively.
-        QC::u32 sectorsPerFat = 1;
-        for (int iter = 0; iter < 8; ++iter)
-        {
-            const QC::u32 fatArea = static_cast<QC::u32>(kFatCount) * sectorsPerFat;
-            if (partSectors <= static_cast<QC::u32>(kReserved) + fatArea)
-                return QC::Status::InvalidParam;
-
-            const QC::u32 dataSectors = partSectors - static_cast<QC::u32>(kReserved) - fatArea;
-            const QC::u32 totalClusters = dataSectors / sectorsPerCluster;
-            const QC::u32 fatEntries = totalClusters + 2;
-            const QC::u32 fatBytes = fatEntries * 4;
-            const QC::u32 newSpf = (fatBytes + 511U) / 512U;
-            if (newSpf == sectorsPerFat)
-                break;
-            sectorsPerFat = (newSpf == 0) ? 1 : newSpf;
-        }
+        QC::u8 sectorsPerCluster = 0;
+        QC::u32 sectorsPerFat = 0;
+        if (!chooseFat32Layout(partSectors, sectorsPerCluster, sectorsPerFat))
+            return QC::Status::InvalidParam;
 
         const QC::u32 totalSectors = partSectors;
         const QC::u32 fatStart = static_cast<QC::u32>(kReserved);
@@ -1255,12 +1277,12 @@ namespace QKDrv
             g_systemBinding.valid = false;
         }
 
-        QC::Status formatSystemVolumeFAT32()
+        QC::Status formatSystemVolumeFAT32(bool force)
         {
             QC::Status lastError = QC::Status::NotFound;
             for (QC::usize deviceIndex = 0; deviceIndex < 4; ++deviceIndex)
             {
-                const QC::Status st = formatDetectedDeviceFAT32(deviceIndex);
+                const QC::Status st = formatDetectedDeviceFAT32(deviceIndex, force);
                 if (st == QC::Status::Success || st == QC::Status::Busy)
                     return st;
                 lastError = st;
@@ -1270,7 +1292,7 @@ namespace QKDrv
             return lastError;
         }
 
-        QC::Status formatDetectedDeviceFAT32(QC::usize deviceIndex)
+        QC::Status formatDetectedDeviceFAT32(QC::usize deviceIndex, bool force)
         {
             IdeCandidate candidate{};
             if (!resolveDetectedDeviceIndex(deviceIndex, candidate))
@@ -1299,8 +1321,15 @@ namespace QKDrv
 
             if (mbrHasPartitionTable(sector0) || looksLikeFatBootSector(sector0) || looksLikeMbr(sector0))
             {
-                QC_LOG_WARN("QKDrvIDE", "Refusing to format disk%u: device already appears partitioned/formatted", static_cast<unsigned>(deviceIndex));
-                return QC::Status::Busy;
+                if (force)
+                {
+                    QC_LOG_WARN("QKDrvIDE", "Forcing format of disk%u despite existing partition/boot signatures", static_cast<unsigned>(deviceIndex));
+                }
+                else
+                {
+                    QC_LOG_WARN("QKDrvIDE", "Refusing to format disk%u: device already appears partitioned/formatted", static_cast<unsigned>(deviceIndex));
+                    return QC::Status::Busy;
+                }
             }
 
             const QC::u64 total = dev.sectorCount();

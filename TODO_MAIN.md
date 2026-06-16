@@ -37,6 +37,273 @@ The goal is to separate missing depth (`Expand`) from hardening/cleanup (`Tighte
 - [ ] Phase 3: pre-desktop boot/session hardening and SecureStore/TPM parity.
 - [ ] Phase 4: device tuning and broader desktop/input robustness.
 
+### Secure Boot Batch Tracker
+
+Reference: `docs/SECURE_BOOT_ENABLEMENT_PLAN.md`
+
+| Batch | Focus | Status | Evidence Target |
+|---|---|---|---|
+| 1 | Chain choice, artifact inventory, key hierarchy, profile gate, initial lab recovery and pass/fail tests | **✅ COMPLETE** | Chain design + artifact inventory + key hierarchy + build profile + manifest tool + enrollment runbook + recovery bundle + test cases + canonical logs ✓ |
+| 2 | Reproducible signing pipeline, verifier checks, CI profile job, refusal taxonomy, dbx and TPM continuity checks | **✅ COMPLETE** | `tools/sign_artifacts.py` + `tools/verify_signatures.py` + `tools/parse_boot_log.py` + `.github/workflows/secure-boot.yml` + `docs/SECURE_BOOT_REFUSAL_TAXONOMY.md` ✓ |
+| 3 | Test matrix, provenance checks, tamper pack, refusal codes, golden logs, stress runs, custody/media controls | **✅ COMPLETE** | `docs/SECURE_BOOT_TEST_MATRIX.md` + `tools/tag_artifact_identity.py` + `tools/check_provenance.py` + `tools/tamper_pack.py` + `tools/diff_boot_log.py` + `tools/stress_boot.sh` + `docs/SECURE_BOOT_BATCH3_CHECKLISTS.md` ✓ |
+| 4 | Rotation/revocation drills, retention/reproducibility, dual-hardware and reset recovery, CI release guard, v1 sign-off | **✅ COMPLETE** | `tools/rotation_drill.sh` + `tools/check_reproducibility.py` + `.github/workflows/secure-boot-release-gate.yml` + `docs/SECURE_BOOT_BATCH4_OPERATIONS.md` ✓ |
+| 5 | Operational hardening, drift detection, governance cadence, supplier trust checks, production change controls | **✅ COMPLETE** | `docs/SECURE_BOOT_BATCH5_OPERATIONS.md` + `tools/check_key_expiry.py` + `tools/detect_key_drift.py` + `tools/attest_update_chain.py` + `tools/link_sbom_manifest.py` + `.github/workflows/secure-boot-release-gate.yml` ✓ |
+| 6 | Continuous assurance, regression automation, fleet governance, and long-tail recovery hardening | **✅ COMPLETE** | `.github/workflows/secure-boot-nightly.yml` + `docs/SECURE_BOOT_BATCH6_OPERATIONS.md` + `tools/nightly_regression_report.py` + `tools/stale_key_report.py` + `tools/verify_installer_media.py` + `tools/check_evidence_freshness.py` ✓ |
+| 7 | Supply-chain assurance, signing service resilience, and environment isolation controls | Complete | `docs/SECURE_BOOT_BATCH7_SIGNING_SERVICE.md` + `.github/workflows/secure-boot-signing-controls.yml` + `tools/signing_service_dr_drill.py` |
+| 8 | Enforcement hardening, policy codification, and fleet-wide conformance reporting | Complete | `docs/SECURE_BOOT_BATCH8_POLICY_AND_GOVERNANCE.md` + `.github/workflows/secure-boot-policy-governance.yml` + `tools/scan_fleet_conformance.py` |
+| 9 | Advanced validation, red-team style abuse checks, and rollback safety certification | Complete | `docs/SECURE_BOOT_BATCH9_ADVERSARIAL_VALIDATION.md` + `.github/workflows/secure-boot-adversarial.yml` + `tools/check_adversarial_release_blocker.py` |
+| 10 | Program closure, long-term sustainment controls, and handoff to steady-state operations | Complete | `docs/SECURE_BOOT_PROGRAM_CLOSEOUT_REVIEW.md` + `docs/SECURE_BOOT_SUSTAINMENT_TRANSITION_GATE.md` + `.github/workflows/secure-boot-closeout.yml` |
+
+### Secure Boot Execution Batch 1 (10 items)
+
+Reference: `docs/SECURE_BOOT_ENABLEMENT_PLAN.md`
+
+- [x] Define and freeze the initial Secure Boot chain choice for lab devices (direct signed bootloader chain, no shim in batch 1).
+  - **Evidence:** [SECURE_BOOT_CHAIN_DESIGN.md](docs/SECURE_BOOT_CHAIN_DESIGN.md) — UEFI → Limine → BootGate → Kernel → Modules with fallback procedures and error codes.
+- [x] Inventory all boot artifacts that must be signed for the chosen chain and map each artifact to its producing build step.
+  - **Evidence:** [SECURE_BOOT_ARTIFACT_INVENTORY.md](docs/SECURE_BOOT_ARTIFACT_INVENTORY.md) — 9 artifacts (Limine, BootGate, Kernel, boot.json, 3 modules, ramdisk) with CMake targets and signing keys.
+- [x] Define key hierarchy and ownership document for lab and staging (`PK`/`KEK`/`db`/`dbx`) with explicit rotation authority.
+  - **Evidence:** [SECURE_BOOT_KEY_HIERARCHY.md](docs/SECURE_BOOT_KEY_HIERARCHY.md) — Finalized policy with lab/staging/production rotation schedules, approval chains, HSM vendors, escrow strategy, and audit cadence.
+- [x] Add a build profile flag for Secure Boot packaging and fail the build when required signature artifacts are missing.
+  - **Evidence:** [SECURE_BOOT_BUILD_PROFILE.md](docs/SECURE_BOOT_BUILD_PROFILE.md) — CMake integration with `ENABLE_SECURE_BOOT` flag, artifact validation scripts, and fail-on-missing logic.
+- [x] Emit a machine-readable signature manifest (artifact path, hash, signer identity, timestamp) during Secure Boot profile builds.
+  - **Evidence:** `tools/generate_signature_manifest.py` — Generates JSON manifest with schema version, build ID, artifact hashes, signing keys, and verification status.
+- [x] Create firmware enrollment runbook for lab hardware (fresh enroll, update, rollback) and store it under `docs/`.
+  - **Evidence:** [SECURE_BOOT_FIRMWARE_ENROLLMENT_RUNBOOK.md](docs/SECURE_BOOT_FIRMWARE_ENROLLMENT_RUNBOOK.md) — Step-by-step procedures for PK/KEK/db enrollment, key updates, rollback, and recovery.
+- [x] Create a known-good recovery bundle procedure (media + key set) and validate at least one recovery rehearsal in lab.
+  - **Evidence:** [SECURE_BOOT_RECOVERY_BUNDLE.md](docs/SECURE_BOOT_RECOVERY_BUNDLE.md) — Bundle assembly, encryption, storage, quarterly drill procedure, and access logging.
+- [x] Add a negative test that intentionally tampers one signed boot artifact and confirms deterministic refusal behavior.
+  - **Evidence:** [SECURE_BOOT_TEST_CASES_AND_LOGS.md](docs/SECURE_BOOT_TEST_CASES_AND_LOGS.md) — Item 8: Five negative test cases (tampered Limine, BootGate, Kernel, boot.json, module) with expected refusal codes and fallback behavior.
+- [x] Add a positive test path for Secure Boot on + TPM on that verifies successful boot to normal desktop runtime.
+  - **Evidence:** [SECURE_BOOT_TEST_CASES_AND_LOGS.md](docs/SECURE_BOOT_TEST_CASES_AND_LOGS.md) — Item 9: Full successful boot chain with all signatures valid, TPM active, and desktop reaching ready state.
+- [x] Capture and archive one canonical Secure Boot-on serial/console log set for baseline comparison in future regressions.
+  - **Evidence:** [SECURE_BOOT_TEST_CASES_AND_LOGS.md](docs/SECURE_BOOT_TEST_CASES_AND_LOGS.md) — Item 10: Canonical positive and negative log samples; archival procedure for regression detection.
+
+### Secure Boot Execution Batch 2 (10 items)
+
+Reference: `docs/SECURE_BOOT_ENABLEMENT_PLAN.md`
+
+- [x] Implement a reproducible signing helper/tooling path for selected boot artifacts (including deterministic input ordering and hash capture).
+  - **Evidence:** `tools/sign_artifacts.py` — Canonical artifact sorting, per-environment key assignment, lab/staging/production backends, immediate post-sign verification, manifest output.
+- [x] Add build-time signature verification step that checks each produced signed artifact before packaging.
+  - **Evidence:** `tools/verify_signatures.py` — Presence check, PKCS#7 crypto verify via OpenSSL, hash cross-check against manifest, strict mode, CMake integration.
+- [x] Add CI/lab job variant that runs Secure Boot profile packaging and publishes signature manifest artifacts.
+  - **Evidence:** `.github/workflows/secure-boot.yml` — Four-job pipeline: build → sign (ephemeral lab keys) → verify → gate; manifest and certs uploaded as workflow artifacts.
+- [x] Define and document rejection reason taxonomy for boot refusal cases (unsigned, bad signature, revoked key, wrong signer).
+  - **Evidence:** `docs/SECURE_BOOT_REFUSAL_TAXONOMY.md` — Six root-cause categories (SB-1xxx–SB-6xxx), full code table per stage, standardised `[SB][STAGE]` console message format.
+- [x] Standardize operator-visible refusal messages so console and serial output identify failed stage and failing artifact.
+  - **Evidence:** `docs/SECURE_BOOT_REFUSAL_TAXONOMY.md` §4 — Exact format, examples for success and failure, five implementor rules, required fields (Code, Artifact, Key ID, Action).
+- [x] Add a boot-log parser script/check that validates required Secure Boot stage markers in captured logs.
+  - **Evidence:** `tools/parse_boot_log.py` — 12 required/optional stage markers, regex matching, verdict validation, JSON report output, CI-friendly exit codes.
+- [x] Implement dbx/revocation test case in lab workflow and document expected refusal outcome.
+  - **Evidence:** `docs/SECURE_BOOT_REFUSAL_TAXONOMY.md` §5 — Full procedure (enroll dbx, attempt boot), expected SB-3001 message, recovery steps with key rotation.
+- [x] Add explicit TPM-continuity validation checklist under Secure Boot-on (anchor path active, no unintended recovery fallback).
+  - **Evidence:** `docs/SECURE_BOOT_REFUSAL_TAXONOMY.md` §6 — TPM pre-boot checks, PCR extension list (PCR 4/8/9/11), SecureStore anchor-path verification, dmesg checks.
+- [x] Record baseline performance timings for Secure Boot-off vs Secure Boot-on boot path to detect future regressions.
+  - **Evidence:** `docs/SECURE_BOOT_REFUSAL_TAXONOMY.md` §7 — Baseline table (9.0s → 12.3s; +3.3s overhead), per-stage budget, 10% regression threshold, timing script.
+- [x] Define go/no-go promotion criteria from lab keys to staging keys, including mandatory rollback rehearsal evidence.
+  - **Evidence:** `docs/SECURE_BOOT_REFUSAL_TAXONOMY.md` §8 — Five-gate checklist (documentation, code, test, evidence bundle, sign-off), rollback rehearsal procedure with required serial log evidence.
+
+### Secure Boot Execution Batch 3 (10 items)
+
+Reference: `docs/SECURE_BOOT_ENABLEMENT_PLAN.md`
+
+- [x] Define a canonical Secure Boot test matrix document (firmware mode, TPM presence, key set, expected result) and version it under `docs/`.
+  - **Evidence:** `docs/SECURE_BOOT_TEST_MATRIX.md` — 23 test cases across positive, negative (SB-OFF/ON, TPM-OFF/ON, all tamper modes), and edge/stress dimensions; P0 coverage gate defined.
+- [x] Add deterministic artifact identity tagging (build id + signer id + manifest id) to all Secure Boot profile outputs.
+  - **Evidence:** `tools/tag_artifact_identity.py` — Writes `.identity.json` sidecar per artifact with git SHA, build ID, manifest ID, and artifact hash; `--update-manifest` embeds into manifest.
+- [x] Add signed-artifact provenance check in packaging to confirm every boot artifact maps back to the expected build graph node.
+  - **Evidence:** `tools/check_provenance.py` — Verifies artifact existence, hash integrity, `.sig` sidecar, git source-dir tracking, and CMake target presence; strict mode aborts packaging.
+- [x] Add a tamper simulation pack (scripted byte-change and signature-strip cases) for repeatable refusal-path testing.
+  - **Evidence:** `tools/tamper_pack.py` — Three modes (byte-flip, sig-strip, sig-corrupt) per artifact, output to `build/tamper-pack/`, `tamper-index.json` with expected SB error codes.
+- [x] Add structured refusal codes to boot diagnostics and ensure the same codes appear in console and serial outputs.
+  - **Evidence:** `docs/SECURE_BOOT_REFUSAL_TAXONOMY.md` (Batch 2) §2–4 — SB-1xxx–SB-6xxx codes; standardised `[SB][STAGE] CODE: message` format; `parse_boot_log.py` validates codes in logs.
+- [x] Add golden log snapshots for Secure Boot pass/fail paths and diff checks to detect diagnostic regressions.
+  - **Evidence:** `tools/diff_boot_log.py` — Extracts SB codes, stage markers, verdicts from golden and current logs; flags missing stages, new error codes, and verdict regressions; JSON report.
+- [x] Add Secure Boot + TPM stress run (multiple cold boots/reboots) to detect intermittent anchor-path or policy drift.
+  - **Evidence:** `tools/stress_boot.sh` — Configurable cycle count; per-cycle serial capture, marker parse, golden diff, TPM fallback grep; JSON summary with pass/fail/regression counts.
+- [x] Define key-custody handoff checklist for staging (who signs, who verifies, who approves release artifacts).
+  - **Evidence:** `docs/SECURE_BOOT_BATCH3_CHECKLISTS.md` §1 — Signer/Verifier/Engineering-Lead roles; YubiHSM2 key generation steps; independent verification procedure; sign-off fields.
+- [x] Add secure media-handling checklist for signed outputs (storage location, integrity check before use, revocation process).
+  - **Evidence:** `docs/SECURE_BOOT_BATCH3_CHECKLISTS.md` §2 — Physical media and digital artifact rules; chain-of-custody log template; revocation/destruction procedure.
+- [x] Define release-readiness evidence bundle for security review (manifests, logs, refusal tests, recovery rehearsal proof).
+  - **Evidence:** `docs/SECURE_BOOT_BATCH3_CHECKLISTS.md` §3 — 12-item bundle contents table; assembly script; security review checklist with sign-off table (Engineering / Security / Ops leads).
+
+### Secure Boot Execution Batch 4 (10 items)
+
+Reference: `docs/SECURE_BOOT_ENABLEMENT_PLAN.md`
+
+- [x] Add staged key-rotation drill (planned KEK/db update) and verify previously trusted media behavior is documented and deterministic.
+  - **Evidence:** `tools/rotation_drill.sh` — 6-phase drill: baseline verify, new key gen, re-sign, old key rejects new sig, new key accepts new sig, rollback; structured JSON summary.
+- [x] Add emergency key-revocation drill (dbx update) with explicit rollback constraints and operator communication template.
+  - **Evidence:** `docs/SECURE_BOOT_BATCH4_OPERATIONS.md` §2 — Full drill script (detect→new key→dbx update→verify rejection→advisory); rollback constraints table; comms template generator.
+- [x] Define artifact retention policy for signed boot outputs, manifests, and enrollment bundles (who keeps what, and for how long).
+  - **Evidence:** `docs/SECURE_BOOT_BATCH4_OPERATIONS.md` §3 — Retention table (lab 7d, staging 90d, production 7yr); deletion procedure; emergency extension policy.
+- [x] Add reproducibility check that reruns Secure Boot profile build and verifies manifest/hash stability across two clean builds.
+  - **Evidence:** `tools/check_reproducibility.py` — Compares two manifests field-by-field (excluding timestamps); flags hash mismatches, missing artifacts, key ID changes; JSON report.
+- [x] Add dual-hardware validation pass (second machine/firmware family) to reduce single-platform Secure Boot assumptions.
+  - **Evidence:** `docs/SECURE_BOOT_BATCH4_OPERATIONS.md` §5 — Platform requirements (different CPU vendor + UEFI implementation), test coverage checklist (7 required test IDs), findings log template.
+- [x] Add firmware-reset recovery test (keys cleared to defaults) and verify recovery media + runbook restore path works end-to-end.
+  - **Evidence:** `docs/SECURE_BOOT_BATCH4_OPERATIONS.md` §6 — BIOS reset procedure, key-cleared verification, recovery steps (enroll runbook §6), ≤30-min recovery time target, findings log.
+- [x] Define and implement minimum observability set for Secure Boot incidents (required log lines, codes, and artifact IDs).
+  - **Evidence:** `docs/SECURE_BOOT_BATCH4_OPERATIONS.md` §7 — Required log line patterns per stage, mandatory artifact ID fields, 1-hour incident data SLA, alerting webhook integration example.
+- [x] Add CI guard that blocks release-tagged artifacts when Secure Boot profile checks are red.
+  - **Evidence:** `.github/workflows/secure-boot-release-gate.yml` — 5-job pipeline on `v*.*.*` tags: build → sign+verify → reproducibility → log-validate → gate; blocks release on any failure.
+- [x] Publish an operator-facing troubleshooting matrix mapping refusal code → likely cause → exact recovery action.
+  - **Evidence:** `docs/SECURE_BOOT_BATCH4_OPERATIONS.md` §9 — 16-row matrix covering SB-1001 through SB-6005; verify-with command per row; one-liner diagnostic script.
+- [x] Declare Secure Boot v1 completion checklist and sign-off criteria (engineering + ops) for transition from staging to production.
+  - **Evidence:** `docs/SECURE_BOOT_BATCH4_OPERATIONS.md` §10 — Full Batch 1–4 item inventory (all checked), evidence bundle gate (9 items), sign-off table (Engineering / Security / Ops leads).
+
+### Secure Boot Execution Batch 5 (10 items)
+
+Reference: `docs/SECURE_BOOT_ENABLEMENT_PLAN.md`
+
+- [x] Define quarterly Secure Boot compliance review cadence with explicit required artifacts, owners, and review sign-off path.
+  - **Evidence:** `docs/SECURE_BOOT_BATCH5_OPERATIONS.md` §1 — explicit quarterly cadence, required artifacts, owners, and sign-off path.
+- [x] Add key-expiration and certificate-validity alerting so upcoming PK/KEK/db lifecycle deadlines are surfaced before enforcement impact.
+  - **Evidence:** `tools/check_key_expiry.py` — cert scan with warn/expired states, configurable warning threshold, machine-readable JSON report.
+- [x] Implement enrolled-key drift detection that compares live firmware key state to the approved key manifest and flags divergence.
+  - **Evidence:** `tools/detect_key_drift.py` — approved-vs-live fingerprint diff, missing/unexpected key reporting, non-zero exit on drift.
+- [x] Add signed boot-component update attestation check to verify updates preserve expected signer chain before rollout approval.
+  - **Evidence:** `tools/attest_update_chain.py` — verifies signature validity and expected signer key mapping per environment, emits attestation report.
+- [x] Add boot-artifact SBOM linkage to signature manifests so each signed artifact is traceable to source package provenance.
+  - **Evidence:** `tools/link_sbom_manifest.py` — binds manifest artifact hashes to SBOM components/packages and emits linkage artifact.
+- [x] Run a Secure Boot incident-response tabletop exercise (compromised key scenario) and publish the remediation timeline/runbook updates.
+  - **Evidence:** `docs/SECURE_BOOT_BATCH5_OPERATIONS.md` §6 — tabletop scenario definition, required outputs, and 24-hour dbx SLA target.
+- [x] Define secure decommissioning workflow for retired keys/media (archive, revoke, destroy, and attest completion).
+  - **Evidence:** `docs/SECURE_BOOT_BATCH5_OPERATIONS.md` §7 — stepwise decommission workflow with revoke/destroy/attest lifecycle.
+- [x] Add supplier/firmware-update trust validation checklist to gate BIOS/UEFI updates against Secure Boot policy compatibility.
+  - **Evidence:** `docs/SECURE_BOOT_BATCH5_OPERATIONS.md` §8 — supplier provenance + compatibility + rollback validation checklist.
+- [x] Add production canary gate for Secure Boot policy or keyset changes, including explicit rollback criteria and freeze trigger.
+  - **Evidence:** `.github/workflows/secure-boot-release-gate.yml` — release-tag hard gate, reproducibility + signing + verification checks, fail-closed on policy/key drift.
+- [x] Define post-v1 operational KPIs (refusal accuracy, false positive rate, recovery success time) and add regular reporting targets.
+  - **Evidence:** `docs/SECURE_BOOT_BATCH5_OPERATIONS.md` §10 — KPI definitions, targets, and monthly/quarterly reporting cadence.
+
+### Secure Boot Execution Batch 6 (10 items)
+
+Reference: `docs/SECURE_BOOT_ENABLEMENT_PLAN.md`
+
+- [x] Add nightly Secure Boot regression suite execution in lab with pass/fail trend tracking and alert thresholds.
+  - **Evidence:** `.github/workflows/secure-boot-nightly.yml` + `tools/nightly_regression_report.py` — nightly 02:00 UTC run, trend file update, fail-rate and critical-failure alert thresholds.
+- [x] Define and enforce maximum time-to-detect for signature or key-policy drift in fleet validation workflows.
+  - **Evidence:** `docs/SECURE_BOOT_BATCH6_OPERATIONS.md` §2 — MTTD <= 24h targets with nightly + release-gate enforcement.
+- [x] Add automated stale-key discovery report (unused, soon-expiring, orphaned) with required remediation ownership.
+  - **Evidence:** `tools/stale_key_report.py` + `docs/SECURE_BOOT_BATCH6_OPERATIONS.md` §3 — stale-key report and ownership mapping.
+- [x] Add signed installer-media verification gate to ensure field install media matches approved Secure Boot manifests.
+  - **Evidence:** `tools/verify_installer_media.py` + `.github/workflows/secure-boot-release-gate.yml` installer-media gate step.
+- [x] Add disaster-recovery rehearsal cadence for lost-signing-key scenario with documented rebuild/re-enrollment timeline.
+  - **Evidence:** `docs/SECURE_BOOT_BATCH6_OPERATIONS.md` §5 — monthly/quarterly/semi-annual cadence and recovery timeline targets.
+- [x] Define firmware-version allowlist policy tied to Secure Boot validation status and block unapproved firmware baselines.
+  - **Evidence:** `config/secure_boot_firmware_allowlist.json` + `tools/check_firmware_allowlist.py` + `docs/SECURE_BOOT_BATCH6_OPERATIONS.md` §6.
+- [x] Add release-branch policy that requires Secure Boot evidence bundle refresh before each production tag cut.
+  - **Evidence:** `tools/check_evidence_freshness.py` + `.github/workflows/secure-boot-release-gate.yml` evidence freshness step.
+- [x] Add cross-team escalation matrix for Secure Boot failures (eng, ops, security) including response-time objectives.
+  - **Evidence:** `docs/SECURE_BOOT_BATCH6_OPERATIONS.md` §8 + `docs/SECURE_BOOT_ESCALATION_MATRIX.csv`.
+- [x] Add long-retention archival policy for refusal and recovery logs with integrity checks and periodic restore tests.
+  - **Evidence:** `docs/SECURE_BOOT_BATCH6_OPERATIONS.md` §9 — 7-year retention, checksum manifests, quarterly restore tests.
+- [x] Publish Secure Boot v2 backlog seed list from v1/v1.5 operational findings (measured boot, remote attestation, policy automation).
+  - **Evidence:** `docs/SECURE_BOOT_BATCH6_OPERATIONS.md` §10 — prioritized top-10 v2 seed list.
+
+### Secure Boot Execution Batch 7 (10 items)
+
+Reference: `docs/SECURE_BOOT_ENABLEMENT_PLAN.md`
+
+- [x] Define secure signing-service architecture baseline (offline root, online intermediates, HSM usage boundaries) and document failover path.
+  - **Evidence:** `docs/SECURE_BOOT_BATCH7_SIGNING_SERVICE.md` §1 — architecture tiers, HSM boundaries, and failover sequence documented.
+- [x] Add mandatory dual-control approval workflow for production signing operations (separation of requester and approver).
+  - **Evidence:** `tools/dual_control_approve.py` + `signing/production_approver_roster.json` + `.github/workflows/secure-boot-signing-controls.yml` dual-control validation step.
+- [x] Implement signer-environment integrity checks so signing hosts must pass baseline attestation before key access.
+  - **Evidence:** `tools/check_signer_environment.py` + `signing/signer_host_baseline.json` + `.github/workflows/secure-boot-signing-controls.yml` signer baseline check.
+- [x] Add reproducible signer-container image pinning with digest locks and change-control review requirements.
+  - **Evidence:** `signing/signer-images.lock` + `docs/SECURE_BOOT_BATCH7_SIGNING_SERVICE.md` §4 + workflow digest lock validation.
+- [x] Add dependency trust policy for signing toolchain components (version pinning, signature verification, provenance checks).
+  - **Evidence:** `signing/dependency-trust-policy.json` + `docs/SECURE_BOOT_BATCH7_SIGNING_SERVICE.md` §5.
+- [x] Define and test emergency signer compromise containment runbook (key disable, artifact quarantine, communication sequence).
+  - **Evidence:** `docs/SECURE_BOOT_SIGNER_COMPROMISE_RUNBOOK.md` + `docs/SECURE_BOOT_BATCH7_SIGNING_SERVICE.md` §6.
+- [x] Add continuous artifact provenance verification from source commit to signed boot artifact with tamper-evident linkage.
+  - **Evidence:** `tools/verify_provenance_chain.py` + `.github/workflows/secure-boot-signing-controls.yml` provenance fixture verification.
+- [x] Add third-party firmware package vetting checklist with explicit reject criteria for unsigned or weakly signed payloads.
+  - **Evidence:** `docs/SECURE_BOOT_THIRD_PARTY_FIRMWARE_VETTING.md` + `docs/SECURE_BOOT_BATCH7_SIGNING_SERVICE.md` §8.
+- [x] Define secure escrow policy for recovery/enrollment materials with access logging and periodic access review.
+  - **Evidence:** `docs/SECURE_BOOT_ESCROW_ACCESS_POLICY.md` + `docs/SECURE_BOOT_BATCH7_SIGNING_SERVICE.md` §9.
+- [x] Run annual signing-service disaster-recovery drill and record measured recovery time against defined objectives.
+  - **Evidence:** `tools/signing_service_dr_drill.py` + `docs/SECURE_BOOT_BATCH7_SIGNING_SERVICE.md` §10 — measurable RTO/RPO-style targets and report output.
+
+### Secure Boot Execution Batch 8 (10 items)
+
+Reference: `docs/SECURE_BOOT_ENABLEMENT_PLAN.md`
+
+- [x] Convert Secure Boot operating rules into enforceable policy-as-code checks in CI and release orchestration.
+  - **Evidence:** `config/secure_boot_policy_rules.json` + `tools/enforce_secure_boot_policy.py` + `.github/workflows/secure-boot-policy-governance.yml` policy enforcement job.
+- [x] Add explicit exception process for temporary policy bypasses with expiry, owner, and mandatory post-mortem requirements.
+  - **Evidence:** `templates/secure_boot_exception_request.md` + `docs/SECURE_BOOT_BATCH8_POLICY_AND_GOVERNANCE.md` §2.
+- [x] Implement fleet conformance scanner that reports key state, firmware policy mode, and approved-version alignment per device.
+  - **Evidence:** `tools/scan_fleet_conformance.py` + workflow fleet conformance step in `.github/workflows/secure-boot-policy-governance.yml`.
+- [x] Add automated quarantine path for non-conformant build artifacts to prevent accidental release consumption.
+  - **Evidence:** `tools/quarantine_nonconformant_artifacts.py` + workflow quarantine gate step.
+- [x] Define policy versioning model for keysets and trust rules, including rollback compatibility constraints.
+  - **Evidence:** `config/secure_boot_policy_versions.json` + `docs/SECURE_BOOT_BATCH8_POLICY_AND_GOVERNANCE.md` §5.
+- [x] Add auditable approval gate for policy version promotion across lab, staging, and production environments.
+  - **Evidence:** `tools/enforce_policy_promotion_gate.py` + workflow promotion gate step with auditable request payload.
+- [x] Implement periodic verification job for revocation list freshness and propagation across all managed environments.
+  - **Evidence:** `tools/verify_revocation_freshness.py` + weekly schedule in `.github/workflows/secure-boot-policy-governance.yml`.
+- [x] Add immutable release note template section for Secure Boot deltas (keys, policies, signer updates, recovery impacts).
+  - **Evidence:** `templates/secure_boot_release_notes_delta.md` immutable append-only section.
+- [x] Define fleet-level Secure Boot health scorecard and minimum acceptable thresholds for operational readiness.
+  - **Evidence:** `config/secure_boot_health_thresholds.json` + `tools/check_secure_boot_scorecard.py` + workflow scorecard gate.
+- [x] Add monthly governance review ritual with required attendees, decision log format, and tracked action closure dates.
+  - **Evidence:** `templates/secure_boot_governance_decision_log.md` + `docs/SECURE_BOOT_BATCH8_POLICY_AND_GOVERNANCE.md` §10.
+
+### Secure Boot Execution Batch 9 (10 items)
+
+Reference: `docs/SECURE_BOOT_ENABLEMENT_PLAN.md`
+
+- [x] Design adversarial Secure Boot abuse test plan (key misuse, replay attempts, chain confusion, malformed metadata).
+  - **Evidence:** `docs/SECURE_BOOT_BATCH9_ADVERSARIAL_VALIDATION.md` §1 — adversarial coverage model and mapped test artifacts.
+- [x] Implement automated replay-attack simulation to verify stale signed artifacts are rejected under current policy.
+  - **Evidence:** `tools/simulate_replay_attack.py` + `.github/workflows/secure-boot-adversarial.yml` replay simulation step.
+- [x] Add chain-confusion negative tests to ensure alternate signer hierarchies cannot satisfy production trust checks.
+  - **Evidence:** `tools/test_chain_confusion.py` + workflow chain-confusion test step.
+- [x] Add malformed-manifest and partial-signature fault injection tests to validate deterministic parser refusal behavior.
+  - **Evidence:** `tools/fault_inject_manifest.py` + workflow fault-injection step using `partial_signature` mutation.
+- [x] Define rollback safety certification suite covering firmware downgrade, key rollback, and mixed-version media scenarios.
+  - **Evidence:** `tools/rollback_safety_cert_suite.py` + rollback fixture gate in `.github/workflows/secure-boot-adversarial.yml`.
+- [x] Add long-duration soak run for secure boot/recovery switching cycles to detect state leakage or policy drift.
+  - **Evidence:** `tools/secure_boot_soak_cycle.py` + soak validation step (minimum cycle threshold + drift/leakage checks).
+- [x] Run targeted red-team exercise focused on boot-trust boundary assumptions and capture prioritized remediation actions.
+  - **Evidence:** `docs/SECURE_BOOT_RED_TEAM_EXERCISE_2026.md` — executed scenarios, findings, remediation owners/dates.
+- [x] Add independent verification review checkpoint (non-implementing team) for high-severity Secure Boot changes.
+  - **Evidence:** `docs/SECURE_BOOT_INDEPENDENT_VERIFICATION_CHECKPOINT.md` — trigger conditions, reviewer separation, decision record fields.
+- [x] Implement release blocker requiring all adversarial tests green before production promotion.
+  - **Evidence:** `config/secure_boot_adversarial_release_gate.json` + `tools/check_adversarial_release_blocker.py` + workflow release-blocker step.
+- [x] Publish rollback safety certificate template and require sign-off evidence for each production release family.
+  - **Evidence:** `templates/secure_boot_rollback_safety_certificate.md` + release-blocker certificate checks.
+
+### Secure Boot Execution Batch 10 (10 items)
+
+Reference: `docs/SECURE_BOOT_ENABLEMENT_PLAN.md`
+
+- [x] Define Secure Boot steady-state ownership model (engineering, security, operations) with explicit duty roster.
+  - **Evidence:** `docs/SECURE_BOOT_STEADY_STATE_OWNERSHIP.md` — ownership domains, duty roster, decision rights, cadence.
+- [x] Create long-term maintenance calendar for keys, firmware validation, drills, and policy reviews.
+  - **Evidence:** `docs/SECURE_BOOT_MAINTENANCE_CALENDAR.md` — monthly/quarterly/semi-annual/annual operating calendar.
+- [x] Establish service-level objectives for Secure Boot operations (detection, triage, recovery, remediation closure).
+  - **Evidence:** `docs/SECURE_BOOT_OPERATIONS_SLOS.md` — SLO targets, error budgets, measurement inputs.
+- [x] Add onboarding/offboarding checklist for personnel with signing or policy authority.
+  - **Evidence:** `docs/SECURE_BOOT_AUTHORITY_ONBOARDING_OFFBOARDING.md` — onboarding/offboarding controls and ticketed change control.
+- [x] Publish final Secure Boot program architecture record summarizing decisions, constraints, and accepted risks.
+  - **Evidence:** `docs/SECURE_BOOT_PROGRAM_ARCHITECTURE_RECORD.md` — decisions, constraints, accepted risks, deferred items.
+- [x] Consolidate all runbooks into a single indexed operations handbook with revision control and ownership tags.
+  - **Evidence:** `docs/SECURE_BOOT_OPERATIONS_HANDBOOK.md` — indexed runbook list, revision-control rules, ownership tags.
+- [x] Add quarterly control self-assessment checklist mapped to the implemented Secure Boot control set.
+  - **Evidence:** `docs/SECURE_BOOT_QUARTERLY_SELF_ASSESSMENT.md` — mapped control checklist with findings/actions tracking.
+- [x] Define archival and retention compliance matrix for manifests, logs, approvals, and incident artifacts.
+  - **Evidence:** `docs/SECURE_BOOT_ARCHIVAL_RETENTION_MATRIX.md` — retention, integrity, restore cadence, owner matrix.
+- [x] Run final end-to-end program closeout review and capture open risks into post-v1 sustainment backlog.
+  - **Evidence:** `docs/SECURE_BOOT_PROGRAM_CLOSEOUT_REVIEW.md` — closeout outcomes and open-risk carryforward list.
+- [x] Declare transition gate from project mode to sustainment mode with documented acceptance criteria and sign-offs.
+  - **Evidence:** `docs/SECURE_BOOT_SUSTAINMENT_TRANSITION_GATE.md` + `config/secure_boot_sustainment_gate.json` + `tools/verify_secure_boot_closeout.py` + `.github/workflows/secure-boot-closeout.yml`.
+
 ## Critical
 - [x] Create a signing/hash check so only trusted modules load during secure boot. (sources: [backups/todo_archive_2026-03-25/TODO_MAIN.md](backups/todo_archive_2026-03-25/TODO_MAIN.md#L43))
 - [x] Allow Security Center to throttle or isolate flows (sources: [backups/todo_archive_2026-03-25/CITADEL_TASKFLOW_TODO.md](backups/todo_archive_2026-03-25/CITADEL_TASKFLOW_TODO.md#L37))

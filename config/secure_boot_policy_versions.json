@@ -1,0 +1,15 @@
+{
+  "schema_version": "1.0",
+  "promotion_order": ["lab", "staging", "production"],
+  "minimum_approvers": 2,
+  "require_distinct_requester": true,
+  "versions": [
+    {
+      "version": "v1.0.0",
+      "status": "active",
+      "allowed_promotions": ["lab->staging", "staging->production"],
+      "rollback_compatible_with": ["v0.9.5"],
+      "notes": "Initial codified policy baseline"
+    }
+  ]
+}

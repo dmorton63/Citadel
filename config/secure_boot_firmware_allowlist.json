@@ -1,0 +1,23 @@
+{
+  "schema_version": "1.0",
+  "updated_at": "2026-06-16T00:00:00Z",
+  "vendors": {
+    "Dell": [
+      "2.14.1",
+      "2.15.0"
+    ],
+    "Lenovo": [
+      "N3HET77W",
+      "N3HET80W"
+    ],
+    "AMI": [
+      "5.27",
+      "5.28"
+    ]
+  },
+  "policy": {
+    "block_unapproved": true,
+    "require_secure_boot_validation": true,
+    "rollback_required": true
+  }
+}

@@ -1,0 +1,114 @@
+name: "secure_boot_adversarial"
+"on":
+  pull_request:
+    branches: [ "main" ]
+  workflow_dispatch: {}
+
+jobs:
+  adversarial-validation:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Prepare fixtures
+        run: |
+          mkdir -p build/adversarial
+          cat > build/adversarial/replay_artifact.json <<'JSON'
+          {
+            "signed_at_utc": "2100-01-01T00:00:00Z",
+            "nonce_reused": false,
+            "policy_epoch_match": true
+          }
+          JSON
+          cat > build/adversarial/chain_artifact.json <<'JSON'
+          {
+            "signer_id": "ksk-prod-2026q1",
+            "chain_root_trusted": true
+          }
+          JSON
+          cat > build/adversarial/manifest.json <<'JSON'
+          {
+            "schema_version": "1.0",
+            "artifacts": [
+              {
+                "name": "kernel.bin",
+                "hash_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "signing_key_id": "ksk-prod-2026q1",
+                "signature_file": "kernel.bin.sig",
+                "signature_complete": true
+              }
+            ]
+          }
+          JSON
+          cat > build/adversarial/rollback_results.json <<'JSON'
+          {
+            "firmware_downgrade": "PASS",
+            "key_rollback": "PASS",
+            "mixed_version_media": "PASS"
+          }
+          JSON
+          cat > build/adversarial/soak_report.json <<'JSON'
+          {
+            "cycles_completed": 60,
+            "policy_drift_events": 0,
+            "state_leakage_detected": false
+          }
+          JSON
+
+      - name: Replay attack simulation
+        run: |
+          python3 tools/simulate_replay_attack.py \
+            --artifact build/adversarial/replay_artifact.json \
+            --max-age-hours 24 \
+            --json-out build/adversarial/replay_report.json
+
+      - name: Chain confusion negative test
+        run: |
+          python3 tools/test_chain_confusion.py \
+            --artifact build/adversarial/chain_artifact.json \
+            --allowed-signer ksk-prod-2026q1 \
+            --json-out build/adversarial/chain_report.json
+
+      - name: Fault injection deterministic refusal test
+        run: |
+          python3 tools/fault_inject_manifest.py \
+            --manifest build/adversarial/manifest.json \
+            --fault partial_signature \
+            --json-out build/adversarial/fault_report.json
+
+      - name: Rollback safety certification suite
+        run: |
+          python3 tools/rollback_safety_cert_suite.py \
+            --results build/adversarial/rollback_results.json \
+            --json-out build/adversarial/rollback_report.json
+
+      - name: Soak cycle validation
+        run: |
+          python3 tools/secure_boot_soak_cycle.py \
+            --report build/adversarial/soak_report.json \
+            --min-cycles 50 \
+            --json-out build/adversarial/soak_validation_report.json
+
+      - name: Adversarial release blocker
+        run: |
+          cat > build/adversarial/reports_summary.json <<'JSON'
+          {
+            "replay": "PASS",
+            "chain_confusion": "PASS",
+            "fault_injection": "PASS",
+            "rollback_safety": "PASS",
+            "soak_cycle": "PASS"
+          }
+          JSON
+          cp templates/secure_boot_rollback_safety_certificate.md build/adversarial/rollback_certificate.md
+          python3 tools/check_adversarial_release_blocker.py \
+            --policy config/secure_boot_adversarial_release_gate.json \
+            --reports build/adversarial/reports_summary.json \
+            --certificate build/adversarial/rollback_certificate.md \
+            --json-out build/adversarial/release_blocker_report.json

@@ -52,10 +52,10 @@ namespace QKDrv
         // Partition and format the first detected system disk candidate as a FAT32 volume.
         // Safety: refuses to format if the disk already appears to contain an MBR partition table
         // or an existing FAT boot sector.
-        QC::Status formatSystemVolumeFAT32();
+        QC::Status formatSystemVolumeFAT32(bool force = false);
 
         // Partition and format the selected detected disk as a FAT32 volume.
         // The deviceIndex matches the numbering printed by sysdisks (disk0, disk1, ...).
-        QC::Status formatDetectedDeviceFAT32(QC::usize deviceIndex);
+        QC::Status formatDetectedDeviceFAT32(QC::usize deviceIndex, bool force = false);
     }
 }

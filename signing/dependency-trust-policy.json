@@ -1,0 +1,41 @@
+{
+  "schema_version": "1.0",
+  "policy": {
+    "require_version_pinning": true,
+    "require_signature_verification": true,
+    "require_provenance_metadata": true,
+    "deny_unpinned_sources": true
+  },
+  "allowed_dependencies": [
+    {
+      "name": "openssl",
+      "version": "3.0.2",
+      "source": "ubuntu:jammy",
+      "signature_required": true
+    },
+    {
+      "name": "python3",
+      "version": "3.10",
+      "source": "ubuntu:jammy",
+      "signature_required": true
+    },
+    {
+      "name": "pkcs11-tool",
+      "version": "0.24.0",
+      "source": "vendor-signed",
+      "signature_required": true
+    }
+  ],
+  "deny_list": [
+    {
+      "name": "openssl",
+      "version": "1.0.*",
+      "reason": "unsupported legacy crypto"
+    },
+    {
+      "name": "python3",
+      "version": "3.7.*",
+      "reason": "end-of-life runtime"
+    }
+  ]
+}

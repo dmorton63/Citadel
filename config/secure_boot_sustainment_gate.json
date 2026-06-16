@@ -1,0 +1,21 @@
+{
+  "schema_version": "1.0",
+  "required_docs": [
+    "docs/SECURE_BOOT_STEADY_STATE_OWNERSHIP.md",
+    "docs/SECURE_BOOT_MAINTENANCE_CALENDAR.md",
+    "docs/SECURE_BOOT_OPERATIONS_SLOS.md",
+    "docs/SECURE_BOOT_AUTHORITY_ONBOARDING_OFFBOARDING.md",
+    "docs/SECURE_BOOT_PROGRAM_ARCHITECTURE_RECORD.md",
+    "docs/SECURE_BOOT_OPERATIONS_HANDBOOK.md",
+    "docs/SECURE_BOOT_QUARTERLY_SELF_ASSESSMENT.md",
+    "docs/SECURE_BOOT_ARCHIVAL_RETENTION_MATRIX.md",
+    "docs/SECURE_BOOT_PROGRAM_CLOSEOUT_REVIEW.md",
+    "docs/SECURE_BOOT_SUSTAINMENT_TRANSITION_GATE.md"
+  ],
+  "required_signoff_markers": [
+    "Engineering Lead:",
+    "Security Lead:",
+    "Operations Lead:",
+    "Program Sponsor:"
+  ]
+}
