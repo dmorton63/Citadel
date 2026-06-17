@@ -150,6 +150,17 @@ namespace QK::CmdCenter
             return "?";
         }
 
+        // Forward declarations for helpers used across command implementations.
+        static bool appendString(char *dest, QC::usize destSize, const char *src);
+        static bool appendU64Dec(char *dest, QC::usize destSize, QC::u64 value);
+        static bool readFileToNullTerminatedBuffer(const char *absPath, QC::Vector<char> &out, QC::usize maxBytes);
+        static void inferExportPathMetadata(const char *absPath,
+                                            const char *targetHint,
+                                            char *outTarget,
+                                            QC::usize outTargetCap,
+                                            char *outPersistence,
+                                            QC::usize outPersistenceCap);
+
         static QC::Status loadFstabStore(QK::Db::Store &db)
         {
             (void)QFS::VFS::instance().createDir("/system");
@@ -1286,10 +1297,6 @@ namespace QK::CmdCenter
             QFS::VFS::instance().close(meta);
             return true;
         }
-
-        static bool appendString(char *dest, QC::usize destSize, const char *src);
-        static bool appendU64Dec(char *dest, QC::usize destSize, QC::u64 value);
-        static bool readFileToNullTerminatedBuffer(const char *absPath, QC::Vector<char> &out, QC::usize maxBytes);
 
         static void trimInPlace(char *text)
         {
@@ -5955,7 +5962,7 @@ namespace QK::CmdCenter
             return true;
         }
 
-        static bool cmdShutdown(const char *, const QC::Cmd::Context &ctx, void *)
+        static bool cmdShutdown(const char *args, const QC::Cmd::Context &ctx, void *)
         {
             auto phaseName = [](QK::Shutdown::Phase phase) -> const char * {
                 switch (phase)
@@ -5991,9 +5998,7 @@ namespace QK::CmdCenter
                 }
             };
 
-            const char *args = nullptr;
-            if (ctx.args)
-                args = skipSpaces(ctx.args);
+            args = args ? skipSpaces(args) : nullptr;
 
             if (args && *args)
             {

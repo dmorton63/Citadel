@@ -46,6 +46,8 @@ namespace
 {
     static QK::Boot::Desktop::FLogFn g_Log = nullptr;
     [[noreturn]] static void enterTerminalOnlyLoop();
+    static void logBootMetric(const char *label, QC::u64 startMs);
+    static void logIPv4(QNet::IPv4Address addr);
 
     static void secureZero(void *ptr, QC::usize len)
     {
