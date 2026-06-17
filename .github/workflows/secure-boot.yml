@@ -28,8 +28,11 @@ jobs:
 
       - name: Install dependencies
         run: |
+          export DEBIAN_FRONTEND=noninteractive
+          export NEEDRESTART_MODE=a
+          export APT_LISTCHANGES_FRONTEND=none
           sudo apt-get update -qq
-          sudo apt-get install -y cmake build-essential openssl python3
+          sudo -E apt-get install -y -qq -o Dpkg::Use-Pty=0 cmake build-essential nasm openssl python3
 
       - name: Configure (Secure Boot profile)
         run: |
@@ -73,8 +76,11 @@ jobs:
 
       - name: Install dependencies
         run: |
+          export DEBIAN_FRONTEND=noninteractive
+          export NEEDRESTART_MODE=a
+          export APT_LISTCHANGES_FRONTEND=none
           sudo apt-get update -qq
-          sudo apt-get install -y openssl python3
+          sudo -E apt-get install -y -qq -o Dpkg::Use-Pty=0 openssl python3
 
       - name: Generate ephemeral lab keys
         # Lab keys are disposable/per-build; generate fresh each CI run.
