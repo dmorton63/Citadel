@@ -356,6 +356,52 @@ namespace QK::Boot::Config
                 return;
             }
 
+            if (equalsIgnoreCase(key, "MOUSE_USB_RELATIVE_PERCENT"))
+            {
+                QC::u32 percent = 0;
+                if (parseU32Value(value, percent))
+                    QKDrv::Input::setMouseUsbRelativePercent(percent);
+                return;
+            }
+
+            if (equalsIgnoreCase(key, "MOUSE_PS2_RELATIVE_PERCENT"))
+            {
+                QC::u32 percent = 0;
+                if (parseU32Value(value, percent))
+                    QKDrv::Input::setMousePs2RelativePercent(percent);
+                return;
+            }
+
+            if (equalsIgnoreCase(key, "MOUSE_WHEEL_LINES"))
+            {
+                QC::u32 lines = 0;
+                if (parseU32Value(value, lines))
+                    QKDrv::Input::setMouseWheelLines(lines);
+                return;
+            }
+
+            if (equalsIgnoreCase(key, "MOUSE_INVERT_WHEEL"))
+            {
+                QKDrv::Input::setMouseInvertWheel(parseBoolValue(value, false));
+                return;
+            }
+
+            if (equalsIgnoreCase(key, "KEY_REPEAT_DELAY_MS"))
+            {
+                QC::u32 delayMs = 0;
+                if (parseU32Value(value, delayMs))
+                    QKDrv::Input::setKeyboardRepeatDelayMs(delayMs);
+                return;
+            }
+
+            if (equalsIgnoreCase(key, "KEY_REPEAT_INTERVAL_MS"))
+            {
+                QC::u32 intervalMs = 0;
+                if (parseU32Value(value, intervalMs))
+                    QKDrv::Input::setKeyboardRepeatIntervalMs(intervalMs);
+                return;
+            }
+
             if (equalsIgnoreCase(key, "POWEROFF_AFTER_SAVETERM"))
             {
                 g_PowerOffAfterSaveTerm = parseBoolValue(value, false);
@@ -414,6 +460,33 @@ namespace QK::Boot::Config
             QC::String::memset(percent, 0, sizeof(percent));
             ok = ok && appendU32(percent, sizeof(percent), QKDrv::Input::mouseSensitivityPercent()) &&
                  writeKeyValueLine(file, "MOUSE_SENSITIVITY", percent);
+
+              char mouseUsbRelativePercent[16];
+              QC::String::memset(mouseUsbRelativePercent, 0, sizeof(mouseUsbRelativePercent));
+              ok = ok && appendU32(mouseUsbRelativePercent, sizeof(mouseUsbRelativePercent), QKDrv::Input::mouseUsbRelativePercent()) &&
+                  writeKeyValueLine(file, "MOUSE_USB_RELATIVE_PERCENT", mouseUsbRelativePercent);
+
+              char mousePs2RelativePercent[16];
+              QC::String::memset(mousePs2RelativePercent, 0, sizeof(mousePs2RelativePercent));
+              ok = ok && appendU32(mousePs2RelativePercent, sizeof(mousePs2RelativePercent), QKDrv::Input::mousePs2RelativePercent()) &&
+                  writeKeyValueLine(file, "MOUSE_PS2_RELATIVE_PERCENT", mousePs2RelativePercent);
+
+              char mouseWheelLines[16];
+              QC::String::memset(mouseWheelLines, 0, sizeof(mouseWheelLines));
+              ok = ok && appendU32(mouseWheelLines, sizeof(mouseWheelLines), QKDrv::Input::mouseWheelLines()) &&
+                  writeKeyValueLine(file, "MOUSE_WHEEL_LINES", mouseWheelLines);
+
+              ok = ok && writeKeyValueLine(file, "MOUSE_INVERT_WHEEL", QKDrv::Input::mouseInvertWheel() ? "ON" : "OFF");
+
+            char keyRepeatDelayMs[16];
+            QC::String::memset(keyRepeatDelayMs, 0, sizeof(keyRepeatDelayMs));
+            ok = ok && appendU32(keyRepeatDelayMs, sizeof(keyRepeatDelayMs), QKDrv::Input::keyboardRepeatDelayMs()) &&
+                 writeKeyValueLine(file, "KEY_REPEAT_DELAY_MS", keyRepeatDelayMs);
+
+            char keyRepeatIntervalMs[16];
+            QC::String::memset(keyRepeatIntervalMs, 0, sizeof(keyRepeatIntervalMs));
+            ok = ok && appendU32(keyRepeatIntervalMs, sizeof(keyRepeatIntervalMs), QKDrv::Input::keyboardRepeatIntervalMs()) &&
+                 writeKeyValueLine(file, "KEY_REPEAT_INTERVAL_MS", keyRepeatIntervalMs);
 
             if (ok && g_BootSaveTermValue[0] != '\0')
                 ok = writeKeyValueLine(file, "SAVETERM", g_BootSaveTermValue);
@@ -696,6 +769,80 @@ namespace QK::Boot::Config
     QC::Status PersistMouseSensitivityPercent(QC::u32 Percent, FLogFn Log)
     {
         QKDrv::Input::setMouseSensitivityPercent(Percent);
+        return writeStartupConfig(Log);
+    }
+
+    QC::u32 GetMouseUsbRelativePercent()
+    {
+        return QKDrv::Input::mouseUsbRelativePercent();
+    }
+
+    QC::u32 GetMousePs2RelativePercent()
+    {
+        return QKDrv::Input::mousePs2RelativePercent();
+    }
+
+    QC::u32 GetMouseWheelLines()
+    {
+        return QKDrv::Input::mouseWheelLines();
+    }
+
+    bool GetMouseInvertWheel()
+    {
+        return QKDrv::Input::mouseInvertWheel();
+    }
+
+    void SetMouseUsbRelativePercent(QC::u32 Percent)
+    {
+        QKDrv::Input::setMouseUsbRelativePercent(Percent);
+    }
+
+    void SetMousePs2RelativePercent(QC::u32 Percent)
+    {
+        QKDrv::Input::setMousePs2RelativePercent(Percent);
+    }
+
+    void SetMouseWheelLines(QC::u32 Lines)
+    {
+        QKDrv::Input::setMouseWheelLines(Lines);
+    }
+
+    void SetMouseInvertWheel(bool Invert)
+    {
+        QKDrv::Input::setMouseInvertWheel(Invert);
+    }
+
+    QC::Status PersistMouseBehaviorConfig(QC::u32 UsbPercent,
+                                          QC::u32 Ps2Percent,
+                                          QC::u32 WheelLines,
+                                          bool InvertWheel,
+                                          FLogFn Log)
+    {
+        QKDrv::Input::setMouseUsbRelativePercent(UsbPercent);
+        QKDrv::Input::setMousePs2RelativePercent(Ps2Percent);
+        QKDrv::Input::setMouseWheelLines(WheelLines);
+        QKDrv::Input::setMouseInvertWheel(InvertWheel);
+        return writeStartupConfig(Log);
+    }
+
+    QC::u32 GetKeyboardRepeatDelayMs()
+    {
+        return QKDrv::Input::keyboardRepeatDelayMs();
+    }
+
+    QC::u32 GetKeyboardRepeatIntervalMs()
+    {
+        return QKDrv::Input::keyboardRepeatIntervalMs();
+    }
+
+    void SetKeyboardRepeatTiming(QC::u32 DelayMs, QC::u32 IntervalMs)
+    {
+        QKDrv::Input::setKeyboardRepeatTiming(DelayMs, IntervalMs);
+    }
+
+    QC::Status PersistKeyboardRepeatTiming(QC::u32 DelayMs, QC::u32 IntervalMs, FLogFn Log)
+    {
+        QKDrv::Input::setKeyboardRepeatTiming(DelayMs, IntervalMs);
         return writeStartupConfig(Log);
     }
 

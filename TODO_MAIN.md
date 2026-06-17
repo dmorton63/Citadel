@@ -16,26 +16,26 @@ The goal is to separate missing depth (`Expand`) from hardening/cleanup (`Tighte
 
 ### Expand Next
 
-- [ ] Expand storage provenance and persistence reporting so `/system`, `/shared`, ramdisk mounts, and discovered block devices clearly identify their source, backing device, and persistence level.
-- [ ] Expand removable-media support so USB mass-storage devices can be discovered, mounted, and used as durable export targets.
-- [ ] Expand log/export tooling so boot and audit output have a clear durable-save path without relying on ad hoc ramdisk workflows.
-- [ ] Expand real-hardware SecureStore/TPM parity so certified TPM-backed systems consistently use the TPM anchor path without falling back to recovery behavior unexpectedly.
-- [ ] Expand device-configuration surfaces for keyboard/mouse/hardware tuning so bring-up settings become user-manageable runtime controls.
+- [x] Expand storage provenance and persistence reporting so `/system`, `/shared`, ramdisk mounts, and discovered block devices clearly identify their source, backing device, and persistence level.
+- [x] Expand removable-media support so USB mass-storage devices can be discovered, mounted, and used as durable export targets.
+- [x] Expand log/export tooling so boot and audit output have a clear durable-save path without relying on ad hoc ramdisk workflows.
+- [x] Expand real-hardware SecureStore/TPM parity so certified TPM-backed systems consistently use the TPM anchor path without falling back to recovery behavior unexpectedly.
+- [x] Expand device-configuration surfaces for keyboard/mouse/hardware tuning so bring-up settings become user-manageable runtime controls.
 
 ### Tighten Next
 
-- [ ] Tighten the pre-desktop boot/session flow so DHCP, SecureStore, owner unlock, console ownership, and desktop handoff have clearer boundaries and fewer timing regressions.
-- [ ] Tighten console ownership so boot logs, hidden input, prompt rendering, and terminal-only mode each have a single explicit owner.
-- [ ] Tighten ACPI/power behavior around validation, diagnostics, and fallback policy so the current shutdown success on real hardware stays robust across more firmware variants.
-- [ ] Tighten filesystem/export ergonomics so persistent-vs-ephemeral write targets are obvious at the command level.
-- [ ] Tighten backlog hygiene by keeping near-term stabilization in `TODO_INBOX.md` and leaving this file for subsystem-level roadmap work.
+- [x] Tighten the pre-desktop boot/session flow so DHCP, SecureStore, owner unlock, console ownership, and desktop handoff have clearer boundaries and fewer timing regressions.
+- [x] Tighten console ownership so boot logs, hidden input, prompt rendering, and terminal-only mode each have a single explicit owner.
+- [x] Tighten ACPI/power behavior around validation, diagnostics, and fallback policy so the current shutdown success on real hardware stays robust across more firmware variants.
+- [x] Tighten filesystem/export ergonomics so persistent-vs-ephemeral write targets are obvious at the command level.
+- [x] Tighten backlog hygiene by keeping near-term stabilization in `TODO_INBOX.md` and leaving this file for subsystem-level roadmap work.
 
 ### Sequence
 
-- [ ] Phase 1: storage provenance, log persistence defaults, and command-level export clarity.
-- [ ] Phase 2: USB/removable-media support and related filesystem ergonomics.
-- [ ] Phase 3: pre-desktop boot/session hardening and SecureStore/TPM parity.
-- [ ] Phase 4: device tuning and broader desktop/input robustness.
+- [x] Phase 1: storage provenance, log persistence defaults, and command-level export clarity.
+- [x] Phase 2: USB/removable-media support and related filesystem ergonomics.
+- [x] Phase 3: pre-desktop boot/session hardening and SecureStore/TPM parity.
+- [x] Phase 4: device tuning and broader desktop/input robustness.
 
 ### Secure Boot Batch Tracker
 

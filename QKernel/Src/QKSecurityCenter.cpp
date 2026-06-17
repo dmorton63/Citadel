@@ -1603,67 +1603,6 @@ namespace QK
         return QC::Status::Success;
     }
 
-    void SecurityCenter::debugDescribeOwnerRecord(char *outSummary, QC::usize outCap) const
-    {
-        if (!outSummary || outCap == 0)
-            return;
-
-        QC::String::memset(outSummary, 0, outCap);
-        QC::usize used = 0;
-
-        QC::Vector<QC::u8> rawBlob;
-        const QC::Status rawSt = QK::SecureStore::readBlob(kOwnerCredKey, rawBlob);
-        (void)appendText(outSummary, outCap, used, "raw=");
-        (void)appendText(outSummary, outCap, used, statusName(rawSt));
-        if (rawSt == QC::Status::Success)
-        {
-            (void)appendText(outSummary, outCap, used, " bytes=");
-            (void)appendU64(outSummary, outCap, used, static_cast<QC::u64>(rawBlob.size()));
-        }
-
-        QC::Vector<QC::u8> plainBlob;
-        const QC::Status plainSt = QK::SecureStore::readSealedBlob(kOwnerCredKey, plainBlob);
-        (void)appendText(outSummary, outCap, used, " plain=");
-        (void)appendText(outSummary, outCap, used, statusName(plainSt));
-        if (plainSt == QC::Status::Success)
-        {
-            (void)appendText(outSummary, outCap, used, " plain_bytes=");
-            (void)appendU64(outSummary, outCap, used, static_cast<QC::u64>(plainBlob.size()));
-        }
-
-        OwnerCredAny first{};
-        const QC::Status firstSt = readOwnerCredUncached(first);
-        (void)appendText(outSummary, outCap, used, " first=");
-        (void)appendText(outSummary, outCap, used, statusName(firstSt));
-        if (firstSt == QC::Status::Success)
-        {
-            const char *user = (first.kind == OwnerCredKind::V2) ? first.v2.username : first.v1.username;
-            (void)appendText(outSummary, outCap, used, " user=");
-            (void)appendText(outSummary, outCap, used, user && *user ? user : "(empty)");
-            (void)appendText(outSummary, outCap, used, " kind=");
-            (void)appendText(outSummary, outCap, used, (first.kind == OwnerCredKind::V2) ? "V2" : "V1");
-        }
-
-        OwnerCredAny second{};
-        const QC::Status secondSt = readOwnerCredUncached(second);
-        (void)appendText(outSummary, outCap, used, " second=");
-        (void)appendText(outSummary, outCap, used, statusName(secondSt));
-        if (secondSt == QC::Status::Success)
-        {
-            const char *user = (second.kind == OwnerCredKind::V2) ? second.v2.username : second.v1.username;
-            (void)appendText(outSummary, outCap, used, " user2=");
-            (void)appendText(outSummary, outCap, used, user && *user ? user : "(empty)");
-            (void)appendText(outSummary, outCap, used, " kind2=");
-            (void)appendText(outSummary, outCap, used, (second.kind == OwnerCredKind::V2) ? "V2" : "V1");
-        }
-
-        if (firstSt == QC::Status::Success && secondSt == QC::Status::Success)
-        {
-            (void)appendText(outSummary, outCap, used, " stable=");
-            (void)appendText(outSummary, outCap, used, ownerCredEquivalent(first, second) ? "yes" : "no");
-        }
-    }
-
     void SecurityCenter::ownerLock()
     {
         m_ownerUnlocked = false;

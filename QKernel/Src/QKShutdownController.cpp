@@ -3,6 +3,7 @@
 
 #include "QKShutdownController.h"
 
+#include "QKBootEventLog.h"
 #include "QCLogger.h"
 #include "QCBuiltins.h"
 #include "QKEventManager.h"
@@ -20,12 +21,76 @@ namespace QK
         namespace
         {
             constexpr const char *LOG_MODULE = "QShutdown";
+            constexpr QC::usize kAcpiGraceSpinCount = 250000;
+            constexpr QC::usize kLegacyWritePauseCount = 20000;
+
+            struct LegacyPowerWrite
+            {
+                QC::u16 port;
+                QC::u32 value;
+                bool wide32;
+                const char *label;
+            };
+
+            constexpr LegacyPowerWrite kLegacyPowerSequence[] = {
+                {0x604, 0x2000, false, "ACPI PM1a (QEMU/ACPI)"},
+                {0x604, 0x3400, false, "ACPI PM1a alt value"},
+                {0xB004, 0x2000, false, "Bochs poweroff"},
+                {0xB004, 0x3400, false, "Bochs poweroff alt"},
+                {0x4004, 0x3400, false, "VirtualBox poweroff"},
+                {0x00F4, 0x0011, true, "QEMU isa-debug-exit"},
+            };
+
+            inline void tinyPause(QC::usize spins)
+            {
+                for (QC::usize i = 0; i < spins; ++i)
+                    QC::pause();
+            }
+
+            void issueLegacyPowerFallbackSequence()
+            {
+                QC_LOG_WARN(LOG_MODULE, "Issuing legacy firmware/hypervisor power-off fallback sequence");
+                for (const auto &step : kLegacyPowerSequence)
+                {
+                    if (step.wide32)
+                        QC::outl(step.port, step.value);
+                    else
+                        QC::outw(step.port, static_cast<QC::u16>(step.value & 0xFFFFu));
+
+                    QC_LOG_INFO(LOG_MODULE,
+                                "Legacy power write: %s (port=0x%04x value=0x%04x)%s",
+                                step.label,
+                                static_cast<QC::u32>(step.port),
+                                step.value,
+                                step.wide32 ? " [32-bit]" : "");
+                    tinyPause(kLegacyWritePauseCount);
+                }
+            }
 
             void logAcpiShutdownMessage(const char *msg)
             {
                 if (!msg || !*msg)
                     return;
                 QC_LOG_INFO(LOG_MODULE, "%s", msg);
+            }
+
+            const char *shutdownReasonToken(Reason reason)
+            {
+                switch (reason)
+                {
+                case Reason::UserRequest:
+                    return "user-request";
+                case Reason::ShellCommand:
+                    return "shell-command";
+                case Reason::KeyboardShortcut:
+                    return "keyboard-shortcut";
+                case Reason::SidebarPowerButton:
+                    return "sidebar-power-button";
+                case Reason::SystemPolicy:
+                    return "system-policy";
+                default:
+                    return "unknown";
+                }
             }
 
             inline void postShutdownPhaseEvent(QK::Event::Type type, Reason reason)
@@ -221,26 +286,34 @@ namespace QK
         void Controller::powerOffHardware()
         {
             QC_LOG_INFO(LOG_MODULE, "Issuing ACPI power-off sequence");
+            bool acpiIssued = false;
 
             if (QK::Boot::Acpi::TryAcpiShutdown(&logAcpiShutdownMessage))
             {
+                acpiIssued = true;
                 QC_LOG_INFO(LOG_MODULE, "ACPI PM1 sleep command issued");
+                QC_LOG_INFO(LOG_MODULE, "ACPI grace period before legacy fallback ports");
+                tinyPause(kAcpiGraceSpinCount);
+            }
+            else
+            {
+                QC_LOG_WARN(LOG_MODULE, "ACPI shutdown unavailable; using firmware fallback ports");
             }
 
-            // Common hypervisor/firmware shutdown ports.
-            // Keep these as a fallback for hypervisors and legacy test targets.
-            // Bochs:               0xB004
-            // VirtualBox:          0x4004 (expects 0x3400)
-            // QEMU debug-exit:     0xF4 (requires -device isa-debug-exit)
-            QC::outw(0x604, 0x2000);
-            QC::outw(0x604, 0x3400);
-            QC::outw(0xB004, 0x2000);
-            QC::outw(0xB004, 0x3400);
-            QC::outw(0x4004, 0x3400);
+            if (acpiIssued)
+            {
+                QC_LOG_WARN(LOG_MODULE, "ACPI power-off did not complete during grace period; escalating to legacy fallback");
+                QK::Boot::Events::Emit("shutdown", "acpi_grace_timeout", shutdownReasonToken(m_reason));
+            }
+            else
+            {
+                QK::Boot::Events::Emit("shutdown", "acpi_unavailable", shutdownReasonToken(m_reason));
+            }
 
-            // If QEMU is launched with isa-debug-exit, this will immediately terminate QEMU.
-            // Note: the device exits only when bit0 is set.
-            QC::outl(0xF4, 0x11);
+            issueLegacyPowerFallbackSequence();
+
+            QC_LOG_WARN(LOG_MODULE, "Shutdown fallback sequence finished; halting CPU");
+            QK::Boot::Events::Emit("shutdown", "fallback_halt", shutdownReasonToken(m_reason));
 
             QC::cli();
             for (;;)

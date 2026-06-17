@@ -439,7 +439,9 @@ namespace QKDrv
             // (Historically this scaling lived in WindowManager; keeping it here ensures
             // cursor rendering and event routing remain 1:1 in absolute coordinates.)
             static constexpr float kBaseSensitivity = 0.20f;
-            const float sensitivity = kBaseSensitivity * QKDrv::Input::mouseSensitivityScale();
+            const float sensitivity = kBaseSensitivity *
+                                      QKDrv::Input::mouseSensitivityScale() *
+                                      QKDrv::Input::mouseUsbRelativeScale();
 
             const QC::i32 oldX = m_x;
             const QC::i32 oldY = m_y;

@@ -14,6 +14,13 @@ namespace QK
         using PrintFn = void (*)(const char *msg);
         using CommandHandler = void (*)(int argc, const char *const *argv);
 
+        enum class Owner
+        {
+            Boot,
+            TerminalOnly,
+            Desktop,
+        };
+
         struct Command
         {
             const char *name;
@@ -26,6 +33,8 @@ namespace QK
         // This does not affect Console::write() logging.
         void setInputEnabled(bool enabled);
         bool inputEnabled();
+        void setOwner(Owner owner);
+        Owner owner();
         void setSafeFallbackEnabled(bool enabled);
         bool safeFallbackEnabled();
         void handleKeyEvent(const QKDrv::PS2::KeyEvent &event);

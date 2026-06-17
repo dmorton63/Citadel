@@ -172,7 +172,6 @@ namespace QK
         QC::Status ownerUnlock(const char *username, const char *secret, bool activateSession = true);
         QC::Status ownerUnlockPasskey(const char *username, const char *passkey);
         QC::Status getEnrolledOwnerUsername(char *outUsername, QC::usize outCap) const;
-        void debugDescribeOwnerRecord(char *outSummary, QC::usize outCap) const;
         void ownerLock();
         bool ownerIsEnrolled() const;
         bool ownerUnlocked() const { return m_ownerUnlocked; }

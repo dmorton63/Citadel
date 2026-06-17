@@ -802,6 +802,109 @@ namespace QK
                 return true;
             }
 
+            static bool cmdSysprovenance(const char *args, const QC::Cmd::Context &ctx, void *)
+            {
+                (void)args;
+
+                ctx.writeLine("sysprovenance: begin storage provenance report");
+
+                QFS::VolumeInfo volumes[32] = {};
+                const QC::usize volumeCount = QFS::VolumeManager::instance().copyVolumeInfo(volumes, sizeof(volumes) / sizeof(volumes[0]));
+
+                bool foundSystem = false;
+                bool foundShared = false;
+                for (QC::usize i = 0; i < volumeCount; ++i)
+                {
+                    const QFS::VolumeInfo &v = volumes[i];
+                    if (QC::String::strcmp(v.mountPath, "/system") == 0)
+                        foundSystem = true;
+                    if (QC::String::strcmp(v.mountPath, "/shared") == 0)
+                        foundShared = true;
+
+                    char line[320];
+                    QC::usize pos = 0;
+                    QC::String::memset(line, 0, sizeof(line));
+                    appendText(line, sizeof(line), pos, "volume ");
+                    appendText(line, sizeof(line), pos, v.name);
+                    appendText(line, sizeof(line), pos, " mount=");
+                    appendText(line, sizeof(line), pos, v.mountPath);
+                    appendText(line, sizeof(line), pos, " class=");
+                    appendText(line, sizeof(line), pos, v.persistenceClass[0] ? v.persistenceClass : "unknown");
+                    appendText(line, sizeof(line), pos, " driver=");
+                    appendText(line, sizeof(line), pos, v.backingDriver[0] ? v.backingDriver : "unknown");
+                    appendText(line, sizeof(line), pos, " devId=");
+                    appendText(line, sizeof(line), pos, v.deviceId[0] ? v.deviceId : "unknown");
+                    appendText(line, sizeof(line), pos, " mounted=");
+                    appendText(line, sizeof(line), pos, v.mounted ? "yes" : "no");
+                    appendText(line, sizeof(line), pos, " auto=");
+                    appendText(line, sizeof(line), pos, v.autoMount ? "yes" : "no");
+                    ctx.writeLine(line);
+                }
+
+                if (!foundSystem)
+                    ctx.writeLine("volume QFS_SYSTEM mount=/system class=unavailable mounted=no");
+                if (!foundShared)
+                    ctx.writeLine("volume QFS_SHARED mount=/shared class=unavailable mounted=no");
+
+                QKDrv::AHCI::DetectedDeviceInfo ahciDevices[8];
+                const QC::usize ahciCount = QKDrv::AHCI::enumerateDetectedDevices(ahciDevices, 8);
+                for (QC::usize i = 0; i < ahciCount; ++i)
+                {
+                    const auto &dev = ahciDevices[i];
+                    char line[320];
+                    QC::usize pos = 0;
+                    QC::String::memset(line, 0, sizeof(line));
+                    appendText(line, sizeof(line), pos, "device disk");
+                    appendUnsigned(line, sizeof(line), pos, i);
+                    appendText(line, sizeof(line), pos, " kind=ahci port=");
+                    appendUnsigned(line, sizeof(line), pos, dev.portIndex);
+                    appendText(line, sizeof(line), pos, " sectors=");
+                    appendUnsigned(line, sizeof(line), pos, dev.sectors);
+                    appendText(line, sizeof(line), pos, " mountableFat=");
+                    appendText(line, sizeof(line), pos, dev.mountableFat ? "yes" : "no");
+                    appendText(line, sizeof(line), pos, " controller=");
+                    appendUnsigned(line, sizeof(line), pos, dev.controllerBus);
+                    appendChar(line, sizeof(line), pos, ':');
+                    appendUnsigned(line, sizeof(line), pos, dev.controllerDevice);
+                    appendChar(line, sizeof(line), pos, '.');
+                    appendUnsigned(line, sizeof(line), pos, dev.controllerFunction);
+                    ctx.writeLine(line);
+                }
+
+                QKDrv::IDE::DetectedDeviceInfo ideDevices[4];
+                const QC::usize ideCount = QKDrv::IDE::enumerateDetectedDevices(ideDevices, 4);
+                for (QC::usize i = 0; i < ideCount; ++i)
+                {
+                    const auto &dev = ideDevices[i];
+                    const QC::usize displayIndex = ahciCount + i;
+
+                    char line[320];
+                    QC::usize pos = 0;
+                    QC::String::memset(line, 0, sizeof(line));
+                    appendText(line, sizeof(line), pos, "device disk");
+                    appendUnsigned(line, sizeof(line), pos, displayIndex);
+                    appendText(line, sizeof(line), pos, " kind=ide channel=");
+                    appendText(line, sizeof(line), pos, dev.channelIndex == 0 ? "primary" : "secondary");
+                    appendText(line, sizeof(line), pos, " role=");
+                    appendText(line, sizeof(line), pos, dev.slave ? "slave" : "master");
+                    appendText(line, sizeof(line), pos, " sectors=");
+                    appendUnsigned(line, sizeof(line), pos, dev.sectors);
+                    appendText(line, sizeof(line), pos, " mountableFat=");
+                    appendText(line, sizeof(line), pos, dev.mountableFat ? "yes" : "no");
+                    appendText(line, sizeof(line), pos, " base=0x");
+                    appendHexDword(line, sizeof(line), pos, dev.base);
+                    appendText(line, sizeof(line), pos, " ctrl=0x");
+                    appendHexDword(line, sizeof(line), pos, dev.ctrl);
+                    ctx.writeLine(line);
+                }
+
+                if (ahciCount == 0 && ideCount == 0)
+                    ctx.writeLine("device none discovered=no");
+
+                ctx.writeLine("sysprovenance: complete");
+                return true;
+            }
+
             static bool cmdSysformat(const char *args, const QC::Cmd::Context &ctx, void *)
             {
                 QC::usize deviceIndex = 0;
@@ -1009,6 +1112,13 @@ namespace QK
                 &cmdSysverify,
                 nullptr,
                 "Verify installer-required payload paths under /system (sysverify)");
+
+            (void)reg.registerCommandExAccess(
+                "sysprovenance",
+                QC::Cmd::AccessLevel::User,
+                &cmdSysprovenance,
+                nullptr,
+                "Show consolidated storage provenance for mounts and discovered devices (sysprovenance)");
 
             QC_LOG_INFO("QKCmd", "Registered system volume commands");
             registered = true;

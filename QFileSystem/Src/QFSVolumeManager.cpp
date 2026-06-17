@@ -12,6 +12,21 @@
 namespace QFS
 {
 
+    static bool isRemovableSourceKind(const char *sourceKind)
+    {
+        if (!sourceKind || sourceKind[0] == '\0')
+            return false;
+        return QC::String::strcmp(sourceKind, "xhci-usb") == 0 ||
+               QC::String::strcmp(sourceKind, "usb") == 0;
+    }
+
+    static const char *resolvePersistenceClass(const char *sourceKind, bool persistent)
+    {
+        if (isRemovableSourceKind(sourceKind))
+            return "removable";
+        return persistent ? "persistent" : "ephemeral";
+    }
+
     static QC::Status ensureMountPathExists(VFS &vfs, const char *mountPath)
     {
         if (!mountPath || mountPath[0] != '/')
@@ -318,7 +333,17 @@ namespace QFS
             QC::String::strncpy(dst.mountPath, record.mountPath, sizeof(dst.mountPath) - 1);
             QC::String::strncpy(dst.sourceKind, record.sourceKind, sizeof(dst.sourceKind) - 1);
             QC::String::strncpy(dst.sourceDetail, record.sourceDetail, sizeof(dst.sourceDetail) - 1);
+            QC::String::strncpy(dst.persistenceClass,
+                                resolvePersistenceClass(record.sourceKind, record.persistent),
+                                sizeof(dst.persistenceClass) - 1);
+            QC::String::strncpy(dst.backingDriver,
+                                record.sourceKind[0] ? record.sourceKind : "unknown",
+                                sizeof(dst.backingDriver) - 1);
+            QC::String::strncpy(dst.deviceId,
+                                record.name,
+                                sizeof(dst.deviceId) - 1);
             dst.fsKind = record.fsKind;
+            dst.deviceHandle = reinterpret_cast<QC::uptr>(record.device);
             dst.mounted = record.mounted;
             dst.autoMount = record.autoMount;
             dst.persistent = record.persistent;

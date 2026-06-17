@@ -139,6 +139,47 @@ namespace QK
                 }
                 return *a == '\0' && *b == '\0';
             }
+
+            static bool pathHasPrefix(const char *path, const char *prefix)
+            {
+                if (!path || !prefix)
+                    return false;
+                const QC::usize n = QC::String::strlen(prefix);
+                if (QC::String::memcmp(path, prefix, n) != 0)
+                    return false;
+                return path[n] == '\0' || path[n] == '/';
+            }
+
+            static const char *persistenceClassForPath(const char *path)
+            {
+                if (!path || path[0] != '/')
+                    return "unknown";
+
+                if (pathHasPrefix(path, "/system"))
+                    return "persistent";
+                if (pathHasPrefix(path, "/shared"))
+                    return "ephemeral";
+
+                QFS::VolumeInfo volumes[32] = {};
+                const QC::usize count = QFS::VolumeManager::instance().copyVolumeInfo(volumes, sizeof(volumes) / sizeof(volumes[0]));
+                const char *bestClass = nullptr;
+                QC::usize bestLen = 0;
+                for (QC::usize i = 0; i < count; ++i)
+                {
+                    if (!volumes[i].mounted)
+                        continue;
+                    if (!pathHasPrefix(path, volumes[i].mountPath))
+                        continue;
+                    const QC::usize n = QC::String::strlen(volumes[i].mountPath);
+                    if (!bestClass || n > bestLen)
+                    {
+                        bestClass = volumes[i].persistenceClass[0] ? volumes[i].persistenceClass : "unknown";
+                        bestLen = n;
+                    }
+                }
+
+                return bestClass ? bestClass : "unknown";
+            }
             constexpr QC::usize kBufferSize = 256;
             char g_buffer[kBufferSize];
             QC::usize g_length = 0;
@@ -173,6 +214,7 @@ namespace QK
 
             bool g_inputEnabled = true;
             bool g_safeFallbackEnabled = false;
+            Console::Owner g_owner = Console::Owner::Boot;
 
             bool g_warnedAdminEnable = false;
             bool g_warnedSystemEnable = false;
@@ -834,6 +876,9 @@ namespace QK
                     print("saveterm: cannot open output file: ");
                     print(path);
                     print(" (is the target path mounted + writable?)\r\n");
+                    print("saveterm: persistence=");
+                    print(persistenceClassForPath(path));
+                    print("\r\n");
                     return;
                 }
 
@@ -868,7 +913,9 @@ namespace QK
                 printByteCount(wrote);
                 print(" bytes to ");
                 print(path);
-                print("\r\n");
+                print(" (persistence=");
+                print(persistenceClassForPath(path));
+                print(")\r\n");
 
                 // Skip the status output we just printed.
                 g_savetermLastSavedLen = g_transcriptLen;
@@ -897,6 +944,9 @@ namespace QK
                     print("saveserial: cannot open output file: ");
                     print(path);
                     print(" (is the target path mounted + writable?)\r\n");
+                    print("saveserial: persistence=");
+                    print(persistenceClassForPath(path));
+                    print("\r\n");
                     return;
                 }
 
@@ -920,7 +970,9 @@ namespace QK
                 printByteCount(wrote);
                 print(" bytes to ");
                 print(path);
-                print("\r\n");
+                print(" (persistence=");
+                print(persistenceClassForPath(path));
+                print(")\r\n");
             }
 
             void handleTier(int, const char *const *)
@@ -1258,6 +1310,16 @@ namespace QK
             return g_inputEnabled;
         }
 
+        void setOwner(Owner owner)
+        {
+            g_owner = owner;
+        }
+
+        Owner owner()
+        {
+            return g_owner;
+        }
+
         void setSafeFallbackEnabled(bool enabled)
         {
             g_safeFallbackEnabled = enabled;
@@ -1340,6 +1402,8 @@ namespace QK
 
         void showPrompt()
         {
+            if (g_owner != Console::Owner::TerminalOnly)
+                return;
             printPrompt();
         }
 
@@ -1368,6 +1432,8 @@ namespace QK
             if (!out || outSize == 0)
                 return false;
             if (!g_inputEnabled)
+                return false;
+            if (g_owner == Console::Owner::Desktop)
                 return false;
 
             out[0] = '\0';

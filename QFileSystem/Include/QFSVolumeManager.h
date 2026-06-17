@@ -40,7 +40,11 @@ namespace QFS
         char mountPath[128] = {0};
         char sourceKind[24] = {0};
         char sourceDetail[64] = {0};
+        char persistenceClass[16] = {0};
+        char backingDriver[24] = {0};
+        char deviceId[32] = {0};
         FileSystemKind fsKind = FileSystemKind::FAT_AUTO;
+        QC::uptr deviceHandle = 0;
         bool mounted = false;
         bool autoMount = false;
         bool persistent = false;

@@ -8,6 +8,7 @@
 #include "QDrvTimer.h"
 #include "QDrvVmwareSVGA.h"
 #include "QKDrvManager.h"
+#include "QKInputSettings.h"
 #include "PS2/QKDrvPS2Keyboard.h"
 #include "PS2/QKDrvPS2Mouse.h"
 
@@ -18,6 +19,7 @@
 #include "QKEventManager.h"
 #include "QKEventListener.h"
 #include "QKShutdownController.h"
+#include "QKBootEventLog.h"
 
 #include "QKConsole.h"
 #include "QKSecureStore.h"
@@ -43,6 +45,7 @@
 namespace
 {
     static QK::Boot::Desktop::FLogFn g_Log = nullptr;
+    [[noreturn]] static void enterTerminalOnlyLoop();
 
     static void secureZero(void *ptr, QC::usize len)
     {
@@ -107,14 +110,38 @@ namespace
 
     static void EnsureNonTpmSecureStoreUnlocked()
     {
+        constexpr const char *kTpmKey = "WRAPKEY.TPM";
+        constexpr const char *kKdfKey = "WRAPKEY.KDF";
+        constexpr const char *kPlainKey = "WRAPKEY.BIN";
+
+        const bool hasTpmAnchor = QK::SecureStore::exists(kTpmKey);
+
         if (QK::SecureStore::tpm_present())
         {
             QK::Console::write("SecureStore: anchor=tpm\r\n");
+
+            // Prefer TPM anchor on TPM-capable systems; legacy recovery/plain
+            // artifacts are stale in this mode and can cause confusing parity drift.
+            if (QK::SecureStore::exists(kKdfKey) || QK::SecureStore::exists(kPlainKey))
+            {
+                QK::Console::write("SecureStore: legacy non-TPM anchor artifacts detected; ignoring while TPM anchor path is active.\r\n");
+            }
             return;
         }
 
-        constexpr const char *kKdfKey = "WRAPKEY.KDF";
-        constexpr const char *kPlainKey = "WRAPKEY.BIN";
+        if (hasTpmAnchor)
+        {
+            if (g_Log)
+                g_Log("SecureStore: TPM anchor blob present but TPM sealing unavailable; refusing non-TPM fallback\r\n");
+
+            QK::Boot::Config::SetStartupMode(QK::Boot::Config::StartupMode::Terminal);
+            QK::Boot::Events::Emit("securestore", "tpm_anchor_terminal", "tpm-anchor-present-no-tpm-path");
+            QK::Console::write("SecureStore: TPM anchor was provisioned, but TPM sealing is unavailable in this boot.\r\n");
+            QK::Console::write("SecureStore: refusing recovery/plain fallback to preserve TPM anchor parity.\r\n");
+            QK::Console::write("SecureStore: verify TPM device/firmware state, then retry boot.\r\n");
+            QK::Console::setInputEnabled(true);
+            enterTerminalOnlyLoop();
+        }
 
         const bool hasKdf = QK::SecureStore::exists(kKdfKey);
         const bool hasPlain = QK::SecureStore::exists(kPlainKey);
@@ -216,6 +243,23 @@ namespace
     static void RunPreDesktopOwnerGate()
     {
         auto &sc = QK::SecurityCenter::instance();
+        constexpr QC::u32 kMaxGateRestarts = 3;
+        QC::u32 gateRestartCount = 0;
+
+        auto failClosedToTerminal = [&](const char *reason)
+        {
+            g_Log("Owner gate: repeated restart loop detected; switching to terminal mode\r\n");
+            QK::Boot::Config::SetStartupMode(QK::Boot::Config::StartupMode::Terminal);
+            QK::Boot::Events::Emit("owner_gate", "fallback_terminal", reason ? reason : "unknown");
+            QK::Console::write("Owner gate fallback: ");
+            QK::Console::write(reason ? reason : "unspecified");
+            QK::Console::write("\r\n");
+            QK::Console::write("Desktop startup paused to avoid ambiguous enrollment/unlock restart loops.\r\n");
+            QK::Console::write("Use terminal tools to verify owner credentials/system state, then run startx to retry desktop startup.\r\n");
+            QK::Console::setInputEnabled(true);
+            enterTerminalOnlyLoop();
+        };
+
         for (;;)
         {
             if (!sc.ownerIsEnrolled())
@@ -293,14 +337,7 @@ namespace
                             break;
                         }
 
-                        QK::Console::write("Owner state is inconsistent: enrollment reported an existing owner, but the credential record is unreadable.\r\n");
-                        char ownerSummary[384];
-                        QC::String::memset(ownerSummary, 0, sizeof(ownerSummary));
-                        sc.debugDescribeOwnerRecord(ownerSummary, sizeof(ownerSummary));
-                        QK::Console::write("Owner record debug: ");
-                        QK::Console::write(ownerSummary);
-                        QK::Console::write("\r\n");
-                        QK::Console::write("Restarting owner gate from enrollment.\r\n");
+                        QK::Console::write("Owner credential record unreadable; restarting enrollment flow.\r\n");
                         restartGate = true;
                         break;
                     }
@@ -317,8 +354,15 @@ namespace
                 }
 
                 if (restartGate)
+                {
+                    ++gateRestartCount;
+                    if (gateRestartCount >= kMaxGateRestarts)
+                        failClosedToTerminal("owner credential record repeatedly unreadable during enrollment");
                     continue;
+                }
             }
+
+            gateRestartCount = 0;
 
             if (sc.bypassEnabled() || sc.ownerUnlocked())
                 return;
@@ -394,8 +438,88 @@ namespace
             }
 
             if (restartGate)
+            {
+                ++gateRestartCount;
+                if (gateRestartCount >= kMaxGateRestarts)
+                    failClosedToTerminal("owner credential record repeatedly unavailable during unlock");
                 continue;
+            }
+
+            gateRestartCount = 0;
         }
+    }
+
+    static void RunPreDesktopDhcpBringUp()
+    {
+        g_Log("Pre-desktop phase: DHCP bring-up\r\n");
+        // Best-effort DHCPv4 (bounded wait); falls back to manual `ip set`.
+        // Defer it until after the owner gate so the boot password prompt appears promptly.
+        g_Log("Attempting DHCPv4...\r\n");
+        const QC::u64 dhcpStartMs = QDrv::Timer::instance().milliseconds();
+        {
+            QNet::DHCPv4Client dhcp;
+            if (dhcp.begin() == QC::Status::Success)
+            {
+                QNet::DHCPv4Lease lease{};
+
+                const QC::u64 deadlineMs = QDrv::Timer::instance().milliseconds() + 2500;
+                while (QDrv::Timer::instance().milliseconds() < deadlineMs)
+                {
+                    // Pump NIC RX -> QNetwork.
+                    QKDrv::Manager::instance().poll();
+                    QKDrv::PS2::Keyboard::instance().poll();
+
+                    if (dhcp.poll(&lease))
+                    {
+                        QNet::Stack::instance().ip()->setAddress(lease.address);
+                        QNet::Stack::instance().ip()->setSubnetMask(lease.subnetMask);
+                        QNet::Stack::instance().ip()->setGateway(lease.gateway);
+                        QNet::Stack::instance().ip()->setDnsServer(lease.dnsServer);
+
+                        g_Log("DHCPv4 lease acquired: ip=");
+                        logIPv4(lease.address);
+                        g_Log(" mask=");
+                        logIPv4(lease.subnetMask);
+                        g_Log(" gw=");
+                        logIPv4(lease.gateway);
+
+                        if (lease.dnsServer.value != 0)
+                        {
+                            g_Log(" dns=");
+                            logIPv4(lease.dnsServer);
+                        }
+                        g_Log("\r\n");
+                        break;
+                    }
+
+                    QDrv::Timer::instance().sleep(10);
+                }
+
+                if (lease.address.value == 0)
+                {
+                    g_Log("DHCPv4 timeout (manual config still available)\r\n");
+                }
+            }
+            else
+            {
+                g_Log("DHCPv4 skipped (no NIC/MAC or UDP bind failed)\r\n");
+            }
+        }
+        logBootMetric("dhcp_wait", dhcpStartMs);
+    }
+
+    static void KeepConsoleOwnershipWithKernelForStartupGates()
+    {
+        g_Log("Pre-desktop phase: console input stays kernel-owned for SecureStore and owner gates\r\n");
+        QK::Console::setInputEnabled(true);
+    }
+
+    static void HandOffConsoleOwnershipToDesktop()
+    {
+        QK::Console::setOwner(QK::Console::Owner::Desktop);
+        g_Log("Pre-desktop phase: desktop handoff\r\n");
+        g_Log("Console ownership: transferring input to desktop runtime\r\n");
+        QK::Console::setInputEnabled(false);
     }
 
     static char keyToChar(QKDrv::PS2::Key key, bool shift, bool caps)
@@ -561,8 +685,6 @@ namespace
     static QC::u64 g_lastPrimaryKeyboardReportMs = 0;
     static QC::u64 g_lastPrimaryMouseReportMs = 0;
 
-    static constexpr QC::u64 kBackspaceRepeatInitialDelayMs = 400;
-    static constexpr QC::u64 kBackspaceRepeatIntervalMs = 33;
     static constexpr QC::u64 kPs2KeyboardFallbackSilenceMs = 250;
     static constexpr QC::u64 kPs2MouseFallbackSilenceMs = 16;
 
@@ -757,8 +879,9 @@ namespace
                 eventMgr.postMouseMove(curX, curY, 0, 0);
                 postedMove = true;
             }
+            const QC::i32 scrollDelta = QKDrv::Input::applyMouseWheelBehavior(report.wheel);
             wm.noteMouseEventPosted(reportMs);
-            eventMgr.postMouseScroll(report.wheel, curX, curY);
+            eventMgr.postMouseScroll(scrollDelta, curX, curY);
         }
 
         if (leftBtn && !g_prevLeftBtn)
@@ -806,7 +929,8 @@ namespace
         }
 
         g_backspaceRepeatArmed = true;
-        g_backspaceRepeatNextMs = QDrv::Timer::instance().milliseconds() + kBackspaceRepeatInitialDelayMs;
+        g_backspaceRepeatNextMs = QDrv::Timer::instance().milliseconds() +
+                                  static_cast<QC::u64>(QK::Boot::Config::GetKeyboardRepeatDelayMs());
     }
 
     static void maybePostBackspaceRepeat()
@@ -847,7 +971,8 @@ namespace
             mods,
             false);
 
-        g_backspaceRepeatNextMs = nowMs + kBackspaceRepeatIntervalMs;
+        g_backspaceRepeatNextMs = nowMs +
+                                  static_cast<QC::u64>(QK::Boot::Config::GetKeyboardRepeatIntervalMs());
     }
 
     static void logInt(QC::i32 value)
@@ -945,6 +1070,7 @@ namespace
 
     [[noreturn]] static void enterTerminalOnlyLoop()
     {
+        QK::Console::setOwner(QK::Console::Owner::TerminalOnly);
         QK::Console::setSafeFallbackEnabled(true);
         g_Log("Entering console-only startup path (mode: ");
         g_Log(QK::Boot::Config::StartupModeName(QK::Boot::Config::GetStartupMode()));
@@ -972,6 +1098,8 @@ namespace QK::Boot::Desktop
         g_Log = Log;
         if (!g_Log)
             return false;
+
+        QK::Console::setOwner(QK::Console::Owner::Boot);
 
         g_State.FramebufferRequest = FramebufferRequest;
         g_State.ModuleRequest = ModuleRequest;
@@ -1043,6 +1171,8 @@ namespace QK::Boot::Desktop
                 g_Log("Desktop: InitializeInput called before Prepare\r\n");
             return;
         }
+
+        QK::Console::setOwner(QK::Console::Owner::Boot);
         if (g_State.InputInitialized)
             return;
 
@@ -1142,8 +1272,9 @@ namespace QK::Boot::Desktop
 
         // Keep console input enabled through startup gates (owner enrollment/unlock).
         // We hand keyboard ownership to desktop only after the pre-desktop gate succeeds.
-        QK::Console::setInputEnabled(true);
+        KeepConsoleOwnershipWithKernelForStartupGates();
 
+        g_Log("Pre-desktop phase: SecureStore unlock\r\n");
         EnsureNonTpmSecureStoreUnlocked();
 
         if (QK::SecurityCenter::instance().mode() == QK::SecurityCenter::Mode::Enforce &&
@@ -1152,6 +1283,7 @@ namespace QK::Boot::Desktop
             g_Log("BootTrust gate: /system volume is not mounted\r\n");
             g_Log("Switching startup mode to INSTALLER\r\n");
             QK::Boot::Config::SetStartupMode(QK::Boot::Config::StartupMode::Installer);
+            QK::Boot::Events::Emit("boottrust", "missing_system_installer", "mode=enforce");
             QK::Console::write("Installer: persistent system volume not found.\r\n");
             QK::Console::write("Installer: run 'help', then 'admin' twice, then 'sysmount' or 'sysformat'.\r\n");
             QK::Console::setInputEnabled(true);
@@ -1167,6 +1299,7 @@ namespace QK::Boot::Desktop
             g_Log("BootTrust gate failed: ensureSst did not pass\r\n");
             g_Log("Switching startup mode to TERMINAL\r\n");
             QK::Boot::Config::SetStartupMode(QK::Boot::Config::StartupMode::Terminal);
+            QK::Boot::Events::Emit("boottrust", "ensure_sst_terminal", statusText(ensureSstSt));
             QK::Console::write("Security Center: system trust store is not ready.\r\n");
             QK::Console::write("Security Center: ensureSst status=");
             QK::Console::write(statusText(ensureSstSt));
@@ -1198,6 +1331,7 @@ namespace QK::Boot::Desktop
                 g_Log("BootTrust gate failed: TAS/SC integrity check did not pass\r\n");
                 g_Log("Switching startup mode to TERMINAL\r\n");
                 QK::Boot::Config::SetStartupMode(QK::Boot::Config::StartupMode::Terminal);
+                QK::Boot::Events::Emit("boottrust", "integrity_gate_terminal", "sst-unavailable-or-zero-generation");
                 QK::Console::write("Security Center: boot trust gate did not pass.\r\n");
                 QK::Console::write("Security Center: desktop startup skipped; staying in terminal mode.\r\n");
                 QK::Console::setInputEnabled(true);
@@ -1215,67 +1349,15 @@ namespace QK::Boot::Desktop
 
         // Pre-desktop owner registration/login gate: enrollment/unlock must complete
         // before desktop initialization.
+        g_Log("Pre-desktop phase: owner session gate\r\n");
         RunPreDesktopOwnerGate();
         // Do not emit a permanent BOOTMETRIC here: this interval includes human typing time,
         // so it is useful for one-off diagnosis but misleading as a stable boot metric.
 
-        // Best-effort DHCPv4 (bounded wait); falls back to manual `ip set`.
-        // Defer it until after the owner gate so the boot password prompt appears promptly.
-        g_Log("Attempting DHCPv4...\r\n");
-        const QC::u64 dhcpStartMs = QDrv::Timer::instance().milliseconds();
-        {
-            QNet::DHCPv4Client dhcp;
-            if (dhcp.begin() == QC::Status::Success)
-            {
-                QNet::DHCPv4Lease lease{};
-
-                const QC::u64 deadlineMs = QDrv::Timer::instance().milliseconds() + 2500;
-                while (QDrv::Timer::instance().milliseconds() < deadlineMs)
-                {
-                    // Pump NIC RX -> QNetwork.
-                    QKDrv::Manager::instance().poll();
-                    QKDrv::PS2::Keyboard::instance().poll();
-
-                    if (dhcp.poll(&lease))
-                    {
-                        QNet::Stack::instance().ip()->setAddress(lease.address);
-                        QNet::Stack::instance().ip()->setSubnetMask(lease.subnetMask);
-                        QNet::Stack::instance().ip()->setGateway(lease.gateway);
-                        QNet::Stack::instance().ip()->setDnsServer(lease.dnsServer);
-
-                        g_Log("DHCPv4 lease acquired: ip=");
-                        logIPv4(lease.address);
-                        g_Log(" mask=");
-                        logIPv4(lease.subnetMask);
-                        g_Log(" gw=");
-                        logIPv4(lease.gateway);
-
-                        if (lease.dnsServer.value != 0)
-                        {
-                            g_Log(" dns=");
-                            logIPv4(lease.dnsServer);
-                        }
-                        g_Log("\r\n");
-                        break;
-                    }
-
-                    QDrv::Timer::instance().sleep(10);
-                }
-
-                if (lease.address.value == 0)
-                {
-                    g_Log("DHCPv4 timeout (manual config still available)\r\n");
-                }
-            }
-            else
-            {
-                g_Log("DHCPv4 skipped (no NIC/MAC or UDP bind failed)\r\n");
-            }
-        }
-        logBootMetric("dhcp_wait", dhcpStartMs);
+        RunPreDesktopDhcpBringUp();
 
         // Desktop now owns keyboard input; keep serial console non-interactive.
-        QK::Console::setInputEnabled(false);
+        HandOffConsoleOwnershipToDesktop();
         // Do not emit a permanent BOOTMETRIC for InitializeInput total time because it includes
         // interactive SecureStore/owner gating and is not a machine-only stage duration.
     }

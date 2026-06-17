@@ -35,6 +35,23 @@ namespace QK::Boot::Config
     QC::u32 GetMouseSensitivityPercent();
     void SetMouseSensitivityPercent(QC::u32 Percent);
     QC::Status PersistMouseSensitivityPercent(QC::u32 Percent, FLogFn Log);
+    QC::u32 GetMouseUsbRelativePercent();
+    QC::u32 GetMousePs2RelativePercent();
+    QC::u32 GetMouseWheelLines();
+    bool GetMouseInvertWheel();
+    void SetMouseUsbRelativePercent(QC::u32 Percent);
+    void SetMousePs2RelativePercent(QC::u32 Percent);
+    void SetMouseWheelLines(QC::u32 Lines);
+    void SetMouseInvertWheel(bool Invert);
+    QC::Status PersistMouseBehaviorConfig(QC::u32 UsbPercent,
+                                          QC::u32 Ps2Percent,
+                                          QC::u32 WheelLines,
+                                          bool InvertWheel,
+                                          FLogFn Log);
+    QC::u32 GetKeyboardRepeatDelayMs();
+    QC::u32 GetKeyboardRepeatIntervalMs();
+    void SetKeyboardRepeatTiming(QC::u32 DelayMs, QC::u32 IntervalMs);
+    QC::Status PersistKeyboardRepeatTiming(QC::u32 DelayMs, QC::u32 IntervalMs, FLogFn Log);
     QK::SecurityCenter::Mode GetSecurityCenterMode();
     bool GetIdeSharedProbeEnabled();
 

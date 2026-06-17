@@ -192,6 +192,8 @@ Status labels used below:
 ### Boot + Core
 - Boot via Limine: **Working** (build produces bootable image)
 - Kernel console: **Working** (basic CLI commands + transcript support)
+- Pre-desktop owner/session gate hardening: **Working** (fail-closed terminal fallback on repeated ambiguous enrollment/unlock restart loops)
+- ACPI shutdown fallback diagnostics: **Working** (ACPI grace timeout/unavailable and legacy fallback-halt paths are emitted as structured boot events)
 
 ### Storage + Filesystems
 - VFS layer (`QFS::VFS`) + FAT probing/mounting: **Working**
@@ -199,6 +201,8 @@ Status labels used below:
 - Shared folder `/shared` mount (host <-> guest): **Working** in the known-good QEMU configs
 - Persistent system disk (`--system-vol` → `build/system.qcow2`): **Working** (used for `/system` persistence in dev)
 - System disk formatting command `sysformat`: **Working** (formats FAT32 + attempts mount)
+- Mount provenance reporting (`mount list`, `sysprovenance`) now emits persistence class + backing source details: **Working**
+- Export path guardrails (`auto/system/shared/usb`, ephemeral override token, preflight checks, metadata sidecars): **Working**
 
 ### Desktop / UI
 - Windowing + controls + desktop shell: **Working/Partial** (actively used; still evolving)
@@ -224,6 +228,7 @@ Status labels used below:
 - SC concepts + hooks + flow controls: **Partial** (actively being built; evolving)
 - Task_Flow metrics exposure to SC: **Working** (counters surfaced for diagnostics/policy)
 - SRK derivation from the machine anchor (TAS): **Working** (used for SST wrapping boundary)
+- SecureStore TPM parity enforcement: **Working** (when `WRAPKEY.TPM` exists but TPM path is unavailable, boot refuses non-TPM fallback and stays terminal)
 
 ### “AI” / Task_Flow / Memoization
 - Task_Flow concept + related commands/helpers: **Partial/Design** (exists in codebase + docs; ongoing)
@@ -266,6 +271,7 @@ Protected-path policy applies:
 - `sysdisks` (User) — list legacy IDE disks Citadel can currently see, including size and basic layout state
 - `sysformat [diskN|N]` (Admin) — partition+format the selected detected disk as FAT32 and mount `/system`; without an argument it falls back to the first eligible detected disk
 - `sysmount` (Admin) — probe+mount `/system` without formatting (useful after reboot or for recovery)
+- `sysprovenance` (User) — emit consolidated storage provenance for mounted volumes and discovered AHCI/IDE disks
 
 Dev workflow note: when running with `--system-vol`, `/system` is backed by `build/system.qcow2` and persists across reboots. You generally only need `sysformat` once; use `sysmount` if `/system` is not mounted.
 
@@ -273,8 +279,21 @@ Boot fallback note: when Security Center enforcement is active and `/system` is 
 
 ### Boot/config visibility
 - `tier` — show active config tier + staged early modules
-- `bootlog` (Admin) — dump captured boot log
+- `showmode` (User) — show startup mode, SecureStore anchor state/artifacts, hardware tuning snapshot, and fallback-path status/verification hints
+- `bootlog` (User) — dump captured boot log, or export to `auto|system|shared|usb` with explicit persistence reporting
 - `bootmodules` (Admin) — dump early module trust metadata
+- `bevdump` (Admin) — dump structured boot-event records for fallback and trust-path verification
+- `sys_audit_export` (SysAdmin) — export audit events to path or `auto|system|shared|usb` with explicit persistence reporting
+
+### Input tuning commands
+- `mousespeed` (User) — show/set overall mouse sensitivity (`show`, `<percent>`, or `persist <percent>`)
+- `mousecfg` (User) — show/set USB/PS2 relative scaling, wheel lines, and wheel inversion (`show`, `<field> <value>`, `persist ...`)
+- `keyrepeat` (User) — show/set keyboard repeat delay/interval (`show`, `<delay_ms> <interval_ms>`, `persist ...`)
+
+Export behavior note:
+- Writes to ephemeral targets are blocked unless `ephemeral-ok` is supplied.
+- Export preflight explicitly reports missing parent, writability failure, or reservation failure.
+- Successful exports write sidecar metadata (`*.meta.json`) with timestamp, source, target, persistence class, artifact path, and SHA-256 hash.
 
 ### Networking
 - `ip` / `ip set ...` / `ip dhcp [timeout_ms]` — view/set IPv4
@@ -379,3 +398,39 @@ High-level rules:
 - Prefer “where to verify” over long prose:
   - list the command name and what output to expect
   - point to the registration site / implementation file
+
+---
+
+## 11. Evidence Locations (Batch 11 to 19)
+
+- Volume persistence-class and driver/device mount metadata:
+  - [QFileSystem/Include/QFSVolumeManager.h](QFileSystem/Include/QFSVolumeManager.h)
+  - [QFileSystem/Src/QFSVolumeManager.cpp](QFileSystem/Src/QFSVolumeManager.cpp)
+- Mount and export command behavior (targets, guardrails, sidecars, status messaging):
+  - [QKernel/Src/QKCommandCenter.cpp](QKernel/Src/QKCommandCenter.cpp)
+- Consolidated storage provenance command:
+  - [kernel/QKSystemVolumeCommands.cpp](kernel/QKSystemVolumeCommands.cpp)
+- Console-side save messaging with explicit persistence intent:
+  - [kernel/QKConsole.cpp](kernel/QKConsole.cpp)
+- SecureStore/owner debug tightening (temporary boot debug removed):
+  - [kernel/Boot/Desktop/QKBootDesktopSession.cpp](kernel/Boot/Desktop/QKBootDesktopSession.cpp)
+  - [QKernel/Src/QKSecurityCenter.cpp](QKernel/Src/QKSecurityCenter.cpp)
+  - [QKernel/Include/QKSecurityCenter.h](QKernel/Include/QKSecurityCenter.h)
+- Real-hardware export validation checklist artifact:
+  - [docs/EXPORT_PATH_VALIDATION_CHECKLIST.md](docs/EXPORT_PATH_VALIDATION_CHECKLIST.md)
+
+## 12. Evidence Locations (Batch 21 to 30)
+
+- Pre-desktop owner/session gate boundaries, fail-closed terminal fallback, and boot/session orchestration updates:
+  - [kernel/Boot/Desktop/QKBootDesktopSession.cpp](kernel/Boot/Desktop/QKBootDesktopSession.cpp)
+- Shutdown ACPI diagnostics and fallback event emission (`acpi_grace_timeout`, `acpi_unavailable`, `fallback_halt`):
+  - [QKernel/Src/QKShutdownController.cpp](QKernel/Src/QKShutdownController.cpp)
+- SecureStore/TPM parity behavior and anchor visibility from command layer:
+  - [QKernel/Src/QKCommandCenter.cpp](QKernel/Src/QKCommandCenter.cpp)
+- Runtime input tuning surfaces (keyboard/mouse) and command controls:
+  - [kernel/Drivers/QKInputSettings.h](kernel/Drivers/QKInputSettings.h)
+  - [kernel/Boot/Config/QKBootStartupConfig.h](kernel/Boot/Config/QKBootStartupConfig.h)
+  - [kernel/Boot/Config/QKBootStartupConfig.cpp](kernel/Boot/Config/QKBootStartupConfig.cpp)
+  - [QKernel/Src/QKCommandCenter.cpp](QKernel/Src/QKCommandCenter.cpp)
+  - [kernel/Drivers/XHCI/QKDrvXHCI.cpp](kernel/Drivers/XHCI/QKDrvXHCI.cpp)
+  - [kernel/Drivers/PS2/QKDrvPS2Mouse.cpp](kernel/Drivers/PS2/QKDrvPS2Mouse.cpp)

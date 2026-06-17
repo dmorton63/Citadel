@@ -187,7 +187,9 @@ namespace QKDrv
             // Apply the same modest sensitivity model as the USB relative path so
             // real-hardware PS/2 motion is controllable instead of jumping in large steps.
             static constexpr float kBaseSensitivity = 0.50f;
-            const float sensitivity = kBaseSensitivity * QKDrv::Input::mouseSensitivityScale();
+            const float sensitivity = kBaseSensitivity *
+                                      QKDrv::Input::mouseSensitivityScale() *
+                                      QKDrv::Input::mousePs2RelativeScale();
 
             // PS/2 movement uses +X to the right and +Y upward.
             // Screen space is +X to the right and +Y downward, so invert Y only.

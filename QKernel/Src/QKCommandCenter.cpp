@@ -79,6 +79,23 @@ namespace QK::Boot::Config
     QC::u32 GetMouseSensitivityPercent();
     void SetMouseSensitivityPercent(QC::u32 Percent);
     QC::Status PersistMouseSensitivityPercent(QC::u32 Percent, void (*Log)(const char *));
+    QC::u32 GetMouseUsbRelativePercent();
+    QC::u32 GetMousePs2RelativePercent();
+    QC::u32 GetMouseWheelLines();
+    bool GetMouseInvertWheel();
+    void SetMouseUsbRelativePercent(QC::u32 Percent);
+    void SetMousePs2RelativePercent(QC::u32 Percent);
+    void SetMouseWheelLines(QC::u32 Lines);
+    void SetMouseInvertWheel(bool Invert);
+    QC::Status PersistMouseBehaviorConfig(QC::u32 UsbPercent,
+                                          QC::u32 Ps2Percent,
+                                          QC::u32 WheelLines,
+                                          bool InvertWheel,
+                                          void (*Log)(const char *));
+    QC::u32 GetKeyboardRepeatDelayMs();
+    QC::u32 GetKeyboardRepeatIntervalMs();
+    void SetKeyboardRepeatTiming(QC::u32 DelayMs, QC::u32 IntervalMs);
+    QC::Status PersistKeyboardRepeatTiming(QC::u32 DelayMs, QC::u32 IntervalMs, void (*Log)(const char *));
 }
 
 namespace QK::Boot::Desktop
@@ -529,6 +546,27 @@ namespace QK::CmdCenter
             return absPath[n] == '\0' || absPath[n] == '/';
         }
 
+        static bool isSharedPath(const char *absPath)
+        {
+            if (!absPath)
+                return false;
+            const char *prefix = "/shared";
+            const QC::usize n = QC::String::strlen(prefix);
+            if (QC::String::memcmp(absPath, prefix, n) != 0)
+                return false;
+            return absPath[n] == '\0' || absPath[n] == '/';
+        }
+
+        static bool pathMatchesMountPrefix(const char *path, const char *mountPath)
+        {
+            if (!path || !mountPath || mountPath[0] == '\0')
+                return false;
+            const QC::usize n = QC::String::strlen(mountPath);
+            if (QC::String::memcmp(path, mountPath, n) != 0)
+                return false;
+            return path[n] == '\0' || path[n] == '/';
+        }
+
         static bool allowWriteToPath(const char *absPath, const QC::Cmd::Context &ctx, const char *cmdName)
         {
             (void)cmdName;
@@ -555,6 +593,697 @@ namespace QK::CmdCenter
                 }
             }
 
+            return true;
+        }
+
+        enum class ExportTarget : QC::u8
+        {
+            Auto,
+            System,
+            Shared,
+            Usb
+        };
+
+        static bool parseExportTarget(const char *token, ExportTarget &out)
+        {
+            if (!token || token[0] == '\0')
+                return false;
+            if (streqIgnoreCase(token, "auto"))
+            {
+                out = ExportTarget::Auto;
+                return true;
+            }
+            if (streqIgnoreCase(token, "system"))
+            {
+                out = ExportTarget::System;
+                return true;
+            }
+            if (streqIgnoreCase(token, "shared"))
+            {
+                out = ExportTarget::Shared;
+                return true;
+            }
+            if (streqIgnoreCase(token, "usb"))
+            {
+                out = ExportTarget::Usb;
+                return true;
+            }
+            return false;
+        }
+
+        static bool hasEphemeralOverrideToken(const char *args)
+        {
+            char tok[32];
+            QC::String::memset(tok, 0, sizeof(tok));
+            const char *p = args;
+            while (readToken(p, tok, sizeof(tok)))
+            {
+                if (streqIgnoreCase(tok, "ephemeral-ok"))
+                    return true;
+            }
+            return false;
+        }
+
+        static bool ensureDirectoryPath(const char *path)
+        {
+            if (!path || path[0] != '/')
+                return false;
+            if (QC::String::strcmp(path, "/") == 0)
+                return true;
+
+            char partial[256];
+            QC::usize partialLen = 0;
+            partial[partialLen++] = '/';
+            partial[partialLen] = '\0';
+
+            const char *p = path;
+            while (*p == '/')
+                ++p;
+
+            while (*p)
+            {
+                const char *segStart = p;
+                while (*p && *p != '/')
+                    ++p;
+                const QC::usize segLen = static_cast<QC::usize>(p - segStart);
+
+                while (*p == '/')
+                    ++p;
+
+                if (segLen == 0)
+                    continue;
+
+                if (partialLen > 1 && partial[partialLen - 1] != '/')
+                {
+                    if (partialLen + 1 >= sizeof(partial))
+                        return false;
+                    partial[partialLen++] = '/';
+                    partial[partialLen] = '\0';
+                }
+
+                if (partialLen + segLen >= sizeof(partial))
+                    return false;
+
+                QC::String::memcpy(partial + partialLen, segStart, segLen);
+                partialLen += segLen;
+                partial[partialLen] = '\0';
+
+                QFS::FileInfo info{};
+                const QC::Status st = QFS::VFS::instance().stat(partial, &info);
+                if (st == QC::Status::Success)
+                {
+                    if (info.type != QFS::FileType::Directory)
+                        return false;
+                    continue;
+                }
+
+                if (st != QC::Status::NotFound)
+                    return false;
+
+                if (QFS::VFS::instance().createDir(partial) != QC::Status::Success)
+                {
+                    QFS::FileInfo info2{};
+                    if (QFS::VFS::instance().stat(partial, &info2) != QC::Status::Success || info2.type != QFS::FileType::Directory)
+                        return false;
+                }
+            }
+
+            return true;
+        }
+
+        static bool resolveExportBaseForTarget(ExportTarget target,
+                                               char *outBase,
+                                               QC::usize outBaseCap,
+                                               char *outRefusal,
+                                               QC::usize outRefusalCap)
+        {
+            if (!outBase || outBaseCap == 0)
+                return false;
+
+            QC::String::memset(outBase, 0, outBaseCap);
+            if (outRefusal && outRefusalCap)
+                QC::String::memset(outRefusal, 0, outRefusalCap);
+
+            QFS::VolumeInfo volumes[32] = {};
+            const QC::usize count = QFS::VolumeManager::instance().copyVolumeInfo(volumes, sizeof(volumes) / sizeof(volumes[0]));
+
+            auto copyPath = [&](const char *path) -> bool {
+                if (!path || path[0] == '\0')
+                    return false;
+                QC::String::strncpy(outBase, path, outBaseCap - 1);
+                outBase[outBaseCap - 1] = '\0';
+                return true;
+            };
+
+            auto writeRefusal = [&](const char *msg) {
+                if (!outRefusal || outRefusalCap == 0)
+                    return;
+                QC::String::strncpy(outRefusal, msg ? msg : "target unavailable", outRefusalCap - 1);
+                outRefusal[outRefusalCap - 1] = '\0';
+            };
+
+            auto mountedPath = [&](const char *wanted) -> const char * {
+                for (QC::usize i = 0; i < count; ++i)
+                {
+                    if (!volumes[i].mounted)
+                        continue;
+                    if (QC::String::strcmp(volumes[i].mountPath, wanted) == 0)
+                        return volumes[i].mountPath;
+                }
+                return nullptr;
+            };
+
+            auto mountedUsbPath = [&]() -> const char * {
+                for (QC::usize i = 0; i < count; ++i)
+                {
+                    if (!volumes[i].mounted)
+                        continue;
+                    if (QC::String::strcmp(volumes[i].persistenceClass, "removable") == 0)
+                        return volumes[i].mountPath;
+                    if (volumes[i].sourceKind[0] && QC::String::strcmp(volumes[i].sourceKind, "xhci-usb") == 0)
+                        return volumes[i].mountPath;
+                }
+                return nullptr;
+            };
+
+            switch (target)
+            {
+            case ExportTarget::System:
+            {
+                const char *p = mountedPath("/system");
+                if (!p)
+                {
+                    writeRefusal("target 'system' unavailable: /system not mounted");
+                    return false;
+                }
+                return copyPath(p);
+            }
+            case ExportTarget::Shared:
+            {
+                const char *p = mountedPath("/shared");
+                if (!p)
+                {
+                    writeRefusal("target 'shared' unavailable: /shared not mounted");
+                    return false;
+                }
+                return copyPath(p);
+            }
+            case ExportTarget::Usb:
+            {
+                const char *p = mountedUsbPath();
+                if (!p)
+                {
+                    writeRefusal("target 'usb' unavailable: no mounted removable volume");
+                    return false;
+                }
+                return copyPath(p);
+            }
+            case ExportTarget::Auto:
+            default:
+            {
+                const char *systemPath = mountedPath("/system");
+                if (systemPath)
+                    return copyPath(systemPath);
+                const char *sharedPath = mountedPath("/shared");
+                if (sharedPath)
+                    return copyPath(sharedPath);
+                const char *usbPath = mountedUsbPath();
+                if (usbPath)
+                    return copyPath(usbPath);
+
+                writeRefusal("target 'auto' unavailable: no mounted /system, /shared, or removable usb volume");
+                return false;
+            }
+            }
+        }
+
+        static bool buildExportPathForTarget(ExportTarget target,
+                                             const char *leafName,
+                                             char *outPath,
+                                             QC::usize outPathCap,
+                                             char *outRefusal,
+                                             QC::usize outRefusalCap)
+        {
+            if (!leafName || !outPath || outPathCap == 0)
+                return false;
+
+            char base[160];
+            QC::String::memset(base, 0, sizeof(base));
+            if (!resolveExportBaseForTarget(target, base, sizeof(base), outRefusal, outRefusalCap))
+                return false;
+
+            char logsDir[192];
+            QC::String::memset(logsDir, 0, sizeof(logsDir));
+            QC::String::strncpy(logsDir, base, sizeof(logsDir) - 1);
+            const QC::usize used = QC::String::strlen(logsDir);
+            if (used + 6 >= sizeof(logsDir))
+            {
+                if (outRefusal && outRefusalCap)
+                    QC::String::strncpy(outRefusal, "target path too long", outRefusalCap - 1);
+                return false;
+            }
+            if (used > 1 && logsDir[used - 1] == '/')
+                QC::String::strncpy(logsDir + used - 1, "logs", sizeof(logsDir) - used);
+            else
+                QC::String::strncpy(logsDir + used, "/logs", sizeof(logsDir) - used - 1);
+
+            if (!ensureDirectoryPath(logsDir))
+            {
+                if (outRefusal && outRefusalCap)
+                    QC::String::strncpy(outRefusal, "failed to create target logs directory", outRefusalCap - 1);
+                return false;
+            }
+
+            QC::String::memset(outPath, 0, outPathCap);
+            QC::String::strncpy(outPath, logsDir, outPathCap - 1);
+            const QC::usize pathUsed = QC::String::strlen(outPath);
+            if (pathUsed + 1 >= outPathCap)
+                return false;
+            if (outPath[pathUsed - 1] != '/')
+            {
+                outPath[pathUsed] = '/';
+                outPath[pathUsed + 1] = '\0';
+            }
+
+            const QC::usize used2 = QC::String::strlen(outPath);
+            if (used2 + QC::String::strlen(leafName) >= outPathCap)
+                return false;
+            QC::String::strncpy(outPath + used2, leafName, outPathCap - used2 - 1);
+            return true;
+        }
+
+        static bool parentPathOf(const char *path, char *outParent, QC::usize outParentCap)
+        {
+            if (!path || !outParent || outParentCap == 0)
+                return false;
+            if (path[0] != '/')
+                return false;
+
+            const QC::usize len = QC::String::strlen(path);
+            if (len == 0 || len >= outParentCap)
+                return false;
+
+            QC::String::memset(outParent, 0, outParentCap);
+            QC::String::strncpy(outParent, path, outParentCap - 1);
+
+            QC::usize i = len;
+            while (i > 0 && outParent[i - 1] == '/')
+                --i;
+            while (i > 0 && outParent[i - 1] != '/')
+                --i;
+
+            if (i == 0)
+                return false;
+
+            if (i == 1)
+            {
+                outParent[1] = '\0';
+                return true;
+            }
+
+            outParent[i - 1] = '\0';
+            return true;
+        }
+
+        static bool preflightExportPath(const char *absPath,
+                                        QC::usize reserveBytes,
+                                        const QC::Cmd::Context &ctx,
+                                        const char *cmdName)
+        {
+            if (!absPath || absPath[0] != '/')
+            {
+                ctx.writeLine("export preflight: invalid absolute path");
+                return false;
+            }
+
+            if (!allowWriteToPath(absPath, ctx, cmdName))
+                return false;
+
+            char parent[256];
+            QC::String::memset(parent, 0, sizeof(parent));
+            if (!parentPathOf(absPath, parent, sizeof(parent)))
+            {
+                ctx.writeLine("export preflight: cannot resolve parent directory");
+                return false;
+            }
+
+            QFS::FileInfo parentInfo{};
+            const QC::Status pst = QFS::VFS::instance().stat(parent, &parentInfo);
+            if (pst != QC::Status::Success)
+            {
+                char line[256];
+                QC::String::memset(line, 0, sizeof(line));
+                (void)appendString(line, sizeof(line), "export preflight: target parent missing: ");
+                (void)appendString(line, sizeof(line), parent);
+                ctx.writeLine(line);
+                return false;
+            }
+            if (parentInfo.type != QFS::FileType::Directory)
+            {
+                char line[256];
+                QC::String::memset(line, 0, sizeof(line));
+                (void)appendString(line, sizeof(line), "export preflight: target parent is not a directory: ");
+                (void)appendString(line, sizeof(line), parent);
+                ctx.writeLine(line);
+                return false;
+            }
+
+            char probePath[320];
+            QC::String::memset(probePath, 0, sizeof(probePath));
+            QC::String::strncpy(probePath, absPath, sizeof(probePath) - 1);
+            const QC::usize probeUsed = QC::String::strlen(probePath);
+            constexpr const char *kProbeSuffix = ".preflight.tmp";
+            const QC::usize suffixLen = QC::String::strlen(kProbeSuffix);
+            if (probeUsed + suffixLen >= sizeof(probePath))
+            {
+                ctx.writeLine("export preflight: probe path too long");
+                return false;
+            }
+            QC::String::strncpy(probePath + probeUsed, kProbeSuffix, sizeof(probePath) - probeUsed - 1);
+
+            (void)QFS::VFS::instance().remove(probePath);
+            QFS::File *probe = QFS::VFS::instance().open(
+                probePath,
+                QFS::OpenMode::Write | QFS::OpenMode::Create | QFS::OpenMode::Truncate);
+            if (!probe)
+            {
+                ctx.writeLine("export preflight: target is not writable (probe open failed)");
+                return false;
+            }
+
+            const QC::usize reserve = (reserveBytes == 0) ? 1 : reserveBytes;
+            char zero[512];
+            QC::String::memset(zero, 0, sizeof(zero));
+            QC::usize remaining = reserve;
+            while (remaining > 0)
+            {
+                const QC::usize chunk = remaining < sizeof(zero) ? remaining : sizeof(zero);
+                const QC::isize w = probe->write(zero, chunk);
+                if (w <= 0)
+                {
+                    QFS::VFS::instance().close(probe);
+                    (void)QFS::VFS::instance().remove(probePath);
+
+                    char line[256];
+                    QC::String::memset(line, 0, sizeof(line));
+                    (void)appendString(line, sizeof(line), "export preflight: insufficient space for ");
+                    (void)appendU64Dec(line, sizeof(line), static_cast<QC::u64>(reserveBytes));
+                    (void)appendString(line, sizeof(line), " bytes (reservation failed)");
+                    ctx.writeLine(line);
+                    return false;
+                }
+                remaining -= static_cast<QC::usize>(w);
+            }
+
+            QFS::VFS::instance().close(probe);
+            (void)QFS::VFS::instance().remove(probePath);
+            return true;
+        }
+
+        static bool enforceEphemeralWriteGuard(const char *absPath,
+                                               const char *targetHint,
+                                               const char *args,
+                                               const QC::Cmd::Context &ctx,
+                                               const char *cmdName)
+        {
+            char resolvedTarget[24];
+            char persistenceClass[24];
+            QC::String::memset(resolvedTarget, 0, sizeof(resolvedTarget));
+            QC::String::memset(persistenceClass, 0, sizeof(persistenceClass));
+            inferExportPathMetadata(absPath,
+                                    targetHint,
+                                    resolvedTarget,
+                                    sizeof(resolvedTarget),
+                                    persistenceClass,
+                                    sizeof(persistenceClass));
+
+            if (!streqIgnoreCase(persistenceClass, "ephemeral"))
+                return true;
+
+            if (hasEphemeralOverrideToken(args))
+                return true;
+
+            char line[256];
+            QC::String::memset(line, 0, sizeof(line));
+            (void)appendString(line, sizeof(line), cmdName);
+            (void)appendString(line, sizeof(line), ": target is ephemeral (not durable). add 'ephemeral-ok' to confirm");
+            ctx.writeLine(line);
+            return false;
+        }
+
+        static QC::usize estimateAuditExportBytes()
+        {
+            const QC::usize total = QK::Boot::Events::Count();
+            QK::Boot::Events::Record recs[8] = {};
+            QC::usize estimate = 0;
+            QC::usize offset = 0;
+            while (offset < total)
+            {
+                const QC::usize n = QK::Boot::Events::CopyOut(offset, recs, sizeof(recs) / sizeof(recs[0]));
+                if (n == 0)
+                    break;
+                offset += n;
+
+                for (QC::usize i = 0; i < n; ++i)
+                {
+                    char line[384];
+                    char detail[160];
+                    QC::String::memset(line, 0, sizeof(line));
+                    QC::String::memset(detail, 0, sizeof(detail));
+                    (void)appendString(line, sizeof(line), "EV seq=");
+                    (void)appendU64Dec(line, sizeof(line), recs[i].seq);
+                    (void)appendString(line, sizeof(line), " t_ms=");
+                    (void)appendU64Dec(line, sizeof(line), recs[i].t_ms);
+                    (void)appendString(line, sizeof(line), " stage=");
+                    (void)appendString(line, sizeof(line), recs[i].stage[0] ? recs[i].stage : "(none)");
+                    (void)appendString(line, sizeof(line), " type=");
+                    (void)appendString(line, sizeof(line), recs[i].type[0] ? recs[i].type : "(none)");
+                    if (recs[i].details[0])
+                    {
+                        QK::SecurityCenter::instance().redactAuditText(recs[i].details, detail, sizeof(detail));
+                        (void)appendString(line, sizeof(line), " ");
+                        (void)appendString(line, sizeof(line), detail);
+                    }
+                    (void)appendString(line, sizeof(line), "\n");
+                    estimate += QC::String::strlen(line);
+                }
+            }
+
+            return estimate;
+        }
+
+        static bool computeFileSha256Hex(const char *absPath, char *outHex, QC::usize outHexCap)
+        {
+            if (!absPath || !outHex || outHexCap < 65)
+                return false;
+
+            QC::String::memset(outHex, 0, outHexCap);
+
+            QFS::FileInfo info{};
+            if (QFS::VFS::instance().stat(absPath, &info) != QC::Status::Success)
+                return false;
+            if (info.type != QFS::FileType::Regular)
+                return false;
+
+            const QC::usize size = static_cast<QC::usize>(info.size);
+            QC::Vector<QC::u8> data;
+            if (size > 0)
+            {
+                data.resize(size);
+                if (data.size() != size)
+                    return false;
+            }
+
+            QFS::File *f = QFS::VFS::instance().open(absPath, QFS::OpenMode::Read);
+            if (!f)
+                return false;
+
+            QC::usize readTotal = 0;
+            while (readTotal < size)
+            {
+                const QC::isize n = f->read(data.data() + readTotal, size - readTotal);
+                if (n <= 0)
+                {
+                    QFS::VFS::instance().close(f);
+                    return false;
+                }
+                readTotal += static_cast<QC::usize>(n);
+            }
+            QFS::VFS::instance().close(f);
+
+            QC::u8 digest[32];
+            const QC::u8 zero = 0;
+            const QC::u8 *ptr = (size > 0) ? data.data() : &zero;
+            QC::Sha256(ptr, size, digest);
+            return QC::Sha256DigestToLowerHex(digest, outHex, outHexCap);
+        }
+
+        static void inferExportPathMetadata(const char *absPath,
+                                            const char *targetHint,
+                                            char *outTarget,
+                                            QC::usize outTargetCap,
+                                            char *outPersistence,
+                                            QC::usize outPersistenceCap)
+        {
+            if (outTarget && outTargetCap)
+            {
+                QC::String::memset(outTarget, 0, outTargetCap);
+                if (targetHint && targetHint[0])
+                    QC::String::strncpy(outTarget, targetHint, outTargetCap - 1);
+            }
+            if (outPersistence && outPersistenceCap)
+            {
+                QC::String::memset(outPersistence, 0, outPersistenceCap);
+                QC::String::strncpy(outPersistence, "unknown", outPersistenceCap - 1);
+            }
+
+            if (!absPath)
+                return;
+
+            QFS::VolumeInfo volumes[32] = {};
+            const QC::usize count = QFS::VolumeManager::instance().copyVolumeInfo(volumes, sizeof(volumes) / sizeof(volumes[0]));
+            const QFS::VolumeInfo *best = nullptr;
+            QC::usize bestLen = 0;
+            for (QC::usize i = 0; i < count; ++i)
+            {
+                if (!volumes[i].mounted)
+                    continue;
+                if (!pathMatchesMountPrefix(absPath, volumes[i].mountPath))
+                    continue;
+                const QC::usize n = QC::String::strlen(volumes[i].mountPath);
+                if (!best || n > bestLen)
+                {
+                    best = &volumes[i];
+                    bestLen = n;
+                }
+            }
+
+            if (best)
+            {
+                if (outPersistence && outPersistenceCap)
+                {
+                    QC::String::memset(outPersistence, 0, outPersistenceCap);
+                    QC::String::strncpy(outPersistence,
+                                        best->persistenceClass[0] ? best->persistenceClass : "unknown",
+                                        outPersistenceCap - 1);
+                }
+
+                if (outTarget && outTargetCap && (!targetHint || !targetHint[0] || streqIgnoreCase(targetHint, "auto")))
+                {
+                    QC::String::memset(outTarget, 0, outTargetCap);
+                    if (QC::String::strcmp(best->mountPath, "/system") == 0)
+                        QC::String::strncpy(outTarget, "system", outTargetCap - 1);
+                    else if (QC::String::strcmp(best->mountPath, "/shared") == 0)
+                        QC::String::strncpy(outTarget, "shared", outTargetCap - 1);
+                    else if (QC::String::strcmp(best->persistenceClass, "removable") == 0)
+                        QC::String::strncpy(outTarget, "usb", outTargetCap - 1);
+                    else
+                        QC::String::strncpy(outTarget, "path", outTargetCap - 1);
+                }
+            }
+            else if (outTarget && outTargetCap && (!targetHint || !targetHint[0]))
+            {
+                QC::String::memset(outTarget, 0, outTargetCap);
+                if (isSystemPath(absPath))
+                    QC::String::strncpy(outTarget, "system", outTargetCap - 1);
+                else if (isSharedPath(absPath))
+                    QC::String::strncpy(outTarget, "shared", outTargetCap - 1);
+                else
+                    QC::String::strncpy(outTarget, "path", outTargetCap - 1);
+            }
+        }
+
+        static bool writeExportMetadataSidecar(const char *artifactPath,
+                                               const char *sourceName,
+                                               const char *targetHint,
+                                               const QC::Cmd::Context &ctx,
+                                               const char *cmdName)
+        {
+            if (!artifactPath || artifactPath[0] == '\0')
+                return false;
+
+            char hashHex[65];
+            QC::String::memset(hashHex, 0, sizeof(hashHex));
+            if (!computeFileSha256Hex(artifactPath, hashHex, sizeof(hashHex)))
+            {
+                ctx.writeLine("export metadata: failed to hash artifact");
+                return false;
+            }
+
+            char targetLabel[24];
+            char persistenceClass[24];
+            QC::String::memset(targetLabel, 0, sizeof(targetLabel));
+            QC::String::memset(persistenceClass, 0, sizeof(persistenceClass));
+            inferExportPathMetadata(artifactPath,
+                                    targetHint,
+                                    targetLabel,
+                                    sizeof(targetLabel),
+                                    persistenceClass,
+                                    sizeof(persistenceClass));
+
+            char metaPath[320];
+            QC::String::memset(metaPath, 0, sizeof(metaPath));
+            QC::String::strncpy(metaPath, artifactPath, sizeof(metaPath) - 1);
+            const QC::usize used = QC::String::strlen(metaPath);
+            constexpr const char *kSuffix = ".meta.json";
+            const QC::usize suffixLen = QC::String::strlen(kSuffix);
+            if (used + suffixLen >= sizeof(metaPath))
+            {
+                ctx.writeLine("export metadata: sidecar path too long");
+                return false;
+            }
+            QC::String::strncpy(metaPath + used, kSuffix, sizeof(metaPath) - used - 1);
+
+            if (!allowWriteToPath(metaPath, ctx, cmdName))
+                return false;
+
+            QFS::File *meta = QFS::VFS::instance().open(
+                metaPath,
+                QFS::OpenMode::Write | QFS::OpenMode::Create | QFS::OpenMode::Truncate);
+            if (!meta)
+            {
+                ctx.writeLine("export metadata: cannot open sidecar");
+                return false;
+            }
+
+            char body[1024];
+            QC::String::memset(body, 0, sizeof(body));
+            (void)appendString(body, sizeof(body), "{\n");
+            (void)appendString(body, sizeof(body), "  \"timestamp_ms\": ");
+            (void)appendU64Dec(body, sizeof(body), QK::Time::milliseconds());
+            (void)appendString(body, sizeof(body), ",\n");
+            (void)appendString(body, sizeof(body), "  \"source\": \"");
+            (void)appendString(body, sizeof(body), sourceName ? sourceName : "unknown");
+            (void)appendString(body, sizeof(body), "\",\n");
+            (void)appendString(body, sizeof(body), "  \"target\": \"");
+            (void)appendString(body, sizeof(body), targetLabel[0] ? targetLabel : "unknown");
+            (void)appendString(body, sizeof(body), "\",\n");
+            (void)appendString(body, sizeof(body), "  \"persistence_class\": \"");
+            (void)appendString(body, sizeof(body), persistenceClass[0] ? persistenceClass : "unknown");
+            (void)appendString(body, sizeof(body), "\",\n");
+            (void)appendString(body, sizeof(body), "  \"artifact_path\": \"");
+            (void)appendString(body, sizeof(body), artifactPath);
+            (void)appendString(body, sizeof(body), "\",\n");
+            (void)appendString(body, sizeof(body), "  \"artifact_sha256\": \"");
+            (void)appendString(body, sizeof(body), hashHex);
+            (void)appendString(body, sizeof(body), "\"\n");
+            (void)appendString(body, sizeof(body), "}\n");
+
+            const QC::usize total = QC::String::strlen(body);
+            QC::usize off = 0;
+            while (off < total)
+            {
+                const QC::isize w = meta->write(body + off, total - off);
+                if (w <= 0)
+                {
+                    QFS::VFS::instance().close(meta);
+                    ctx.writeLine("export metadata: write failed");
+                    return false;
+                }
+                off += static_cast<QC::usize>(w);
+            }
+
+            QFS::VFS::instance().close(meta);
             return true;
         }
 
@@ -2028,7 +2757,7 @@ namespace QK::CmdCenter
                 }
                 for (QC::usize i = 0; i < count; ++i)
                 {
-                    char line[256];
+                    char line[384];
                     QC::String::memset(line, 0, sizeof(line));
                     (void)appendString(line, sizeof(line), info[i].name);
                     (void)appendString(line, sizeof(line), " -> ");
@@ -2039,6 +2768,12 @@ namespace QK::CmdCenter
                     (void)appendString(line, sizeof(line), info[i].autoMount ? "1" : "0");
                     (void)appendString(line, sizeof(line), " persistent=");
                     (void)appendString(line, sizeof(line), info[i].persistent ? "1" : "0");
+                    (void)appendString(line, sizeof(line), " class=");
+                    (void)appendString(line, sizeof(line), info[i].persistenceClass[0] ? info[i].persistenceClass : "unknown");
+                    (void)appendString(line, sizeof(line), " driver=");
+                    (void)appendString(line, sizeof(line), info[i].backingDriver[0] ? info[i].backingDriver : "unknown");
+                    (void)appendString(line, sizeof(line), " devId=");
+                    (void)appendString(line, sizeof(line), info[i].deviceId[0] ? info[i].deviceId : "unknown");
                     if (info[i].sourceKind[0])
                     {
                         (void)appendString(line, sizeof(line), " src=");
@@ -2987,6 +3722,96 @@ namespace QK::CmdCenter
             (void)appendString(line, sizeof(line), "startup mode: ");
             (void)appendString(line, sizeof(line), QK::Boot::Config::StartupModeName(mode));
             ctx.writeLine(line);
+
+            const bool tpmEnabled = QK::SecureStore::tpm_present();
+            const bool hasTpmAnchor = QK::SecureStore::exists("WRAPKEY.TPM");
+            const bool hasRecoveryAnchor = QK::SecureStore::exists("WRAPKEY.KDF");
+            const bool hasLegacyPlainAnchor = QK::SecureStore::exists("WRAPKEY.BIN");
+
+            char anchor[192];
+            QC::String::memset(anchor, 0, sizeof(anchor));
+            (void)appendString(anchor, sizeof(anchor), "securestore anchor: ");
+
+            if (tpmEnabled && hasTpmAnchor)
+            {
+                (void)appendString(anchor, sizeof(anchor), "TPM-backed (active)");
+            }
+            else if (!tpmEnabled && hasRecoveryAnchor)
+            {
+                (void)appendString(anchor, sizeof(anchor), "recovery-backed (active)");
+            }
+            else if (!tpmEnabled && hasLegacyPlainAnchor)
+            {
+                (void)appendString(anchor, sizeof(anchor), "legacy-plain (upgrade pending)");
+            }
+            else if (!tpmEnabled && hasTpmAnchor)
+            {
+                (void)appendString(anchor, sizeof(anchor), "TPM-provisioned but TPM path unavailable");
+            }
+            else if (tpmEnabled)
+            {
+                (void)appendString(anchor, sizeof(anchor), "TPM-capable (anchor not provisioned yet)");
+            }
+            else
+            {
+                (void)appendString(anchor, sizeof(anchor), "recovery-bootstrap required");
+            }
+
+            ctx.writeLine(anchor);
+
+            char detail[192];
+            QC::String::memset(detail, 0, sizeof(detail));
+            (void)appendString(detail, sizeof(detail), "securestore anchor artifacts: tpm=");
+            (void)appendString(detail, sizeof(detail), hasTpmAnchor ? "yes" : "no");
+            (void)appendString(detail, sizeof(detail), " kdf=");
+            (void)appendString(detail, sizeof(detail), hasRecoveryAnchor ? "yes" : "no");
+            (void)appendString(detail, sizeof(detail), " plain=");
+            (void)appendString(detail, sizeof(detail), hasLegacyPlainAnchor ? "yes" : "no");
+            ctx.writeLine(detail);
+
+            const auto scMode = QK::SecurityCenter::instance().mode();
+            char fallback[224];
+            QC::String::memset(fallback, 0, sizeof(fallback));
+            (void)appendString(fallback, sizeof(fallback), "fallback paths: startup_mode=");
+            (void)appendString(fallback, sizeof(fallback), QK::Boot::Config::StartupModeName(mode));
+            (void)appendString(fallback, sizeof(fallback), " flow_mode=");
+            (void)appendString(fallback, sizeof(fallback), QK::SecurityCenter::modeName(scMode));
+            (void)appendString(fallback, sizeof(fallback), " owner_bypass=");
+            (void)appendString(fallback, sizeof(fallback), QK::SecurityCenter::instance().bypassEnabled() ? "on" : "off");
+            ctx.writeLine(fallback);
+
+            if (mode == QK::Boot::Config::StartupMode::Recovery)
+                ctx.writeLine("fallback state: recovery startup mode is active");
+            else if (mode == QK::Boot::Config::StartupMode::Terminal)
+                ctx.writeLine("fallback state: terminal startup mode is active");
+            else if (mode == QK::Boot::Config::StartupMode::Safe)
+                ctx.writeLine("fallback state: safe startup mode is active");
+            else if (mode == QK::Boot::Config::StartupMode::Installer)
+                ctx.writeLine("fallback state: installer startup mode is active");
+
+            ctx.writeLine("verify fallback path: run bevdump and check stages/types (securestore/*, owner_gate/fallback_terminal, boottrust/*, shutdown/acpi_*|fallback_halt)");
+
+            char tuningMouse[224];
+            QC::String::memset(tuningMouse, 0, sizeof(tuningMouse));
+            (void)appendString(tuningMouse, sizeof(tuningMouse), "hardware tuning (mouse): sens=");
+            (void)appendU64Dec(tuningMouse, sizeof(tuningMouse), QK::Boot::Config::GetMouseSensitivityPercent());
+            (void)appendString(tuningMouse, sizeof(tuningMouse), "% usb=");
+            (void)appendU64Dec(tuningMouse, sizeof(tuningMouse), QK::Boot::Config::GetMouseUsbRelativePercent());
+            (void)appendString(tuningMouse, sizeof(tuningMouse), "% ps2=");
+            (void)appendU64Dec(tuningMouse, sizeof(tuningMouse), QK::Boot::Config::GetMousePs2RelativePercent());
+            (void)appendString(tuningMouse, sizeof(tuningMouse), "% wheel_lines=");
+            (void)appendU64Dec(tuningMouse, sizeof(tuningMouse), QK::Boot::Config::GetMouseWheelLines());
+            (void)appendString(tuningMouse, sizeof(tuningMouse), " invert_wheel=");
+            (void)appendString(tuningMouse, sizeof(tuningMouse), QK::Boot::Config::GetMouseInvertWheel() ? "on" : "off");
+            ctx.writeLine(tuningMouse);
+
+            char tuningKeyboard[128];
+            QC::String::memset(tuningKeyboard, 0, sizeof(tuningKeyboard));
+            (void)appendString(tuningKeyboard, sizeof(tuningKeyboard), "hardware tuning (keyboard): repeat_delay_ms=");
+            (void)appendU64Dec(tuningKeyboard, sizeof(tuningKeyboard), QK::Boot::Config::GetKeyboardRepeatDelayMs());
+            (void)appendString(tuningKeyboard, sizeof(tuningKeyboard), " repeat_interval_ms=");
+            (void)appendU64Dec(tuningKeyboard, sizeof(tuningKeyboard), QK::Boot::Config::GetKeyboardRepeatIntervalMs());
+            ctx.writeLine(tuningKeyboard);
             return true;
         }
 
@@ -3059,6 +3884,222 @@ namespace QK::CmdCenter
 
             QK::Boot::Config::SetMouseSensitivityPercent(percent);
             ctx.writeLine("mousespeed: updated for current session");
+            return true;
+        }
+
+        static bool cmdKeyRepeat(const char *args, const QC::Cmd::Context &ctx, void *)
+        {
+            auto writeStatus = [&]()
+            {
+                char line[192];
+                QC::String::memset(line, 0, sizeof(line));
+                (void)appendString(line, sizeof(line), "keyrepeat: delay_ms=");
+                (void)appendU64Dec(line, sizeof(line), QK::Boot::Config::GetKeyboardRepeatDelayMs());
+                (void)appendString(line, sizeof(line), " interval_ms=");
+                (void)appendU64Dec(line, sizeof(line), QK::Boot::Config::GetKeyboardRepeatIntervalMs());
+                (void)appendString(line, sizeof(line), " (delay=100-2000 interval=10-250)");
+                ctx.writeLine(line);
+            };
+
+            char tok0[32];
+            QC::String::memset(tok0, 0, sizeof(tok0));
+            const char *p = args;
+            if (!readToken(p, tok0, sizeof(tok0)))
+            {
+                writeStatus();
+                return true;
+            }
+
+            if (streqIgnoreCase(tok0, "show") || streqIgnoreCase(tok0, "status"))
+            {
+                writeStatus();
+                return true;
+            }
+
+            bool persist = false;
+            const char *delayText = tok0;
+
+            char tok1[32];
+            QC::String::memset(tok1, 0, sizeof(tok1));
+            if (streqIgnoreCase(tok0, "persist") || streqIgnoreCase(tok0, "save"))
+            {
+                persist = true;
+                if (!readToken(p, tok1, sizeof(tok1)))
+                {
+                    ctx.writeLine("usage: keyrepeat [show|<delay_ms> <interval_ms>|persist <delay_ms> <interval_ms>]");
+                    return true;
+                }
+                delayText = tok1;
+            }
+
+            char tokInterval[32];
+            QC::String::memset(tokInterval, 0, sizeof(tokInterval));
+            if (!readToken(p, tokInterval, sizeof(tokInterval)))
+            {
+                ctx.writeLine("usage: keyrepeat [show|<delay_ms> <interval_ms>|persist <delay_ms> <interval_ms>]");
+                return true;
+            }
+
+            QC::u32 delayMs = 0;
+            QC::u32 intervalMs = 0;
+            if (!parseU32(delayText, delayMs) || !parseU32(tokInterval, intervalMs) ||
+                delayMs < 100 || delayMs > 2000 || intervalMs < 10 || intervalMs > 250)
+            {
+                ctx.writeLine("keyrepeat: delay must be 100..2000 ms and interval must be 10..250 ms");
+                return true;
+            }
+
+            if (persist)
+            {
+                if (static_cast<QC::u8>(ctx.callerAccess) < static_cast<QC::u8>(QC::Cmd::AccessLevel::Admin))
+                {
+                    ctx.writeLine("keyrepeat: persist requires admin");
+                    return true;
+                }
+
+                const QC::Status st = QK::Boot::Config::PersistKeyboardRepeatTiming(delayMs, intervalMs, nullptr);
+                if (st != QC::Status::Success)
+                {
+                    ctx.writeLine("keyrepeat: failed to persist startup.cfg");
+                    return true;
+                }
+                ctx.writeLine("keyrepeat: saved to startup.cfg");
+                return true;
+            }
+
+            QK::Boot::Config::SetKeyboardRepeatTiming(delayMs, intervalMs);
+            ctx.writeLine("keyrepeat: updated for current session");
+            return true;
+        }
+
+        static bool cmdMouseCfg(const char *args, const QC::Cmd::Context &ctx, void *)
+        {
+            auto writeStatus = [&]()
+            {
+                char line[192];
+                QC::String::memset(line, 0, sizeof(line));
+                (void)appendString(line, sizeof(line), "mousecfg: usb_relative=");
+                (void)appendU64Dec(line, sizeof(line), QK::Boot::Config::GetMouseUsbRelativePercent());
+                (void)appendString(line, sizeof(line), "% ps2_relative=");
+                (void)appendU64Dec(line, sizeof(line), QK::Boot::Config::GetMousePs2RelativePercent());
+                (void)appendString(line, sizeof(line), "% wheel_lines=");
+                (void)appendU64Dec(line, sizeof(line), QK::Boot::Config::GetMouseWheelLines());
+                (void)appendString(line, sizeof(line), " invert_wheel=");
+                (void)appendString(line, sizeof(line), QK::Boot::Config::GetMouseInvertWheel() ? "on" : "off");
+                ctx.writeLine(line);
+                ctx.writeLine("mousecfg ranges: usb/ps2=25..400 wheel_lines=1..16 invert_wheel=on|off");
+            };
+
+            char tok0[32];
+            QC::String::memset(tok0, 0, sizeof(tok0));
+            const char *p = args;
+            if (!readToken(p, tok0, sizeof(tok0)))
+            {
+                writeStatus();
+                return true;
+            }
+
+            bool persist = false;
+            if (streqIgnoreCase(tok0, "show") || streqIgnoreCase(tok0, "status"))
+            {
+                writeStatus();
+                return true;
+            }
+            if (streqIgnoreCase(tok0, "persist") || streqIgnoreCase(tok0, "save"))
+            {
+                persist = true;
+                if (!readToken(p, tok0, sizeof(tok0)))
+                {
+                    ctx.writeLine("usage: mousecfg [show|<usb|ps2|wheel|invertwheel> <value>|persist <usb|ps2|wheel|invertwheel> <value>]");
+                    return true;
+                }
+            }
+
+            char tok1[32];
+            QC::String::memset(tok1, 0, sizeof(tok1));
+            if (!readToken(p, tok1, sizeof(tok1)))
+            {
+                ctx.writeLine("usage: mousecfg [show|<usb|ps2|wheel|invertwheel> <value>|persist <usb|ps2|wheel|invertwheel> <value>]");
+                return true;
+            }
+
+            QC::u32 usb = QK::Boot::Config::GetMouseUsbRelativePercent();
+            QC::u32 ps2 = QK::Boot::Config::GetMousePs2RelativePercent();
+            QC::u32 wheel = QK::Boot::Config::GetMouseWheelLines();
+            bool invertWheel = QK::Boot::Config::GetMouseInvertWheel();
+
+            if (streqIgnoreCase(tok0, "usb"))
+            {
+                QC::u32 value = 0;
+                if (!parseU32(tok1, value) || value < 25 || value > 400)
+                {
+                    ctx.writeLine("mousecfg: usb must be 25..400");
+                    return true;
+                }
+                usb = value;
+            }
+            else if (streqIgnoreCase(tok0, "ps2"))
+            {
+                QC::u32 value = 0;
+                if (!parseU32(tok1, value) || value < 25 || value > 400)
+                {
+                    ctx.writeLine("mousecfg: ps2 must be 25..400");
+                    return true;
+                }
+                ps2 = value;
+            }
+            else if (streqIgnoreCase(tok0, "wheel") || streqIgnoreCase(tok0, "wheel_lines"))
+            {
+                QC::u32 value = 0;
+                if (!parseU32(tok1, value) || value < 1 || value > 16)
+                {
+                    ctx.writeLine("mousecfg: wheel lines must be 1..16");
+                    return true;
+                }
+                wheel = value;
+            }
+            else if (streqIgnoreCase(tok0, "invertwheel") || streqIgnoreCase(tok0, "invert_wheel"))
+            {
+                if (streqIgnoreCase(tok1, "1") || streqIgnoreCase(tok1, "on") || streqIgnoreCase(tok1, "yes") || streqIgnoreCase(tok1, "true"))
+                    invertWheel = true;
+                else if (streqIgnoreCase(tok1, "0") || streqIgnoreCase(tok1, "off") || streqIgnoreCase(tok1, "no") || streqIgnoreCase(tok1, "false"))
+                    invertWheel = false;
+                else
+                {
+                    ctx.writeLine("mousecfg: invertwheel must be on|off");
+                    return true;
+                }
+            }
+            else
+            {
+                ctx.writeLine("mousecfg: unknown field (use usb|ps2|wheel|invertwheel)");
+                return true;
+            }
+
+            if (persist)
+            {
+                if (static_cast<QC::u8>(ctx.callerAccess) < static_cast<QC::u8>(QC::Cmd::AccessLevel::Admin))
+                {
+                    ctx.writeLine("mousecfg: persist requires admin");
+                    return true;
+                }
+
+                const QC::Status st = QK::Boot::Config::PersistMouseBehaviorConfig(usb, ps2, wheel, invertWheel, nullptr);
+                if (st != QC::Status::Success)
+                {
+                    ctx.writeLine("mousecfg: failed to persist startup.cfg");
+                    return true;
+                }
+
+                ctx.writeLine("mousecfg: saved to startup.cfg");
+                return true;
+            }
+
+            QK::Boot::Config::SetMouseUsbRelativePercent(usb);
+            QK::Boot::Config::SetMousePs2RelativePercent(ps2);
+            QK::Boot::Config::SetMouseWheelLines(wheel);
+            QK::Boot::Config::SetMouseInvertWheel(invertWheel);
+            ctx.writeLine("mousecfg: updated for current session");
             return true;
         }
 
@@ -3137,22 +4178,56 @@ namespace QK::CmdCenter
             Session *s = sessionFrom();
             char pathTok[256];
             QC::String::memset(pathTok, 0, sizeof(pathTok));
+            char targetLabel[24];
+            QC::String::memset(targetLabel, 0, sizeof(targetLabel));
             const char *p = args;
             if (!readToken(p, pathTok, sizeof(pathTok)))
             {
-                ctx.writeLine("usage: sys_audit_export <path> present");
+                ctx.writeLine("usage: sys_audit_export <path|auto|system|shared|usb> present [ephemeral-ok]");
                 return true;
             }
 
             char path[256];
             QC::String::memset(path, 0, sizeof(path));
-            if (!resolvePath(s, pathTok, path, sizeof(path)))
+
+            ExportTarget target = ExportTarget::Auto;
+            if (parseExportTarget(pathTok, target))
             {
-                ctx.writeLine("sys_audit_export: invalid path");
-                return true;
+                QC::String::strncpy(targetLabel, pathTok, sizeof(targetLabel) - 1);
+                char refusal[160];
+                QC::String::memset(refusal, 0, sizeof(refusal));
+                if (!buildExportPathForTarget(target,
+                                              "audit_events.log",
+                                              path,
+                                              sizeof(path),
+                                              refusal,
+                                              sizeof(refusal)))
+                {
+                    char line[224];
+                    QC::String::memset(line, 0, sizeof(line));
+                    (void)appendString(line, sizeof(line), "sys_audit_export: ");
+                    (void)appendString(line, sizeof(line), refusal[0] ? refusal : "target unavailable");
+                    ctx.writeLine(line);
+                    return true;
+                }
+            }
+            else
+            {
+                QC::String::strncpy(targetLabel, "path", sizeof(targetLabel) - 1);
+                if (!resolvePath(s, pathTok, path, sizeof(path)))
+                {
+                    ctx.writeLine("sys_audit_export: invalid path");
+                    return true;
+                }
             }
 
             if (!allowWriteToPath(path, ctx, "sys_audit_export"))
+                return true;
+
+            if (!enforceEphemeralWriteGuard(path, targetLabel, args, ctx, "sys_audit_export"))
+                return true;
+
+            if (!preflightExportPath(path, estimateAuditExportBytes(), ctx, "sys_audit_export"))
                 return true;
 
             QFS::File *f = QFS::VFS::instance().open(path,
@@ -3212,7 +4287,28 @@ namespace QK::CmdCenter
             }
 
             QFS::VFS::instance().close(f);
-            ctx.writeLine("sys_audit_export: ok");
+            (void)writeExportMetadataSidecar(path, "audit_events", targetLabel, ctx, "sys_audit_export");
+            {
+                char line[320];
+                char resolvedTarget[24];
+                char persistenceClass[24];
+                QC::String::memset(resolvedTarget, 0, sizeof(resolvedTarget));
+                QC::String::memset(persistenceClass, 0, sizeof(persistenceClass));
+                inferExportPathMetadata(path,
+                                        targetLabel,
+                                        resolvedTarget,
+                                        sizeof(resolvedTarget),
+                                        persistenceClass,
+                                        sizeof(persistenceClass));
+                QC::String::memset(line, 0, sizeof(line));
+                (void)appendString(line, sizeof(line), "sys_audit_export: ok path=");
+                (void)appendString(line, sizeof(line), path);
+                (void)appendString(line, sizeof(line), " target=");
+                (void)appendString(line, sizeof(line), resolvedTarget[0] ? resolvedTarget : "unknown");
+                (void)appendString(line, sizeof(line), " persistence=");
+                (void)appendString(line, sizeof(line), persistenceClass[0] ? persistenceClass : "unknown");
+                ctx.writeLine(line);
+            }
             return true;
         }
 
@@ -4861,6 +5957,74 @@ namespace QK::CmdCenter
 
         static bool cmdShutdown(const char *, const QC::Cmd::Context &ctx, void *)
         {
+            auto phaseName = [](QK::Shutdown::Phase phase) -> const char * {
+                switch (phase)
+                {
+                case QK::Shutdown::Phase::Idle:
+                    return "idle";
+                case QK::Shutdown::Phase::NotifyingSubsystems:
+                    return "notifying-subsystems";
+                case QK::Shutdown::Phase::AwaitingUserDecision:
+                    return "awaiting-user-decision";
+                case QK::Shutdown::Phase::PoweringOff:
+                    return "powering-off";
+                default:
+                    return "unknown";
+                }
+            };
+
+            auto reasonName = [](QK::Shutdown::Reason reason) -> const char * {
+                switch (reason)
+                {
+                case QK::Shutdown::Reason::UserRequest:
+                    return "user-request";
+                case QK::Shutdown::Reason::ShellCommand:
+                    return "shell-command";
+                case QK::Shutdown::Reason::KeyboardShortcut:
+                    return "keyboard-shortcut";
+                case QK::Shutdown::Reason::SidebarPowerButton:
+                    return "sidebar-power-button";
+                case QK::Shutdown::Reason::SystemPolicy:
+                    return "system-policy";
+                default:
+                    return "unknown";
+                }
+            };
+
+            const char *args = nullptr;
+            if (ctx.args)
+                args = skipSpaces(ctx.args);
+
+            if (args && *args)
+            {
+                char op[16];
+                QC::String::memset(op, 0, sizeof(op));
+                if (!readToken(args, op, sizeof(op)))
+                {
+                    ctx.writeLine("shutdown: usage: shutdown [status]");
+                    return true;
+                }
+
+                if (streqIgnoreCase(op, "status"))
+                {
+                    auto &controller = QK::Shutdown::Controller::instance();
+
+                    char line[192];
+                    QC::String::memset(line, 0, sizeof(line));
+                    (void)appendString(line, sizeof(line), "shutdown: phase=");
+                    (void)appendString(line, sizeof(line), phaseName(controller.phase()));
+                    (void)appendString(line, sizeof(line), " reason=");
+                    (void)appendString(line, sizeof(line), reasonName(controller.reason()));
+                    ctx.writeLine(line);
+
+                    ctx.writeLine("shutdown policy: acpi-first, then grace wait, then legacy firmware/hypervisor fallback ports");
+                    return true;
+                }
+
+                ctx.writeLine("shutdown: usage: shutdown [status]");
+                return true;
+            }
+
             ctx.writeLine("Shutdown requested.");
             QK::Event::EventManager::instance().postShutdownEvent(
                 QK::Event::Type::ShutdownRequest,
@@ -6604,11 +7768,6 @@ namespace QK::CmdCenter
         static bool cmdBootLog(const char *args, const QC::Cmd::Context &ctx, void *)
         {
             const QC::usize total = QK::Boot::Log::Size();
-            if (total == 0)
-            {
-                ctx.writeLine("bootlog: (empty)");
-                return true;
-            }
 
             QC::usize startOffset = 0;
             const char *p = args ? skipSpaces(args) : nullptr;
@@ -6618,13 +7777,112 @@ namespace QK::CmdCenter
                 QC::String::memset(mode, 0, sizeof(mode));
                 if (!readToken(p, mode, sizeof(mode)))
                 {
-                    ctx.writeLine("usage: bootlog [tail [lines]]");
+                    ctx.writeLine("usage: bootlog [tail [lines]|export <auto|system|shared|usb>]");
+                    return true;
+                }
+
+                if (streqIgnoreCase(mode, "export"))
+                {
+                    char targetTok[16];
+                    QC::String::memset(targetTok, 0, sizeof(targetTok));
+                    if (!readToken(p, targetTok, sizeof(targetTok)))
+                    {
+                        ctx.writeLine("usage: bootlog export <auto|system|shared|usb> [ephemeral-ok]");
+                        return true;
+                    }
+
+                    ExportTarget target = ExportTarget::Auto;
+                    if (!parseExportTarget(targetTok, target))
+                    {
+                        ctx.writeLine("bootlog: invalid export target (use auto|system|shared|usb)");
+                        return true;
+                    }
+
+                    char outPath[256];
+                    char refusal[160];
+                    QC::String::memset(outPath, 0, sizeof(outPath));
+                    QC::String::memset(refusal, 0, sizeof(refusal));
+                    if (!buildExportPathForTarget(target,
+                                                  "bootlog.txt",
+                                                  outPath,
+                                                  sizeof(outPath),
+                                                  refusal,
+                                                  sizeof(refusal)))
+                    {
+                        char line[224];
+                        QC::String::memset(line, 0, sizeof(line));
+                        (void)appendString(line, sizeof(line), "bootlog: ");
+                        (void)appendString(line, sizeof(line), refusal[0] ? refusal : "target unavailable");
+                        ctx.writeLine(line);
+                        return true;
+                    }
+
+                    if (!allowWriteToPath(outPath, ctx, "bootlog"))
+                        return true;
+
+                    if (!enforceEphemeralWriteGuard(outPath, targetTok, args, ctx, "bootlog"))
+                        return true;
+
+                    if (!preflightExportPath(outPath, total, ctx, "bootlog"))
+                        return true;
+
+                    QFS::File *f = QFS::VFS::instance().open(outPath,
+                                                             QFS::OpenMode::Write | QFS::OpenMode::Create | QFS::OpenMode::Truncate);
+                    if (!f)
+                    {
+                        ctx.writeLine("bootlog: cannot open export output");
+                        return true;
+                    }
+
+                    QC::usize offset = 0;
+                    char chunk[256];
+                    while (offset < total)
+                    {
+                        const QC::usize n = QK::Boot::Log::CopyOut(offset, chunk, sizeof(chunk));
+                        if (n == 0)
+                            break;
+                        QC::usize off = 0;
+                        while (off < n)
+                        {
+                            const QC::isize w = f->write(chunk + off, n - off);
+                            if (w <= 0)
+                            {
+                                QFS::VFS::instance().close(f);
+                                ctx.writeLine("bootlog: export write failed");
+                                return true;
+                            }
+                            off += static_cast<QC::usize>(w);
+                        }
+                        offset += n;
+                    }
+
+                    QFS::VFS::instance().close(f);
+                    (void)writeExportMetadataSidecar(outPath, "bootlog", targetTok, ctx, "bootlog");
+                    char line[320];
+                    char resolvedTarget[24];
+                    char persistenceClass[24];
+                    QC::String::memset(resolvedTarget, 0, sizeof(resolvedTarget));
+                    QC::String::memset(persistenceClass, 0, sizeof(persistenceClass));
+                    inferExportPathMetadata(outPath,
+                                            targetTok,
+                                            resolvedTarget,
+                                            sizeof(resolvedTarget),
+                                            persistenceClass,
+                                            sizeof(persistenceClass));
+                    QC::String::memset(line, 0, sizeof(line));
+                    (void)appendString(line, sizeof(line), "bootlog: export ok path=");
+                    (void)appendString(line, sizeof(line), outPath);
+                    (void)appendString(line, sizeof(line), " target=");
+                    (void)appendString(line, sizeof(line), resolvedTarget[0] ? resolvedTarget : "unknown");
+                    (void)appendString(line, sizeof(line), " persistence=");
+                    (void)appendString(line, sizeof(line), persistenceClass[0] ? persistenceClass : "unknown");
+                    ctx.writeLine(line);
                     return true;
                 }
 
                 if (!streqIgnoreCase(mode, "tail"))
                 {
-                    ctx.writeLine("usage: bootlog [tail [lines]]");
+                    ctx.writeLine("usage: bootlog [tail [lines]|export <auto|system|shared|usb>]");
                     return true;
                 }
 
@@ -6694,6 +7952,12 @@ namespace QK::CmdCenter
                     const QC::usize idx = (head + (count - static_cast<QC::usize>(tailLines))) % kTrack;
                     startOffset = starts[idx];
                 }
+            }
+
+            if (total == 0)
+            {
+                ctx.writeLine("bootlog: (empty)");
+                return true;
             }
 
             char chunk[256];
@@ -8152,7 +9416,7 @@ namespace QK::CmdCenter
         (void)reg.registerCommandExAccess("module", QC::Cmd::AccessLevel::Admin, &cmdModule, nullptr, "Manage loadable modules (module list|load [id] [sandbox]|unload)");
         (void)reg.registerCommandExAccess("depgraph", QC::Cmd::AccessLevel::User, &cmdDepGraph, nullptr, "Emit module dependency graph from catalog (depgraph <module_id>)");
         (void)reg.registerCommandExAccess("hexdump", QC::Cmd::AccessLevel::User, &cmdHexdump, nullptr, "Hex dump a file (hexdump <path> [max_bytes])");
-        (void)reg.registerCommandExAccess("shutdown", QC::Cmd::AccessLevel::Admin, &cmdShutdown, nullptr, "Request shutdown");
+        (void)reg.registerCommandExAccess("shutdown", QC::Cmd::AccessLevel::Admin, &cmdShutdown, nullptr, "Request shutdown or show status (shutdown [status])");
 
         // Boot/config helpers.
         (void)reg.registerCommandExAccess("tier", QC::Cmd::AccessLevel::User, &cmdTier, nullptr, "Show active config tier + staged early modules");
@@ -8161,10 +9425,12 @@ namespace QK::CmdCenter
         (void)reg.registerCommandExAccess("reboot", QC::Cmd::AccessLevel::System, &cmdReboot, nullptr, "Reboot immediately (reboot now)");
         (void)reg.registerCommandExAccess("showmode", QC::Cmd::AccessLevel::User, &cmdShowMode, nullptr, "Show active startup mode (showmode)");
         (void)reg.registerCommandExAccess("mousespeed", QC::Cmd::AccessLevel::User, &cmdMouseSpeed, nullptr, "Show/set mouse sensitivity percent (mousespeed [show|<percent>|persist <percent>])");
+        (void)reg.registerCommandExAccess("mousecfg", QC::Cmd::AccessLevel::User, &cmdMouseCfg, nullptr, "Show/set pointer behavior (mousecfg [show|<usb|ps2|wheel|invertwheel> <value>|persist <...>])");
+        (void)reg.registerCommandExAccess("keyrepeat", QC::Cmd::AccessLevel::User, &cmdKeyRepeat, nullptr, "Show/set keyboard repeat timing (keyrepeat [show|<delay_ms> <interval_ms>|persist <delay_ms> <interval_ms>])");
         (void)reg.registerCommandExAccess("setmode", QC::Cmd::AccessLevel::Admin, &cmdSetMode, nullptr, "Persist startup mode to startup.cfg (setmode <DESKTOP|TERMINAL|SAFE>)");
         (void)reg.registerCommandExAccess("startx", QC::Cmd::AccessLevel::Admin, &cmdStartx, nullptr, "Set desktop startup mode for next boot (startx)");
         (void)reg.registerCommandExAccess("stopx", QC::Cmd::AccessLevel::Admin, &cmdStopx, nullptr, "Stop desktop and return to console-only mode");
-        (void)reg.registerCommandExAccess("bootlog", QC::Cmd::AccessLevel::User, &cmdBootLog, nullptr, "Dump captured boot log output (bootlog [tail [lines]])");
+        (void)reg.registerCommandExAccess("bootlog", QC::Cmd::AccessLevel::User, &cmdBootLog, nullptr, "Dump/export captured boot log output (bootlog [tail [lines]|export <auto|system|shared|usb> [ephemeral-ok]])");
         (void)reg.registerCommandExAccess("bootmodules", QC::Cmd::AccessLevel::Admin, &cmdBootModules, nullptr, "Dump early module trust metadata (role/status/hash/signature)");
         (void)reg.registerCommandExAccess("flowtest", QC::Cmd::AccessLevel::Admin, &cmdFlowTest, nullptr, "Smoke test Security Center flow policy (allow/delay/suspend/cancel)");
         (void)reg.registerCommandExAccess("flowcontrol", QC::Cmd::AccessLevel::SysAdmin, &cmdFlowControl, nullptr, "Control Security Center flow enforcement (status|bypass|enforce)");
@@ -8180,7 +9446,7 @@ namespace QK::CmdCenter
         (void)reg.registerCommandExAccess("scdumpownercred", QC::Cmd::AccessLevel::SysAdmin, &cmdScDumpOwnerCred, nullptr, "Dump Owner credential blob as hex for ramdisk seeding (scdumpownercred [raw|plain])");
         (void)reg.registerCommandExAccess("ownerlogs", QC::Cmd::AccessLevel::Admin, &cmdOwnerLogs, nullptr, "Owner-gated audit view with paging/redaction (ownerlogs [N|size=N] [page=N] present)");
         (void)reg.registerCommandExAccess("sys_audit_view", QC::Cmd::AccessLevel::SysAdmin, &cmdSysAuditView, nullptr, "Owner-gated audit view via SC dispatch (sys_audit_view [N|size=N] [page=N] present)");
-        (void)reg.registerCommandExAccess("sys_audit_export", QC::Cmd::AccessLevel::SysAdmin, &cmdSysAuditExport, nullptr, "Export audit events to file (sys_audit_export <path> present)");
+        (void)reg.registerCommandExAccess("sys_audit_export", QC::Cmd::AccessLevel::SysAdmin, &cmdSysAuditExport, nullptr, "Export audit events (sys_audit_export <path|auto|system|shared|usb> present [ephemeral-ok])");
         (void)reg.registerCommandExAccess("sys_exec_request", QC::Cmd::AccessLevel::SysAdmin, &cmdSysExecRequest, nullptr, "Submit SC execution request (sys_exec_request <request_text>)");
         (void)reg.registerCommandExAccess("sys_rotate_sst", QC::Cmd::AccessLevel::SysAdmin, &cmdSysRotateSst, nullptr, "Request SST rotation (sys_rotate_sst present)");
         (void)reg.registerCommandExAccess("sys_trust_check", QC::Cmd::AccessLevel::SysAdmin, &cmdSysTrustCheck, nullptr, "Run trust gate check through SC dispatch");
@@ -8212,7 +9478,8 @@ namespace QK::CmdCenter
         // Usage/schema metadata for auto-help and argument validation.
         (void)reg.setCommandMetadata("module", "module <list|load|unload> [module_id] [sandbox]", "subcmd:string module_id?:string mode?:string", 1, 3, true);
         (void)reg.setCommandMetadata("sys_audit_view", "sys_audit_view [N|size=N] [page=N] present", "lines_or_size?:string page?:string presence:string", 1, 3, true);
-        (void)reg.setCommandMetadata("sys_audit_export", "sys_audit_export <path> present", "path:string presence:string", 2, 2, true);
+        (void)reg.setCommandMetadata("sys_audit_export", "sys_audit_export <path|auto|system|shared|usb> present [ephemeral-ok]", "target_or_path:string presence:string override?:string", 2, 3, true);
+        (void)reg.setCommandMetadata("bootlog", "bootlog [tail [lines]|export <auto|system|shared|usb> [ephemeral-ok]]", "mode?:string arg1?:string arg2?:string", 0, 4, true);
         (void)reg.setCommandMetadata("sys_exec_request", "sys_exec_request <request_text>", "request:string", 1, 16, true);
         (void)reg.setCommandMetadata("sys_rotate_sst", "sys_rotate_sst present", "presence:string", 1, 1, true);
         (void)reg.setCommandMetadata("sys_trust_check", "sys_trust_check", "none", 0, 0, true);
@@ -8224,12 +9491,15 @@ namespace QK::CmdCenter
         (void)reg.setCommandMetadata("ports", "ports <list|audit|ratelimit|close-unused>", "op:string", 1, 1, true);
         (void)reg.setCommandMetadata("sync", "sync", "none", 0, 0, true);
         (void)reg.setCommandMetadata("clear", "clear", "none", 0, 0, true);
+        (void)reg.setCommandMetadata("shutdown", "shutdown [status]", "op?:string", 0, 1, true);
         (void)reg.setCommandMetadata("mount", "mount [list|all|volume]", "op?:string", 0, 1, true);
         (void)reg.setCommandMetadata("umount", "umount <volume|mount_path>", "target:string", 1, 1, true);
         (void)reg.setCommandMetadata("fstab", "fstab <list|apply|add|del> [volume]", "op:string volume?:string", 1, 2, true);
         (void)reg.setCommandMetadata("todoadd", "todoadd <note text>", "note:string", 1, 32, true);
         (void)reg.setCommandMetadata("cp", "cp <source> <dest>", "source:string dest:string", 2, 2, true);
         (void)reg.setCommandMetadata("mousespeed", "mousespeed [show|<percent>|persist <percent>]", "op?:string percent?:u32", 0, 2, true);
+        (void)reg.setCommandMetadata("mousecfg", "mousecfg [show|<usb|ps2|wheel|invertwheel> <value>|persist <...>]", "op?:string field?:string value?:string", 0, 3, true);
+        (void)reg.setCommandMetadata("keyrepeat", "keyrepeat [show|<delay_ms> <interval_ms>|persist <delay_ms> <interval_ms>]", "op?:string delay_ms?:u32 interval_ms?:u32", 0, 3, true);
         (void)reg.setCommandMetadata("startx", "startx", "none", 0, 0, true);
 
         // Best-effort alias map restore; empty/missing file is allowed.
