@@ -40,6 +40,15 @@ iso/EFI/BOOT/
 # QEMU host shared folder (local-only)
 shared
 shared/
+!shared/
+shared/*
+!shared/third_party/
+shared/third_party/*
+!shared/third_party/miniz.h
+!shared/third_party/miniz_common.h
+!shared/third_party/miniz_export.h
+!shared/third_party/miniz_tinfl.h
+!shared/third_party/miniz_tinfl.c
 
 # Local transcripts / runtime dumps
 Shared/citadel.txt
