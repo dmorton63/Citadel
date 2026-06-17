@@ -78,66 +78,29 @@ The screenshot above reflects the current desktop shell with the latest console-
 ## Project Structure
 
 ```
-qaiosplus-ue-naming/
-├── kernel/                  # Kernel executable target
-│   ├── QKMain.cpp          # Entry point (kernel_main)
-│   ├── QKBoot.asm          # Assembly bootstrap
-│   ├── linker.ld           # Linker script
-│   └── drivers/            # Hardware drivers (new structure)
-│       ├── QKDrvBase.h     # Base driver interfaces
-│       ├── QKDrvManager.*  # Driver probing/selection
-│       ├── PS2/            # PS/2 keyboard/mouse drivers
-│       ├── UHCI/           # USB 1.1 controller driver
-│       └── XHCI/           # USB 3.0 controller driver
-│
-├── QCommon/                 # Common utilities library
-│   ├── QCTypes.h           # Type definitions (u8, i32, PhysAddr, etc.)
-│   ├── QCString.*          # String/memory operations
-│   ├── QCLogger.*          # Logging system
-│   └── QCVector.h          # Dynamic array template
-│
-├── QKernel/                 # Kernel services library
-│   ├── QKInterrupts.*      # IDT, IRQ handlers, PIC
-│   ├── QKScheduler.*       # Task scheduling
-│   └── QKTaskManager.*     # Process management
-│
-├── QKMemory/                # Memory management
-│   ├── QKMemPMM.*          # Physical memory manager
-│   ├── QKMemVMM.*          # Virtual memory manager
-│   ├── QKMemHeap.*         # Kernel heap allocator
-│   └── QKMemTranslator.*   # Address translation/MMIO mapping
-│
-├── QArch/                   # Architecture-specific code
-│   ├── QArchGDT.*          # Global Descriptor Table
-│   ├── QArchIDT.*          # Interrupt Descriptor Table
-│   ├── QArchPCI.*          # PCI bus enumeration
-│   └── QArchPort.*         # I/O port operations
-│
-├── QEvent/                  # Event system
-│   ├── QKEventManager.*    # Event dispatch
-│   ├── QKEventQueue.*      # Event queue
-│   └── QKEventListener.*   # Event handlers
-│
-├── QDrivers/                # Hardware drivers (Timer, BGA)
-│   ├── QDrvTimer.*         # PIT/APIC timer
-│   └── QDrvBGA.*           # Bochs Graphics Adapter
-│
-├── QWindowing/              # Windowing system
-│   ├── QWWindowManager.*   # Window management
-│   ├── QWWindow.*          # Window class
-│   ├── QWFramebuffer.*     # Framebuffer access
-│   └── QWCompositor.*      # Compositing/cursor
-│
-├── QWControls/              # UI controls
-│   ├── Base/               # ControlBase plumbing
-│   ├── Containers/         # Panel, Frame, Container
-│   ├── Leaf/               # Button, Label, TextBox, ScrollBar
-│   └── Composite/          # ComboBox, ListView, etc.
-│
-├── QFileSystem/             # File system (VFS, FAT32)
-├── QNetwork/                # Networking (IPv4/ARP/ICMP/UDP/DHCP/DNS/TCP)
-├── QPR/                     # Process runtime (stub)
-└── QQuantum/                # Quantum computing (stub)
+citadel/
+├── kernel/                  # Boot path, console, and kernel entry/runtime glue
+├── QKernel/                 # Kernel services and shared command surfaces
+├── QArch/                   # x86-64 architecture support (GDT/IDT/PCI/ports)
+├── QKMemory/                # PMM/VMM/heap and memory translation
+├── QEvent/                  # Event manager, queue, and listeners
+├── QDrivers/                # Core device drivers and display bootstrap
+├── XHCI/                    # USB xHCI subsystem
+├── QFileSystem/             # VFS, FAT, volume management, mount paths
+├── QNetwork/                # IPv4/ARP/ICMP/UDP/DHCP/DNS/TCP stack
+├── QDesktop/                # Desktop shell and desktop orchestration
+├── QWindowing/              # Windows, compositor, framebuffer integration
+├── QWControls/              # UI controls library
+├── QGraphics/               # Graphics abstraction layer
+├── QCQL/                    # Citadel query/data runtime components
+├── QCCore/                  # Core common utilities
+├── QCMath/                  # Math primitives/utilities
+├── QCSerialization/         # Serialization helpers
+├── QUICommon/               # Shared UI/runtime common utilities
+├── QCommand/                # Command infrastructure helpers
+├── docs/                    # Design docs, runbooks, and reference material
+├── tools/                   # Build, verification, and diagnostic scripts
+└── build.sh / run.sh        # Primary build and run entrypoints
 ```
 
 ## Naming Conventions
