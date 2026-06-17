@@ -52,6 +52,7 @@ namespace QD
         constexpr const char *CMMS_DESKTOP_CONTROL_PROPERTIES_TABLE = "DesktopControlProperties";
         constexpr const char *CMMS_DESKTOP_CONTROL_BINDINGS_TABLE = "DesktopControlBindings";
         constexpr const char *CMMS_DESKTOP_LAYOUT_THEME_TABLE = "DesktopLayoutThemes";
+        constexpr const char *CMMS_DESKTOP_LAYOUT_CAPABILITY_TABLE = "DesktopLayoutCapabilities";
         constexpr const char *CMMS_DESKTOP_LAYOUT_ASSET_TABLE = "DesktopLayoutAssets";
         constexpr const char *CMMS_DESKTOP_LAYOUT_MATERIALIZATION_TABLE = "DesktopLayoutMaterialization";
         constexpr const char *CMMS_DESKTOP_CONTROL_HIERARCHY_TABLE = "DesktopControlHierarchy";
@@ -1876,7 +1877,10 @@ namespace QD
                 QC::u32 tableId = 0;
                 const QCQL::Status lookupSt = engine.lookupTableId(m_cmmsDatabase, CMMS_DESKTOP_LAYOUT_THEME_TABLE, tableId);
                 if (lookupSt == QCQL::Status::Success)
-                    return attachForeignKey(CMMS_DESKTOP_LAYOUT_THEME_TABLE, "layoutId", CMMS_DESKTOP_LAYOUT_TABLE, "id");
+                {
+                    return attachForeignKey(CMMS_DESKTOP_LAYOUT_THEME_TABLE, "layoutId", CMMS_DESKTOP_LAYOUT_TABLE, "id") &&
+                           attachForeignKey(CMMS_DESKTOP_LAYOUT_THEME_TABLE, "themeId", "Themes", "id");
+                }
                 if (lookupSt != QCQL::Status::NotFound)
                     return false;
 
@@ -1905,10 +1909,74 @@ namespace QD
                 themeIdCol.type = QCQL::ColumnType::Text;
                 schema.columns.push_back(static_cast<QCQL::Column &&>(themeIdCol));
 
+                QCQL::ForeignKey themeForeignKey{};
+                QC::String::strncpy(themeForeignKey.columnName, "themeId", sizeof(themeForeignKey.columnName) - 1);
+                QC::String::strncpy(themeForeignKey.referencedTable, "Themes", sizeof(themeForeignKey.referencedTable) - 1);
+                QC::String::strncpy(themeForeignKey.referencedColumn, "id", sizeof(themeForeignKey.referencedColumn) - 1);
+                schema.foreignKeys.push_back(static_cast<QCQL::ForeignKey &&>(themeForeignKey));
+
                 QCQL::Column variantCol{};
                 QC::String::strncpy(variantCol.name, "variant", sizeof(variantCol.name) - 1);
                 variantCol.type = QCQL::ColumnType::Text;
                 schema.columns.push_back(static_cast<QCQL::Column &&>(variantCol));
+
+                schema.primaryKeyIndex = 0;
+                const QCQL::Status createSt = engine.createTable(m_cmmsDatabase, schema);
+                return createSt == QCQL::Status::Success || createSt == QCQL::Status::AlreadyExists;
+            };
+
+            auto ensureDesktopLayoutCapabilityTable = [&]() -> bool
+            {
+                QC::u32 tableId = 0;
+                const QCQL::Status lookupSt = engine.lookupTableId(m_cmmsDatabase, CMMS_DESKTOP_LAYOUT_CAPABILITY_TABLE, tableId);
+                if (lookupSt == QCQL::Status::Success)
+                {
+                    return attachForeignKey(CMMS_DESKTOP_LAYOUT_CAPABILITY_TABLE, "layoutId", CMMS_DESKTOP_LAYOUT_TABLE, "id") &&
+                           attachForeignKey(CMMS_DESKTOP_LAYOUT_CAPABILITY_TABLE, "capabilityId", "Capabilities", "id");
+                }
+                if (lookupSt != QCQL::Status::NotFound)
+                    return false;
+
+                QCQL::TableSchema schema{};
+                QC::String::strncpy(schema.tableName, CMMS_DESKTOP_LAYOUT_CAPABILITY_TABLE, sizeof(schema.tableName) - 1);
+
+                QCQL::Column idCol{};
+                QC::String::strncpy(idCol.name, "id", sizeof(idCol.name) - 1);
+                idCol.type = QCQL::ColumnType::Text;
+                idCol.isPrimaryKey = true;
+                schema.columns.push_back(static_cast<QCQL::Column &&>(idCol));
+
+                QCQL::Column layoutIdCol{};
+                QC::String::strncpy(layoutIdCol.name, "layoutId", sizeof(layoutIdCol.name) - 1);
+                layoutIdCol.type = QCQL::ColumnType::Text;
+                schema.columns.push_back(static_cast<QCQL::Column &&>(layoutIdCol));
+
+                QCQL::ForeignKey layoutForeignKey{};
+                QC::String::strncpy(layoutForeignKey.columnName, "layoutId", sizeof(layoutForeignKey.columnName) - 1);
+                QC::String::strncpy(layoutForeignKey.referencedTable, CMMS_DESKTOP_LAYOUT_TABLE, sizeof(layoutForeignKey.referencedTable) - 1);
+                QC::String::strncpy(layoutForeignKey.referencedColumn, "id", sizeof(layoutForeignKey.referencedColumn) - 1);
+                schema.foreignKeys.push_back(static_cast<QCQL::ForeignKey &&>(layoutForeignKey));
+
+                QCQL::Column capabilityIdCol{};
+                QC::String::strncpy(capabilityIdCol.name, "capabilityId", sizeof(capabilityIdCol.name) - 1);
+                capabilityIdCol.type = QCQL::ColumnType::Text;
+                schema.columns.push_back(static_cast<QCQL::Column &&>(capabilityIdCol));
+
+                QCQL::ForeignKey capabilityForeignKey{};
+                QC::String::strncpy(capabilityForeignKey.columnName, "capabilityId", sizeof(capabilityForeignKey.columnName) - 1);
+                QC::String::strncpy(capabilityForeignKey.referencedTable, "Capabilities", sizeof(capabilityForeignKey.referencedTable) - 1);
+                QC::String::strncpy(capabilityForeignKey.referencedColumn, "id", sizeof(capabilityForeignKey.referencedColumn) - 1);
+                schema.foreignKeys.push_back(static_cast<QCQL::ForeignKey &&>(capabilityForeignKey));
+
+                QCQL::Column isRequiredCol{};
+                QC::String::strncpy(isRequiredCol.name, "isRequired", sizeof(isRequiredCol.name) - 1);
+                isRequiredCol.type = QCQL::ColumnType::Bool;
+                schema.columns.push_back(static_cast<QCQL::Column &&>(isRequiredCol));
+
+                QCQL::Column rationaleCol{};
+                QC::String::strncpy(rationaleCol.name, "rationale", sizeof(rationaleCol.name) - 1);
+                rationaleCol.type = QCQL::ColumnType::Text;
+                schema.columns.push_back(static_cast<QCQL::Column &&>(rationaleCol));
 
                 schema.primaryKeyIndex = 0;
                 const QCQL::Status createSt = engine.createTable(m_cmmsDatabase, schema);
@@ -2855,6 +2923,12 @@ namespace QD
             if (!ensureDesktopLayoutThemeTable())
             {
                 QC_LOG_WARN(LOG_MODULE, "CMMS DB desktop layout theme table init failed");
+                return false;
+            }
+
+            if (!ensureDesktopLayoutCapabilityTable())
+            {
+                QC_LOG_WARN(LOG_MODULE, "CMMS DB desktop layout capability table init failed");
                 return false;
             }
 
