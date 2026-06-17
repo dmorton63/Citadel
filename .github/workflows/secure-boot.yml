@@ -188,9 +188,24 @@ jobs:
     steps:
       - name: Check all jobs passed
         run: |
-          if [[ "${{ needs.build-artifacts.result }}"   != "success" ||
-                "${{ needs.sign-artifacts.result }}"    != "success" ]]; then
+          BUILD_RESULT="${{ needs.build-artifacts.result }}"
+          SIGN_RESULT="${{ needs.sign-artifacts.result }}"
+          LOG_RESULT="${{ needs.validate-boot-log.result }}"
+
+          echo "build-artifacts result: ${BUILD_RESULT}"
+          echo "sign-artifacts result: ${SIGN_RESULT}"
+          echo "validate-boot-log result: ${LOG_RESULT}"
+
+          if [[ "${BUILD_RESULT}" != "success" ||
+                "${SIGN_RESULT}"  != "success" ]]; then
             echo "Secure Boot gate FAILED."
             exit 1
           fi
+
+          # Boot-log validation is optional when no canonical log file exists.
+          if [[ "${LOG_RESULT}" != "success" && "${LOG_RESULT}" != "skipped" ]]; then
+            echo "Secure Boot gate FAILED (validate-boot-log was neither success nor skipped)."
+            exit 1
+          fi
+
           echo "Secure Boot gate PASSED."
