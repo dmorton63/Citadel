@@ -46,15 +46,50 @@ jobs:
       - name: Build
         run: cmake --build $BUILD_DIR --parallel
 
+      - name: Stage canonical secure-boot artifacts
+        run: |
+          STAGE_DIR="$BUILD_DIR/secureboot_stage"
+          mkdir -p "$STAGE_DIR"
+
+          # Limine EFI artifact: use BOOTX64.EFI from the limine submodule checkout.
+          cp limine/BOOTX64.EFI "$STAGE_DIR/Limine.efi"
+
+          # Kernel artifacts: map current kernel outputs to canonical secure-boot names
+          # expected by signing/verification tooling.
+          if [[ -f "$BUILD_DIR/citadel.bin" ]]; then
+            cp "$BUILD_DIR/citadel.bin" "$STAGE_DIR/BootGate"
+          elif [[ -f "$BUILD_DIR/kernel/citadel.bin" ]]; then
+            cp "$BUILD_DIR/kernel/citadel.bin" "$STAGE_DIR/BootGate"
+          else
+            echo "Missing kernel binary output for BootGate staging"
+            exit 1
+          fi
+
+          if [[ -f "$BUILD_DIR/kernel/citadel.elf" ]]; then
+            cp "$BUILD_DIR/kernel/citadel.elf" "$STAGE_DIR/vmlinuz"
+          else
+            echo "Missing kernel ELF output for vmlinuz staging"
+            exit 1
+          fi
+
+          if [[ -f "boot.json" ]]; then
+            cp boot.json "$STAGE_DIR/boot.json"
+          elif [[ -f "kernel/Boot/Config/boot.json" ]]; then
+            cp kernel/Boot/Config/boot.json "$STAGE_DIR/boot.json"
+          else
+            echo "Missing boot.json source for staging"
+            exit 1
+          fi
+
       - name: Upload raw artifacts
         uses: actions/upload-artifact@v4
         with:
           name: sb-raw-artifacts
           path: |
-            ${{ env.BUILD_DIR }}/**/Limine.efi
-            ${{ env.BUILD_DIR }}/**/BootGate
-            ${{ env.BUILD_DIR }}/**/vmlinuz*
-            ${{ env.BUILD_DIR }}/**/boot.json
+            ${{ env.BUILD_DIR }}/secureboot_stage/Limine.efi
+            ${{ env.BUILD_DIR }}/secureboot_stage/BootGate
+            ${{ env.BUILD_DIR }}/secureboot_stage/vmlinuz
+            ${{ env.BUILD_DIR }}/secureboot_stage/boot.json
             ${{ env.BUILD_DIR }}/**/*.ko
           if-no-files-found: error
           retention-days: 14
