@@ -2868,85 +2868,85 @@ namespace QD
             const QC::u64 schemaEnsureStartMs = QDrv::Timer::instance().milliseconds();
             if (!ensureDesktopLayoutTable(m_cmmsDatabase))
             {
-                QC_LOG_WARN(LOG_MODULE, "CMMS DB desktop layout table init failed");
+                QC_LOG_WARN(LOG_MODULE, "CMMS DB desktop layout table init failed diag=%s", engine.lastDiagnostic());
                 return false;
             }
 
             if (!ensureDesktopDocumentTable(CMMS_DESKTOP_CUIML_TABLE))
             {
-                QC_LOG_WARN(LOG_MODULE, "CMMS DB desktop CUI-ML table init failed");
+                QC_LOG_WARN(LOG_MODULE, "CMMS DB desktop CUI-ML table init failed diag=%s", engine.lastDiagnostic());
                 return false;
             }
 
             if (!ensureDesktopChunkTable(CMMS_DESKTOP_LAYOUT_CHUNK_TABLE, CMMS_DESKTOP_LAYOUT_TABLE))
             {
-                QC_LOG_WARN(LOG_MODULE, "CMMS DB desktop layout chunk table init failed");
+                QC_LOG_WARN(LOG_MODULE, "CMMS DB desktop layout chunk table init failed diag=%s", engine.lastDiagnostic());
                 return false;
             }
 
             if (!ensureDesktopChunkTable(CMMS_DESKTOP_CUIML_CHUNK_TABLE, CMMS_DESKTOP_CUIML_TABLE))
             {
-                QC_LOG_WARN(LOG_MODULE, "CMMS DB desktop CUI-ML chunk table init failed");
+                QC_LOG_WARN(LOG_MODULE, "CMMS DB desktop CUI-ML chunk table init failed diag=%s", engine.lastDiagnostic());
                 return false;
             }
 
             if (!ensureDesktopRegionTable())
             {
-                QC_LOG_WARN(LOG_MODULE, "CMMS DB desktop region table init failed");
+                QC_LOG_WARN(LOG_MODULE, "CMMS DB desktop region table init failed diag=%s", engine.lastDiagnostic());
                 return false;
             }
 
             if (!ensureDesktopControlTable())
             {
-                QC_LOG_WARN(LOG_MODULE, "CMMS DB desktop control table init failed");
+                QC_LOG_WARN(LOG_MODULE, "CMMS DB desktop control table init failed diag=%s", engine.lastDiagnostic());
                 return false;
             }
 
             if (!ensureDesktopControlRuntimeTable())
             {
-                QC_LOG_WARN(LOG_MODULE, "CMMS DB desktop control runtime table init failed");
+                QC_LOG_WARN(LOG_MODULE, "CMMS DB desktop control runtime table init failed diag=%s", engine.lastDiagnostic());
                 return false;
             }
 
             if (!ensureDesktopControlPropertiesTable())
             {
-                QC_LOG_WARN(LOG_MODULE, "CMMS DB desktop control properties table init failed");
+                QC_LOG_WARN(LOG_MODULE, "CMMS DB desktop control properties table init failed diag=%s", engine.lastDiagnostic());
                 return false;
             }
 
             if (!ensureDesktopControlBindingsTable())
             {
-                QC_LOG_WARN(LOG_MODULE, "CMMS DB desktop control bindings table init failed");
+                QC_LOG_WARN(LOG_MODULE, "CMMS DB desktop control bindings table init failed diag=%s", engine.lastDiagnostic());
                 return false;
             }
 
             if (!ensureDesktopLayoutThemeTable())
             {
-                QC_LOG_WARN(LOG_MODULE, "CMMS DB desktop layout theme table init failed");
+                QC_LOG_WARN(LOG_MODULE, "CMMS DB desktop layout theme table init failed diag=%s", engine.lastDiagnostic());
                 return false;
             }
 
             if (!ensureDesktopLayoutCapabilityTable())
             {
-                QC_LOG_WARN(LOG_MODULE, "CMMS DB desktop layout capability table init failed");
+                QC_LOG_WARN(LOG_MODULE, "CMMS DB desktop layout capability table init failed diag=%s", engine.lastDiagnostic());
                 return false;
             }
 
             if (!ensureDesktopLayoutAssetTable())
             {
-                QC_LOG_WARN(LOG_MODULE, "CMMS DB desktop layout asset table init failed");
+                QC_LOG_WARN(LOG_MODULE, "CMMS DB desktop layout asset table init failed diag=%s", engine.lastDiagnostic());
                 return false;
             }
 
             if (!ensureDesktopLayoutMaterializationTable())
             {
-                QC_LOG_WARN(LOG_MODULE, "CMMS DB desktop layout materialization table init failed");
+                QC_LOG_WARN(LOG_MODULE, "CMMS DB desktop layout materialization table init failed diag=%s", engine.lastDiagnostic());
                 return false;
             }
 
             if (!ensureDesktopControlHierarchyTable())
             {
-                QC_LOG_WARN(LOG_MODULE, "CMMS DB desktop control hierarchy table init failed");
+                QC_LOG_WARN(LOG_MODULE, "CMMS DB desktop control hierarchy table init failed diag=%s", engine.lastDiagnostic());
                 return false;
             }
             QC_LOG_INFO(LOG_MODULE,

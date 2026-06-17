@@ -12,6 +12,49 @@ namespace QCQL
     namespace
     {
         static Engine *s_engine = nullptr;
+        static char s_lastDiagnostic[256] = {};
+
+        static void clearDiagnostic()
+        {
+            QC::String::memset(s_lastDiagnostic, 0, sizeof(s_lastDiagnostic));
+        }
+
+        static void setDiagnostic(const char *message)
+        {
+            QC::String::memset(s_lastDiagnostic, 0, sizeof(s_lastDiagnostic));
+            if (message)
+                QC::String::strncpy(s_lastDiagnostic, message, sizeof(s_lastDiagnostic) - 1);
+        }
+
+        static void appendDiag(char *dst, QC::usize cap, const char *src)
+        {
+            if (!dst || cap == 0 || !src || !*src)
+                return;
+            const QC::usize used = QC::String::strlen(dst);
+            if (used + 1 >= cap)
+                return;
+            QC::String::strncpy(dst + used, src, cap - used - 1);
+        }
+
+        static void setForeignKeyDiagnostic(const char *code,
+                                            const char *tableName,
+                                            const char *columnName,
+                                            const char *referencedTable,
+                                            const char *referencedColumn)
+        {
+            char msg[256];
+            QC::String::memset(msg, 0, sizeof(msg));
+            appendDiag(msg, sizeof(msg), code ? code : "fk_error");
+            appendDiag(msg, sizeof(msg), " table=");
+            appendDiag(msg, sizeof(msg), tableName ? tableName : "?");
+            appendDiag(msg, sizeof(msg), " column=");
+            appendDiag(msg, sizeof(msg), columnName ? columnName : "?");
+            appendDiag(msg, sizeof(msg), " parent_table=");
+            appendDiag(msg, sizeof(msg), referencedTable ? referencedTable : "?");
+            appendDiag(msg, sizeof(msg), " parent_column=");
+            appendDiag(msg, sizeof(msg), referencedColumn ? referencedColumn : "?");
+            setDiagnostic(msg);
+        }
 
         static void appendU16(QC::Vector<QC::u8> &out, QC::u16 v)
         {
@@ -281,9 +324,15 @@ namespace QCQL
                                    QC::u32 &outPrimaryKeyIndex)
         {
             if (schema.tableName[0] == '\0' || schema.columns.empty() || schema.columns.size() > kMaxColumnsPerTable)
+            {
+                setDiagnostic("schema_invalid_shape");
                 return false;
+            }
             if (schema.foreignKeys.size() > kMaxForeignKeysPerTable)
+            {
+                setDiagnostic("schema_too_many_foreign_keys");
                 return false;
+            }
 
             QC::u32 pkCount = 0;
             outPrimaryKeyIndex = 0;
@@ -292,12 +341,18 @@ namespace QCQL
             {
                 const Column &col = schema.columns[i];
                 if (col.name[0] == '\0')
+                {
+                    setDiagnostic("schema_empty_column_name");
                     return false;
+                }
 
                 for (QC::usize j = i + 1; j < schema.columns.size(); ++j)
                 {
                     if (tableNameEquals(col.name, schema.columns[j].name))
+                    {
+                        setDiagnostic("schema_duplicate_column_name");
                         return false;
+                    }
                 }
 
                 if (col.isPrimaryKey)
@@ -308,7 +363,10 @@ namespace QCQL
             }
 
             if (pkCount != 1)
+            {
+                setDiagnostic("schema_primary_key_count_must_be_1");
                 return false;
+            }
 
             for (QC::usize i = 0; i < schema.foreignKeys.size(); ++i)
             {
@@ -317,33 +375,70 @@ namespace QCQL
                     foreignKey.referencedTable[0] == '\0' ||
                     foreignKey.referencedColumn[0] == '\0')
                 {
+                    setDiagnostic("schema_foreign_key_missing_fields");
                     return false;
                 }
 
                 if (foreignKey.onDelete != ReferentialAction::Restrict ||
                     foreignKey.onUpdate != ReferentialAction::Restrict)
                 {
+                    setDiagnostic("schema_foreign_key_action_not_supported");
                     return false;
                 }
 
                 const QC::i32 childColumnIndex = findColumnIndex(schema, foreignKey.columnName);
                 if (childColumnIndex < 0)
+                {
+                    setForeignKeyDiagnostic("schema_foreign_key_child_column_missing",
+                                            schema.tableName,
+                                            foreignKey.columnName,
+                                            foreignKey.referencedTable,
+                                            foreignKey.referencedColumn);
                     return false;
+                }
 
                 const Table *parentTable = findTableByName(database, foreignKey.referencedTable);
                 if (!parentTable)
+                {
+                    setForeignKeyDiagnostic("schema_foreign_key_parent_table_missing",
+                                            schema.tableName,
+                                            foreignKey.columnName,
+                                            foreignKey.referencedTable,
+                                            foreignKey.referencedColumn);
                     return false;
+                }
 
                 const QC::i32 parentColumnIndex = findColumnIndex(parentTable->schema, foreignKey.referencedColumn);
                 if (parentColumnIndex < 0)
+                {
+                    setForeignKeyDiagnostic("schema_foreign_key_parent_column_missing",
+                                            schema.tableName,
+                                            foreignKey.columnName,
+                                            foreignKey.referencedTable,
+                                            foreignKey.referencedColumn);
                     return false;
+                }
 
                 const Column &parentColumn = parentTable->schema.columns[static_cast<QC::usize>(parentColumnIndex)];
                 const Column &childColumn = schema.columns[static_cast<QC::usize>(childColumnIndex)];
                 if (!parentColumn.isPrimaryKey)
+                {
+                    setForeignKeyDiagnostic("schema_foreign_key_parent_not_primary_key",
+                                            schema.tableName,
+                                            foreignKey.columnName,
+                                            foreignKey.referencedTable,
+                                            foreignKey.referencedColumn);
                     return false;
+                }
                 if (parentColumn.type != childColumn.type)
+                {
+                    setForeignKeyDiagnostic("schema_foreign_key_type_mismatch",
+                                            schema.tableName,
+                                            foreignKey.columnName,
+                                            foreignKey.referencedTable,
+                                            foreignKey.referencedColumn);
                     return false;
+                }
             }
 
             return true;
@@ -352,12 +447,18 @@ namespace QCQL
         static bool validateRowAgainstSchema(const TableSchema &schema, const Row &row)
         {
             if (row.cells.size() != schema.columns.size())
+            {
+                setDiagnostic("row_column_count_mismatch");
                 return false;
+            }
 
             for (QC::usize i = 0; i < schema.columns.size(); ++i)
             {
                 if (row.cells[i].type != schema.columns[i].type)
+                {
+                    setDiagnostic("row_column_type_mismatch");
                     return false;
+                }
             }
 
             return true;
@@ -502,15 +603,36 @@ namespace QCQL
                 const ForeignKey &foreignKey = table.schema.foreignKeys[i];
                 const QC::i32 childColumnIndex = findColumnIndex(table.schema, foreignKey.columnName);
                 if (childColumnIndex < 0)
+                {
+                    setForeignKeyDiagnostic("fk_child_column_missing",
+                                            table.name,
+                                            foreignKey.columnName,
+                                            foreignKey.referencedTable,
+                                            foreignKey.referencedColumn);
                     return Status::Corrupt;
+                }
 
                 const QC::usize childIndex = static_cast<QC::usize>(childColumnIndex);
                 if (childIndex >= row.cells.size())
+                {
+                    setForeignKeyDiagnostic("fk_child_column_out_of_bounds",
+                                            table.name,
+                                            foreignKey.columnName,
+                                            foreignKey.referencedTable,
+                                            foreignKey.referencedColumn);
                     return Status::InvalidParam;
+                }
 
                 const Table *parentTable = findTableByName(database, foreignKey.referencedTable);
                 if (!parentTable)
+                {
+                    setForeignKeyDiagnostic("fk_parent_table_missing",
+                                            table.name,
+                                            foreignKey.columnName,
+                                            foreignKey.referencedTable,
+                                            foreignKey.referencedColumn);
                     return Status::Corrupt;
+                }
 
                 QC::u32 parentPageId = 0;
                 QC::u16 parentRowOffset = 0;
@@ -522,7 +644,14 @@ namespace QCQL
                 if (parentSt == Status::Success)
                     continue;
                 if (parentSt == Status::NotFound)
+                {
+                    setForeignKeyDiagnostic("fk_parent_row_missing",
+                                            table.name,
+                                            foreignKey.columnName,
+                                            foreignKey.referencedTable,
+                                            foreignKey.referencedColumn);
                     return Status::ConstraintViolation;
+                }
                 return parentSt;
             }
 
@@ -550,7 +679,14 @@ namespace QCQL
 
                     const QC::i32 childColumnIndex = findColumnIndex(childTable.schema, foreignKey.columnName);
                     if (childColumnIndex < 0)
+                    {
+                        setForeignKeyDiagnostic("fk_delete_child_column_missing",
+                                                childTable.name,
+                                                foreignKey.columnName,
+                                                foreignKey.referencedTable,
+                                                foreignKey.referencedColumn);
                         return Status::Corrupt;
+                    }
 
                     for (QC::usize pageIndex = 0; pageIndex < childTable.pages.size(); ++pageIndex)
                     {
@@ -573,9 +709,23 @@ namespace QCQL
 
                             const QC::usize childIndex = static_cast<QC::usize>(childColumnIndex);
                             if (childIndex >= childRow.cells.size())
+                            {
+                                setForeignKeyDiagnostic("fk_delete_child_column_out_of_bounds",
+                                                        childTable.name,
+                                                        foreignKey.columnName,
+                                                        foreignKey.referencedTable,
+                                                        foreignKey.referencedColumn);
                                 return Status::Corrupt;
+                            }
                             if (compareByteVectors(childRow.cells[childIndex].bytes, parentKey) == 0)
+                            {
+                                setForeignKeyDiagnostic("fk_delete_restrict_violation",
+                                                        childTable.name,
+                                                        foreignKey.columnName,
+                                                        foreignKey.referencedTable,
+                                                        foreignKey.referencedColumn);
                                 return Status::ConstraintViolation;
+                            }
                         }
                     }
                 }
@@ -698,6 +848,7 @@ namespace QCQL
 
     Status Engine::createTable(Database &database, const TableSchema &schema)
     {
+        clearDiagnostic();
         if (database.path[0] == '\0')
             return Status::InvalidParam;
         if (database.tables.size() >= kMaxTables)
@@ -1236,6 +1387,7 @@ namespace QCQL
     Status Engine::insertRow(Database &database, QC::u32 tableId, const Row &row,
                              QC::u32 *outPageId, QC::u16 *outRowOffset)
     {
+        clearDiagnostic();
         Table *table = findTableById(database, tableId);
         if (!table)
             return Status::NotFound;
@@ -1459,6 +1611,7 @@ namespace QCQL
                                          QC::u32 tableId,
                                          const QC::Vector<QC::u8> &key)
     {
+        clearDiagnostic();
         Table *table = findTableById(database, tableId);
         if (!table)
             return Status::NotFound;
@@ -1496,6 +1649,7 @@ namespace QCQL
                                          const QC::Vector<QC::u8> &key,
                                          const Row &updatedRow)
     {
+        clearDiagnostic();
         Table *table = findTableById(database, tableId);
         if (!table)
             return Status::NotFound;
@@ -1643,6 +1797,11 @@ namespace QCQL
         if (pageId == 0)
             return database.header.pageRegionOffset;
         return database.header.pageRegionOffset + (static_cast<QC::u64>(pageId - 1) * static_cast<QC::u64>(database.pageSize));
+    }
+
+    const char *Engine::lastDiagnostic() const
+    {
+        return s_lastDiagnostic;
     }
 
 } // namespace QCQL

@@ -67,6 +67,10 @@ namespace QCQL
                                            const char *tableName,
                                            const QC::Vector<QC::u8> &key);
 
+        // Returns the last deterministic integrity/constraint diagnostic emitted by the engine.
+        // Empty string means no diagnostic is currently set.
+        const char *lastDiagnostic() const;
+
         Engine() = default;
         Engine(const Engine &) = delete;
         Engine &operator=(const Engine &) = delete;
