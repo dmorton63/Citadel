@@ -49,6 +49,9 @@ shared/third_party/*
 !shared/third_party/miniz_export.h
 !shared/third_party/miniz_tinfl.h
 !shared/third_party/miniz_tinfl.c
+!shared/third_party/stb/
+shared/third_party/stb/*
+!shared/third_party/stb/stb_truetype.h
 
 # Local transcripts / runtime dumps
 Shared/citadel.txt
