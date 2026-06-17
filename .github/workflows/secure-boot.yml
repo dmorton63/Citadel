@@ -51,13 +51,12 @@ jobs:
         with:
           name: sb-raw-artifacts
           path: |
-            ${{ env.BUILD_DIR }}/limine/Limine.efi
-            ${{ env.BUILD_DIR }}/BootGate/BootGate
-            ${{ env.BUILD_DIR }}/kernel/vmlinuz*
-            ${{ env.BUILD_DIR }}/boot.json
-            ${{ env.BUILD_DIR }}/QFileSystem/*.ko
-            ${{ env.BUILD_DIR }}/QNetwork/*.ko
-            ${{ env.BUILD_DIR }}/QGraphics/*.ko
+            ${{ env.BUILD_DIR }}/**/Limine.efi
+            ${{ env.BUILD_DIR }}/**/BootGate
+            ${{ env.BUILD_DIR }}/**/vmlinuz*
+            ${{ env.BUILD_DIR }}/**/boot.json
+            ${{ env.BUILD_DIR }}/**/*.ko
+          if-no-files-found: error
           retention-days: 14
 
   # --------------------------------------------------------------------------
@@ -111,9 +110,14 @@ jobs:
       - name: Sign artifacts
         run: |
           # Collect artifacts into a list
-          ARTIFACTS=$(find $BUILD_DIR -name "Limine.efi" -o -name "BootGate" \
+          ARTIFACTS=$(find "$BUILD_DIR" \( -name "Limine.efi" -o -name "BootGate" \
                           -o -name "vmlinuz*" -o -name "boot.json" \
-                          -o -name "*.ko" | sort)
+                          -o -name "*.ko" \) | sort)
+
+          if [[ -z "$ARTIFACTS" ]]; then
+            echo "No signable artifacts found under $BUILD_DIR"
+            exit 1
+          fi
 
           python3 tools/sign_artifacts.py \
             --environment lab \
