@@ -112,7 +112,9 @@ Reference: `TODO_MAIN.md` next platform-depth sequence.
 
 ### Batch 31 to 40 Order
 
-- [ ] Step A: implement QCQL relational model depth first.
-- [ ] Step B: wire desktop runtime to database-first sources.
-- [ ] Step C: harden validation, fallback reporting, and diagnostics.
-- [ ] Step D: finish evidence capture and current-state documentation updates.
+- [x] Step A: implement QCQL relational model depth first.
+- [x] Step B: wire desktop runtime to database-first sources.
+- [x] Step C: harden validation, fallback reporting, and diagnostics.
+- [x] Step D: finish evidence capture and current-state documentation updates.
+
+**Status: Batch 31-40 COMPLETE** (Commit 637e461)
