@@ -5257,6 +5257,153 @@ namespace QK::CmdCenter
             return true;
         }
 
+        // Item 34: QCQL desktop-model inspection command.
+        static bool cmdQcqlDesktop(const char *args, const QC::Cmd::Context &ctx, void *)
+        {
+            // usage: qcql-desktop [status|tables|health]
+            // Inspect QCQL-backed desktop model in CMMS.QDB for readiness and table health.
+
+            const char *sub = args ? skipSpaces(args) : nullptr;
+            if (!sub || *sub == '\0')
+                sub = "status";
+
+            QCQL::Engine::instance().initialize();
+
+            // Desktop CMMS table names (same as QDesktop constants).
+            static const char *CMMS_DESKTOP_LAYOUT_TABLE = "DesktopLayouts";
+            static const char *CMMS_DESKTOP_LAYOUT_CHUNK_TABLE = "DesktopLayoutChunks";
+            static const char *CMMS_DESKTOP_REGION_TABLE = "DesktopRegions";
+            static const char *CMMS_DESKTOP_CONTROL_TABLE = "DesktopControls";
+            static const char *CMMS_DESKTOP_CONTROL_PROPERTIES_TABLE = "DesktopControlProperties";
+            static const char *CMMS_DESKTOP_LAYOUT_THEME_TABLE = "DesktopLayoutThemes";
+            static const char *CMMS_DESKTOP_LAYOUT_CAPABILITY_TABLE = "DesktopLayoutCapabilities";
+
+            // Try to open CMMS database at standard path.
+            QCQL::Database database{};
+            const QCQL::Status openSt = QCQL::Engine::instance().openDatabase("/system/CMMS.QDB", database);
+            if (openSt != QCQL::Status::Success)
+            {
+                char line[160];
+                QC::String::memset(line, 0, sizeof(line));
+                (void)appendString(line, sizeof(line), "qcql-desktop: cannot open CMMS.QDB (");
+                (void)appendString(line, sizeof(line), qcqlStatusName(openSt));
+                (void)appendString(line, sizeof(line), ")");
+                ctx.writeLine(line);
+                return true;
+            }
+
+            // Helper to count rows in a table.
+            auto countTableRows = [&database](const char *tableName) -> QC::u32 {
+                if (!tableName || database.tables.size() == 0)
+                    return 0;
+                for (QC::usize i = 0; i < database.tables.size(); ++i)
+                {
+                    if (QC::String::strcmp(database.tables[i].name, tableName) != 0)
+                        continue;
+                    // Count rows from the primary key index (one entry per row).
+                    return static_cast<QC::u32>(database.tables[i].primaryKeyIndex.entries.size());
+                }
+                return 0;
+            };
+
+            // Helper: check if table exists.
+            auto tableExists = [&database](const char *tableName) -> bool {
+                if (!tableName || database.tables.size() == 0)
+                    return false;
+                for (QC::usize i = 0; i < database.tables.size(); ++i)
+                {
+                    if (QC::String::strcmp(database.tables[i].name, tableName) == 0)
+                        return true;
+                }
+                return false;
+            };
+
+            if (streqIgnoreCase(sub, "status") || streqIgnoreCase(sub, "health"))
+            {
+                // Report desktop model health.
+                ctx.writeLine("=== Desktop QCQL Model Health ===");
+
+                char line[128];
+                QC::String::memset(line, 0, sizeof(line));
+                (void)appendString(line, sizeof(line), "Tables: ");
+                (void)appendU64Dec(line, sizeof(line), static_cast<QC::u64>(database.tables.size()));
+                ctx.writeLine(line);
+
+                // Check key tables.
+                const bool hasLayouts = tableExists(CMMS_DESKTOP_LAYOUT_TABLE);
+                const bool hasThemes = tableExists(CMMS_DESKTOP_LAYOUT_THEME_TABLE);
+                const bool hasControls = tableExists(CMMS_DESKTOP_CONTROL_TABLE);
+                const bool hasProperties = tableExists(CMMS_DESKTOP_CONTROL_PROPERTIES_TABLE);
+                const bool hasCapabilities = tableExists(CMMS_DESKTOP_LAYOUT_CAPABILITY_TABLE);
+
+                QC::String::memset(line, 0, sizeof(line));
+                (void)appendString(line, sizeof(line), "DesktopLayouts: ");
+                (void)appendString(line, sizeof(line), hasLayouts ? "present" : "MISSING");
+                ctx.writeLine(line);
+
+                QC::String::memset(line, 0, sizeof(line));
+                (void)appendString(line, sizeof(line), "DesktopLayoutThemes: ");
+                (void)appendString(line, sizeof(line), hasThemes ? "present" : "MISSING");
+                ctx.writeLine(line);
+
+                QC::String::memset(line, 0, sizeof(line));
+                (void)appendString(line, sizeof(line), "DesktopControls: ");
+                (void)appendString(line, sizeof(line), hasControls ? "present" : "MISSING");
+                ctx.writeLine(line);
+
+                QC::String::memset(line, 0, sizeof(line));
+                (void)appendString(line, sizeof(line), "DesktopControlProperties: ");
+                (void)appendString(line, sizeof(line), hasProperties ? "present" : "MISSING");
+                ctx.writeLine(line);
+
+                QC::String::memset(line, 0, sizeof(line));
+                (void)appendString(line, sizeof(line), "DesktopLayoutCapabilities: ");
+                (void)appendString(line, sizeof(line), hasCapabilities ? "present" : "MISSING");
+                ctx.writeLine(line);
+
+                // Overall readiness.
+                const bool ready = hasLayouts && hasThemes && hasControls && hasProperties;
+                ctx.writeLine("");
+                QC::String::memset(line, 0, sizeof(line));
+                (void)appendString(line, sizeof(line), "Readiness: ");
+                (void)appendString(line, sizeof(line), ready ? "READY" : "INCOMPLETE");
+                ctx.writeLine(line);
+
+                ctx.writeLine("");
+                ctx.writeLine("usage: qcql-desktop [status|tables|health]");
+                return true;
+            }
+
+            if (streqIgnoreCase(sub, "tables"))
+            {
+                // List all tables with row counts.
+                ctx.writeLine("=== Desktop CMMS Tables ===");
+
+                for (QC::usize i = 0; i < database.tables.size(); ++i)
+                {
+                    const QC::u32 rowCount = countTableRows(database.tables[i].name);
+                    char line[96];
+                    QC::String::memset(line, 0, sizeof(line));
+                    (void)appendString(line, sizeof(line), "  ");
+                    (void)appendString(line, sizeof(line), database.tables[i].name);
+                    (void)appendString(line, sizeof(line), ": ");
+                    (void)appendU64Dec(line, sizeof(line), static_cast<QC::u64>(rowCount));
+                    (void)appendString(line, sizeof(line), " rows");
+                    ctx.writeLine(line);
+                }
+
+                ctx.writeLine("");
+                ctx.writeLine("usage: qcql-desktop [status|tables|health]");
+                return true;
+            }
+
+            ctx.writeLine("usage: qcql-desktop [status|tables|health]");
+            ctx.writeLine("  status: Show desktop model readiness and key table presence");
+            ctx.writeLine("  tables: List all CMMS tables with row counts");
+            ctx.writeLine("  health: Alias for status");
+            return true;
+        }
+
         static bool cmdTouch(const char *args, const QC::Cmd::Context &ctx, void *)
         {
             Session *s = sessionFrom();
@@ -9462,6 +9609,7 @@ namespace QK::CmdCenter
         (void)reg.registerCommandExAccess("sys_vault_request", QC::Cmd::AccessLevel::SysAdmin, &cmdSysVaultRequest, nullptr, "Submit SC vault request (sys_vault_request <request_text>)");
         (void)reg.registerCommandExAccess("db", QC::Cmd::AccessLevel::Admin, &cmdDb, nullptr, "Simple persistent key/value database (db <op> ...)");
         (void)reg.registerCommandExAccess("csql", QC::Cmd::AccessLevel::Admin, &cmdCsql, nullptr, "CQL database shell (tables/schema/rows introspection)");
+        (void)reg.registerCommandExAccess("qcql-desktop", QC::Cmd::AccessLevel::User, &cmdQcqlDesktop, nullptr, "Inspect QCQL desktop model readiness and table health (qcql-desktop [status|tables|health])");
         (void)reg.registerCommandEx("regdump", &cmdRegdump, nullptr, "Dump runtime registries snapshot (counts + windows + boot seed)");
 
         // Networking helpers (for subsystem testing).
