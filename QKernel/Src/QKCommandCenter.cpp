@@ -5404,6 +5404,280 @@ namespace QK::CmdCenter
             return true;
         }
 
+        // Item 35: Migration command to convert desktop JSON/CML assets into QCQL rows.
+        static bool cmdMigrateDesktop(const char *args, const QC::Cmd::Context &ctx, void *)
+        {
+            // usage: migrate-desktop [provision|migrate] [<source_path>|auto]
+            // Provision: Seed QCQL DesktopLayout with JSON if table is empty
+            // Migrate: Replace existing QCQL layout with new JSON (use with caution)
+            // auto: Try /PROD/DESKTOP.JSN, then /GOLDEN/DESKTOP.JSN, then desktop.json
+
+            const char *p = args ? skipSpaces(args) : nullptr;
+
+            // Parse operation (default: provision)
+            char operation[16] = "provision";
+            if (p && *p)
+            {
+                const char *tail = p;
+                while (*tail && !isSpace(*tail) && (tail - p) < 15)
+                    ++tail;
+                QC::usize len = tail - p;
+                if (len > 0 && len < sizeof(operation))
+                {
+                    QC::String::memcpy(operation, p, len);
+                    operation[len] = '\0';
+                    p = skipSpaces(tail);
+                }
+            }
+
+            // Parse source path (default: auto)
+            char sourcePath[192] = "auto";
+            if (p && *p)
+            {
+                const char *tail = p;
+                while (*tail && !isSpace(*tail) && (tail - tail) < 191)
+                    ++tail;
+                QC::usize len = tail - p;
+                if (len > 0 && len < sizeof(sourcePath))
+                {
+                    QC::String::memcpy(sourcePath, p, len);
+                    sourcePath[len] = '\0';
+                }
+            }
+
+            // Validate operation.
+            if (!streqIgnoreCase(operation, "provision") && !streqIgnoreCase(operation, "migrate"))
+            {
+                ctx.writeLine("migrate-desktop: operation must be 'provision' or 'migrate'");
+                ctx.writeLine("usage: migrate-desktop [provision|migrate] [<source_path>|auto]");
+                return true;
+            }
+
+            // Resolve source file.
+            Session *s = sessionFrom();
+            char absPath[256];
+            QC::String::memset(absPath, 0, sizeof(absPath));
+
+            if (streqIgnoreCase(sourcePath, "auto"))
+            {
+                // Try standard paths in order.
+                const char *tryPaths[] = {"/PROD/DESKTOP.JSN", "/GOLDEN/DESKTOP.JSN", "/desktop.json", "/DESKTOP.JSN"};
+                bool found = false;
+                for (QC::usize i = 0; i < sizeof(tryPaths) / sizeof(tryPaths[0]); ++i)
+                {
+                    QFS::FileInfo info;
+                    QC::String::memset(&info, 0, sizeof(info));
+                    if (QFS::VFS::instance().stat(tryPaths[i], &info) == QC::Status::Success && info.type == QFS::FileType::Regular)
+                    {
+                        QC::String::strncpy(absPath, tryPaths[i], sizeof(absPath) - 1);
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found)
+                {
+                    ctx.writeLine("migrate-desktop: no source file found (tried /PROD/DESKTOP.JSN, /GOLDEN/DESKTOP.JSN, /desktop.json)");
+                    return true;
+                }
+            }
+            else if (!resolvePath(s, sourcePath, absPath, sizeof(absPath)))
+            {
+                ctx.writeLine("migrate-desktop: invalid source path");
+                return true;
+            }
+
+            // Read JSON file.
+            QC::Vector<char> fileContent;
+            if (!readFileToNullTerminatedBuffer(absPath, fileContent, 256 * 1024))
+            {
+                char line[160];
+                QC::String::memset(line, 0, sizeof(line));
+                (void)appendString(line, sizeof(line), "migrate-desktop: cannot read ");
+                (void)appendString(line, sizeof(line), absPath);
+                ctx.writeLine(line);
+                return true;
+            }
+
+            const QC::usize fileSize = fileContent.size() - 1;  // Exclude null terminator
+
+            // Parse JSON.
+            QC::JSON::Value root;
+            if (!QC::JSON::parse(fileContent.data(), root))
+            {
+                ctx.writeLine("migrate-desktop: JSON parse failed");
+                return true;
+            }
+
+            const QC::JSON::Value *desktop = root.find("desktop");
+            if (!desktop || !desktop->isObject())
+            {
+                ctx.writeLine("migrate-desktop: missing or invalid 'desktop' object in JSON");
+                return true;
+            }
+
+            // Open CMMS database.
+            QCQL::Engine::instance().initialize();
+            QCQL::Database database{};
+            const QCQL::Status openSt = QCQL::Engine::instance().openDatabase("/system/CMMS.QDB", database);
+            if (openSt != QCQL::Status::Success)
+            {
+                char line[160];
+                QC::String::memset(line, 0, sizeof(line));
+                (void)appendString(line, sizeof(line), "migrate-desktop: cannot open CMMS.QDB (");
+                (void)appendString(line, sizeof(line), qcqlStatusName(openSt));
+                (void)appendString(line, sizeof(line), ")");
+                ctx.writeLine(line);
+                return true;
+            }
+
+            // Check operation constraints.
+            bool isProvisioning = streqIgnoreCase(operation, "provision");
+            if (isProvisioning)
+            {
+                // For provision, check if layouts table already has entries.
+                for (QC::usize i = 0; i < database.tables.size(); ++i)
+                {
+                    if (QC::String::strcmp(database.tables[i].name, "DesktopLayouts") == 0)
+                    {
+                        if (database.tables[i].primaryKeyIndex.entries.size() > 0)
+                        {
+                            ctx.writeLine("migrate-desktop: QCQL already has layout data (use 'migrate' to replace)");
+                            return true;
+                        }
+                        break;
+                    }
+                }
+            }
+
+            // Serialize desktop JSON back to canonical form for reproducibility.
+            // For now, use the raw file content as payload.
+            QC::Vector<QC::u8> payload;
+            payload.reserve(fileSize);
+            for (QC::u64 i = 0; i < fileSize; ++i)
+                payload.push_back(static_cast<QC::u8>(fileContent[i]));
+
+            // Helper: Make text cell.
+            auto makeTextCell = [](const char *text) -> QCQL::Cell {
+                QCQL::Cell cell;
+                cell.type = QCQL::ColumnType::Text;
+                if (text)
+                {
+                    const QC::usize len = QC::String::strlen(text);
+                    cell.bytes.reserve(len);
+                    for (QC::usize i = 0; i < len; ++i)
+                        cell.bytes.push_back(static_cast<QC::u8>(text[i]));
+                }
+                return cell;
+            };
+
+            // Helper: Make unsigned int text cell.
+            auto makeU32TextCell = [&makeTextCell](QC::u32 value) -> QCQL::Cell {
+                char buf[32];
+                QC::String::memset(buf, 0, sizeof(buf));
+                QC::u32 v = value;
+                int idx = 0;
+                if (v == 0)
+                    buf[idx++] = '0';
+                else
+                {
+                    char tmp[32];
+                    int tmpIdx = 0;
+                    while (v > 0)
+                    {
+                        tmp[tmpIdx++] = static_cast<char>('0' + (v % 10));
+                        v /= 10;
+                    }
+                    for (int i = tmpIdx - 1; i >= 0; --i)
+                        buf[idx++] = tmp[i];
+                }
+                buf[idx] = '\0';
+                return makeTextCell(buf);
+            };
+
+            // Determine layout ID (production or golden).
+            const char *layoutId = "production";
+            const QK::Boot::Config::ConfigTier tier = QK::Boot::Config::GetActiveConfigTier();
+            if (tier == QK::Boot::Config::ConfigTier::Golden)
+                layoutId = "golden";
+
+            // Insert layout row with chunked payload.
+            const QC::u32 chunkSize = 1024;
+            const QC::u32 chunkCount = (payload.size() + chunkSize - 1) / chunkSize;
+
+            // Create layout row: id, metadata, chunkCount
+            QCQL::Row layoutRow;
+            layoutRow.cells.push_back(makeTextCell(layoutId));
+            layoutRow.cells.push_back(makeTextCell(absPath));
+            layoutRow.cells.push_back(makeU32TextCell(chunkCount));
+
+            const QCQL::Status insertSt = QCQL::Engine::instance().insertRowByName(
+                database, "DesktopLayouts", layoutRow);
+            if (insertSt != QCQL::Status::Success)
+            {
+                char line[160];
+                QC::String::memset(line, 0, sizeof(line));
+                (void)appendString(line, sizeof(line), "migrate-desktop: insert layout row failed (");
+                (void)appendString(line, sizeof(line), qcqlStatusName(insertSt));
+                (void)appendString(line, sizeof(line), ")");
+                ctx.writeLine(line);
+                return true;
+            }
+
+            // Insert chunk rows.
+            for (QC::u32 chunkIdx = 0; chunkIdx < chunkCount; ++chunkIdx)
+            {
+                const QC::u32 offset = chunkIdx * chunkSize;
+                const QC::u32 bytesInChunk = (offset + chunkSize <= payload.size())
+                                               ? chunkSize
+                                               : (payload.size() - offset);
+
+                QCQL::Row chunkRow;
+                chunkRow.cells.push_back(makeTextCell(layoutId));
+                chunkRow.cells.push_back(makeU32TextCell(chunkIdx));
+
+                // Chunk data as base64-encoded text for safety.
+                char chunkText[1536];
+                QC::String::memset(chunkText, 0, sizeof(chunkText));
+                QC::usize outIdx = 0;
+                for (QC::u32 i = 0; i < bytesInChunk && outIdx + 2 < sizeof(chunkText); ++i)
+                {
+                    const QC::u8 byte = payload[offset + i];
+                    static const char *kHex = "0123456789ABCDEF";
+                    chunkText[outIdx++] = kHex[(byte >> 4) & 0xF];
+                    chunkText[outIdx++] = kHex[byte & 0xF];
+                }
+                chunkText[outIdx] = '\0';
+                chunkRow.cells.push_back(makeTextCell(chunkText));
+
+                const QCQL::Status chunkSt = QCQL::Engine::instance().insertRowByName(
+                    database, "DesktopLayoutChunks", chunkRow);
+                if (chunkSt != QCQL::Status::Success)
+                {
+                    char line[160];
+                    QC::String::memset(line, 0, sizeof(line));
+                    (void)appendString(line, sizeof(line), "migrate-desktop: insert chunk ");
+                    (void)appendU64Dec(line, sizeof(line), chunkIdx);
+                    (void)appendString(line, sizeof(line), " failed (");
+                    (void)appendString(line, sizeof(line), qcqlStatusName(chunkSt));
+                    (void)appendString(line, sizeof(line), ")");
+                    ctx.writeLine(line);
+                    return true;
+                }
+            }
+
+            ctx.writeLine("migrate-desktop: success");
+            char line[160];
+            QC::String::memset(line, 0, sizeof(line));
+            (void)appendString(line, sizeof(line), "  layout: ");
+            (void)appendString(line, sizeof(line), layoutId);
+            (void)appendString(line, sizeof(line), " chunks: ");
+            (void)appendU64Dec(line, sizeof(line), chunkCount);
+            (void)appendString(line, sizeof(line), " bytes: ");
+            (void)appendU64Dec(line, sizeof(line), payload.size());
+            ctx.writeLine(line);
+            return true;
+        }
+
         static bool cmdTouch(const char *args, const QC::Cmd::Context &ctx, void *)
         {
             Session *s = sessionFrom();
@@ -9610,6 +9884,7 @@ namespace QK::CmdCenter
         (void)reg.registerCommandExAccess("db", QC::Cmd::AccessLevel::Admin, &cmdDb, nullptr, "Simple persistent key/value database (db <op> ...)");
         (void)reg.registerCommandExAccess("csql", QC::Cmd::AccessLevel::Admin, &cmdCsql, nullptr, "CQL database shell (tables/schema/rows introspection)");
         (void)reg.registerCommandExAccess("qcql-desktop", QC::Cmd::AccessLevel::User, &cmdQcqlDesktop, nullptr, "Inspect QCQL desktop model readiness and table health (qcql-desktop [status|tables|health])");
+        (void)reg.registerCommandExAccess("migrate-desktop", QC::Cmd::AccessLevel::Admin, &cmdMigrateDesktop, nullptr, "Migrate desktop JSON/CML to QCQL (migrate-desktop [provision|migrate] [path|auto])");
         (void)reg.registerCommandEx("regdump", &cmdRegdump, nullptr, "Dump runtime registries snapshot (counts + windows + boot seed)");
 
         // Networking helpers (for subsystem testing).
