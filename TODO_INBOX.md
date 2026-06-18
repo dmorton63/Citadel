@@ -104,11 +104,11 @@ Reference: `TODO_MAIN.md` next platform-depth sequence.
 
 ### Tighten Now
 
-- [ ] Item 36: Tighten boot-time desktop data validation so malformed/incomplete QCQL desktop models fail closed to terminal with explicit recovery guidance.
-- [ ] Item 37: Tighten desktop theme/layout apply-path diagnostics so stage failures identify table/row/key root cause in both boot logs and command output.
-- [ ] Item 38: Tighten fallback policy between QCQL data and file import so fallback reason is explicit and emits structured boot events.
-- [ ] Item 39: Tighten evidence hygiene by adding a concrete validation checklist for QCQL desktop-model bring-up across reboot cycles.
-- [ ] Item 40: Tighten current-state and roadmap documentation after Items 31 to 39 land, including durable evidence locations for regressions.
+- [x] Item 36: Tighten boot-time desktop data validation so malformed/incomplete QCQL desktop models fail closed to terminal with explicit recovery guidance.
+- [x] Item 37: Tighten desktop theme/layout apply-path diagnostics so stage failures identify table/row/key root cause in both boot logs and command output.
+- [x] Item 38: Tighten fallback policy between QCQL data and file import so fallback reason is explicit and emits structured boot events.
+- [x] Item 39: Tighten evidence hygiene by adding a concrete validation checklist for QCQL desktop-model bring-up across reboot cycles.
+- [x] Item 40: Tighten current-state and roadmap documentation after Items 31 to 39 land, including durable evidence locations for regressions.
 
 ### Batch 31 to 40 Order
 

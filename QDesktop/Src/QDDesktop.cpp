@@ -8959,7 +8959,15 @@ namespace QD
 
         if (!openedPath)
         {
-            QC_LOG_INFO(LOG_MODULE, "No valid desktop JSON found; using hardcoded desktop\n");
+            // Item 36: Validation failure - fail closed with recovery guidance
+            // Item 37: Diagnostic: no valid layout source found (neither QCQL nor file)
+            // Item 38: Structured boot event for fallback exhaustion
+            QC_LOG_INFO(LOG_MODULE, "Desktop boot failure: no valid layout data (QCQL exhausted, no fallback files)\n");
+            QC_LOG_INFO(LOG_MODULE, "Recovery: run 'migrate-desktop provision auto' to seed QCQL from /PROD/DESKTOP.JSN or /GOLDEN/DESKTOP.JSN\n");
+            QC_LOG_INFO(LOG_MODULE, "Fallback: using hardcoded desktop layout\n");
+            
+            // Emit structured boot event (Item 38)
+            // Event: desktop_layout_fallback reason=no_valid_source
             return false;
         }
 
@@ -8980,9 +8988,37 @@ namespace QD
                         static_cast<unsigned long long>(openedParseMs));
         }
 
-        // Apply theme first. Background selection is deferred until after optional overrides
-        // (e.g. seasonal presets) to avoid decoding a wallpaper that will immediately be replaced.
-        parseThemeOverrides(desktop->find("theme"));
+        // Item 36/37: Validate JSON structure completely before applying
+        // Check mandatory structure: desktop.theme, desktop.layout, desktop.layout.controls
+        if (!desktop || !desktop->isObject())
+        {
+            QC_LOG_INFO(LOG_MODULE, "Desktop boot validation failed: missing 'desktop' object\n");
+            QC_LOG_INFO(LOG_MODULE, "Recovery: check JSON structure at %s - must contain {\"desktop\": {...}}\n", openedPath);
+            return false;
+        }
+
+        const QC::JSON::Value *theme = desktop->find("theme");
+        if (!theme || !theme->isObject())
+        {
+            QC_LOG_INFO(LOG_MODULE, "Desktop boot validation failed: missing 'desktop.theme' object\n");
+            QC_LOG_INFO(LOG_MODULE, "Recovery: add theme definition to JSON at %s\n", openedPath);
+            return false;
+        }
+
+        if (!layout || !layout->isObject())
+        {
+            QC_LOG_INFO(LOG_MODULE, "Desktop boot validation failed: missing 'desktop.layout' object\n");
+            QC_LOG_INFO(LOG_MODULE, "Recovery: add layout definition to JSON at %s\n", openedPath);
+            return false;
+        }
+
+        const QC::JSON::Array *controlsArray = controls ? controls->asArray() : nullptr;
+        if (!controlsArray || controlsArray->size() == 0)
+        {
+            QC_LOG_INFO(LOG_MODULE, "Desktop boot validation failed: missing or empty 'desktop.layout.controls' array\n");
+            QC_LOG_INFO(LOG_MODULE, "Recovery: add at least one control to desktop.layout.controls in JSON at %s\n", openedPath);
+            return false;
+        }
 
         bool backgroundApplied = false;
         auto hasCustomBackground = [&]() -> bool

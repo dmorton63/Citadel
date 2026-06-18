@@ -434,3 +434,71 @@ High-level rules:
   - [QKernel/Src/QKCommandCenter.cpp](QKernel/Src/QKCommandCenter.cpp)
   - [kernel/Drivers/XHCI/QKDrvXHCI.cpp](kernel/Drivers/XHCI/QKDrvXHCI.cpp)
   - [kernel/Drivers/PS2/QKDrvPS2Mouse.cpp](kernel/Drivers/PS2/QKDrvPS2Mouse.cpp)
+
+## 13. Evidence Locations (Batch 31 to 40 — QCQL Desktop Depth)
+
+### Items 31-35: Expand QCQL Relational Model + Migration
+
+- QCQL schema extensions for desktop (normalized tables, FKs, capabilities):
+  - [QCQL/Include/QCQLEngine.h](QCQL/Include/QCQLEngine.h) — `lastDiagnostic()` accessor
+  - [QCQL/Src/QCQLEngine.cpp](QCQL/Src/QCQLEngine.cpp) — Deterministic FK diagnostics infrastructure
+  - [QDesktop/Src/QDDesktop.cpp](QDesktop/Src/QDDesktop.cpp) — CMMS schema creation with DesktopLayoutCapabilities (line ~1920-2000)
+
+- QCQL-primary boot loading (Item 33):
+  - [QDesktop/Src/QDDesktop.cpp](QDesktop/Src/QDDesktop.cpp) — `Desktop::initialize()` (line ~1155) queries QCQL first, falls back to file import
+  - `tryInitializeFromJson()` (line ~8794) — Primary QCQL path, then CUI-ML, then JSON, then hardcoded
+
+- Command-layer QCQL inspection (Item 34):
+  - `qcql-desktop` command registration: [QKernel/Src/QKCommandCenter.cpp](QKernel/Src/QKCommandCenter.cpp#L5261)
+  - Lists desktop tables with row counts and readiness status
+
+- Asset migration tooling (Item 35):
+  - `migrate-desktop` command registration: [QKernel/Src/QKCommandCenter.cpp](QKernel/Src/QKCommandCenter.cpp#L5407)
+  - Converts JSON/CML to QCQL DesktopLayout rows with chunked payload storage
+  - Supports `provision` (seed if empty) and `migrate` (replace) modes
+  - `auto` discovery of `/PROD/DESKTOP.JSN`, `/GOLDEN/DESKTOP.JSN`, `/desktop.json`
+
+### Items 36-40: Tighten Validation, Diagnostics, Fallback Policy, Checklist
+
+- Boot-time validation with fail-closed behavior (Item 36):
+  - [QDesktop/Src/QDDesktop.cpp](QDesktop/Src/QDDesktop.cpp) — `tryInitializeFromJson()` validates mandatory structure:
+    - Checks `desktop` object presence
+    - Checks `desktop.theme` object presence
+    - Checks `desktop.layout` object presence
+    - Checks `desktop.layout.controls` array non-empty
+    - Each validation failure produces recovery guidance and falls through to next attempt
+
+- Apply-path diagnostics with root-cause identification (Item 37):
+  - [QDesktop/Src/QDDesktop.cpp](QDesktop/Src/QDDesktop.cpp) — Enhanced logging at each apply stage:
+    - "Desktop boot failure: ..." messages with specific root causes
+    - "Recovery: ..." messages with explicit recovery actions
+    - Diagnostic codes: `no_valid_source`, `missing_desktop_object`, `missing_theme`, `missing_layout`, `missing_controls`
+
+- Fallback policy with structured boot events (Item 38):
+  - [QDesktop/Src/QDDesktop.cpp](QDesktop/Src/QDDesktop.cpp) — Boot flow tracks:
+    - Primary source: QCQL (`openedFromDatabase` flag)
+    - Fallback reasons: QCQL exhausted → file import attempted → both failed → hardcoded
+    - Boot messages now explicitly state: "Desktop mode: QCQL|JSON (with QCQL fallback)|hardcoded fallback"
+  - Structured events (design): `desktop_layout_fallback reason=...` emitted when fallback occurs
+
+- Validation checklist document (Item 39):
+  - [docs/QCQL_DESKTOP_VALIDATION_CHECKLIST.md](docs/QCQL_DESKTOP_VALIDATION_CHECKLIST.md)
+  - 9 validation cycles: migration, QCQL primary, JSON fallback, hardcoded fallback, recovery
+  - Error case validation: malformed JSON, missing objects/arrays, recovery guidance verification
+  - Boot event sequence specification
+  - Performance targets and sign-off checklist
+
+- Current-state documentation update (Item 40):
+  - This section (Section 13 of CITADEL_CURRENT_STATE.md)
+  - Evidence locations for all Items 31-40 collected
+  - Durable regression evidence points established
+
+**Status: Batch 31-40 Step C (Harden validation, diagnostics, fallback) — COMPLETE**
+**Date: 2026-06-18**
+**Commits:**
+- Item 31: `208937b` (schema + capabilities)
+- Item 32: `0fab8a0` (FK diagnostics)
+- Item 33: `b91d7c2` (QCQL-primary boot loading)
+- Item 34: `a56211a` (qcql-desktop command)
+- Item 35: `c7b203a` (migrate-desktop command)
+- Items 36-40: This session (validation + diagnostics + checklist + docs)
