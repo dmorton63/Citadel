@@ -98,7 +98,7 @@ Reference: `TODO_MAIN.md` next platform-depth sequence.
 
 - [x] Item 31: Expand QCQL schema support so desktop data can use normalized relational tables (layout, controls, bindings, themes, capabilities) instead of chunk-style payload storage.
 - [x] Item 32: Expand QCQL integrity behavior with explicit relationship/foreign-key checks and deterministic rejection diagnostics for invalid references.
-- [ ] Item 33: Expand desktop boot loading so QCQL-backed layout/theme models are the primary runtime source, with file import as provisioning-only fallback.
+- [x] Item 33: Expand desktop boot loading so QCQL-backed layout/theme models are the primary runtime source, with file import as provisioning-only fallback.
 - [ ] Item 34: Expand command-layer QCQL inspection so operators can view desktop-model readiness and key table health from terminal tools.
 - [ ] Item 35: Expand migration tooling that converts existing desktop JSON/CML assets into QCQL relational rows with reproducible output.
 

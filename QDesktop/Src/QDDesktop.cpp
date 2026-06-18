@@ -1151,7 +1151,13 @@ namespace QD
         // Keep it hidden until initialization completes.
         m_desktopWindow->setFlags(QW::WindowFlags::AlwaysBottom | QW::WindowFlags::NoFocus);
 
-        // Prefer a CUI-ML desktop definition if present and valid; otherwise fall back to desktop JSON.
+        // Item 33: QCQL-backed layout/theme is now primary; file import is provisioning-only fallback.
+        // tryInitializeFromJson() attempts QCQL lookup first (primary), then falls back to file import.
+        // tryInitializeFromCuiML() provides alternative file-based provisioning.
+        // Boot loading order (enforced in tryInitializeFromJson):
+        // 1. QCQL DesktopLayoutTable lookup (primary).
+        // 2. If QCQL data is missing/incomplete, fallback to file import (CUI-ML, then JSON).
+        // 3. If both fail, use hardcoded defaults.
         const bool initializedFromCuiML = tryInitializeFromCuiML();
         const bool initializedFromJson = !initializedFromCuiML && tryInitializeFromJson();
         if (!initializedFromCuiML && !initializedFromJson)
@@ -1169,7 +1175,7 @@ namespace QD
         if (initializedFromCuiML)
             QC_LOG_INFO(LOG_MODULE, "Desktop mode: CUI-ML\n");
         else if (initializedFromJson)
-            QC_LOG_INFO(LOG_MODULE, "Desktop mode: JSON\n");
+            QC_LOG_INFO(LOG_MODULE, "Desktop mode: JSON (with QCQL fallback)\n");
         else
             QC_LOG_INFO(LOG_MODULE, "Desktop mode: hardcoded fallback\n");
 
