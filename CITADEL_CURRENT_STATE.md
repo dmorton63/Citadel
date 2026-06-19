@@ -502,3 +502,15 @@ High-level rules:
 - Item 34: `a56211a` (qcql-desktop command)
 - Item 35: `c7b203a` (migrate-desktop command)
 - Items 36-40: This session (validation + diagnostics + checklist + docs)
+
+## 14. Additional Helper Surfaces (Batch 41 Start)
+
+- VFS-backed file watching helper:
+  - [QFileSystem/Include/QFSFileWatcher.h](QFileSystem/Include/QFSFileWatcher.h)
+  - [QFileSystem/Src/QFSFileWatcher.cpp](QFileSystem/Src/QFSFileWatcher.cpp)
+  - Polls `statPath()` and emits change events on create, modify, or disappear transitions.
+
+- QJFunctions JIT debug mode surface:
+  - [QJFunctions/Include/QJFunctionRegistry.h](QJFunctions/Include/QJFunctionRegistry.h)
+  - [QJFunctions/Src/QJFunctionRegistry.cpp](QJFunctions/Src/QJFunctionRegistry.cpp)
+  - Adds `setJitDebugMode(bool)` / `jitDebugMode()` and extra lifecycle logging for validation and invalidation.

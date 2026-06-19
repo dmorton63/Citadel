@@ -10,6 +10,7 @@ add_library(QFileSystem STATIC
     Src/QFSCache.cpp
     Src/QFSPath.cpp
     Src/QFSVolumeManager.cpp
+    Src/QFSFileWatcher.cpp
 )
 
 target_include_directories(QFileSystem PUBLIC Include)

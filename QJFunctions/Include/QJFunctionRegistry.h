@@ -49,6 +49,10 @@ namespace QC
             // sc may be null (signature verification is skipped when sc is null).
             bool validate(const char* stableIdentity, SCContext* sc);
 
+            // Enable or disable extra JIT lifecycle logging.
+            void setJitDebugMode(bool enabled) { m_jitDebugMode = enabled; }
+            bool jitDebugMode() const { return m_jitDebugMode; }
+
             // Mark JIT-eligible: transitions Validated → JitReady.
             // Requires: state == Validated, entry->jitAllowed == true,
             //           sc != null, sc->deviceState() == Operational.
@@ -103,6 +107,7 @@ namespace QC
             Registry& operator=(const Registry&) = delete;
 
             QC::Vector<FunctionEntry> m_entries;
+            bool m_jitDebugMode = false;
         };
 
     } // namespace JFunc

@@ -256,6 +256,14 @@ namespace QC
             e->state = FunctionState::Validated;
             e->lastValidatedTick = sc ? sc->currentTick() : 0u;
 
+            if (m_jitDebugMode)
+            {
+                QC_LOG_INFO(LOG_MODULE, "jit_debug: validate identity=%s jitAllowed=%u state=%u",
+                            stableIdentity,
+                            e->jitAllowed ? 1u : 0u,
+                            static_cast<QC::u32>(e->state));
+            }
+
             if (sc)
                 sc->auditLog("fn_validated", stableIdentity);
 
@@ -299,6 +307,14 @@ namespace QC
             }
 
             e->state = FunctionState::JitReady;
+
+            if (m_jitDebugMode)
+            {
+                QC_LOG_INFO(LOG_MODULE, "jit_debug: ready identity=%s requiredAuthority=%u",
+                            stableIdentity,
+                            static_cast<QC::u32>(e->requiredAuthority));
+            }
+
             sc->auditLog("fn_jit_ready", stableIdentity);
             QC_LOG_INFO(LOG_MODULE, "markJitReady: ok identity=%s", stableIdentity);
             return true;
@@ -331,6 +347,13 @@ namespace QC
             e->kind          = FunctionKind::DllOverride;
             e->state         = FunctionState::DllOverride;
 
+            if (m_jitDebugMode)
+            {
+                QC_LOG_INFO(LOG_MODULE, "jit_debug: dll override identity=%s dll=%s",
+                            stableIdentity,
+                            dllPath ? dllPath : "(stub)");
+            }
+
             sc->auditLog("fn_dll_override", stableIdentity);
             QC_LOG_INFO(LOG_MODULE, "markDllOverride: ok identity=%s dll=%s",
                         stableIdentity, dllPath ? dllPath : "(stub)");
@@ -354,6 +377,13 @@ namespace QC
             e->state      = FunctionState::Unvalidated;
             e->dllCallFn  = nullptr;
 
+            if (m_jitDebugMode)
+            {
+                QC_LOG_INFO(LOG_MODULE, "jit_debug: invalidate identity=%s reason=%u",
+                            stableIdentity,
+                            static_cast<QC::u32>(reason));
+            }
+
             if (sc)
                 sc->auditLog("fn_invalidated", stableIdentity);
 
@@ -371,6 +401,9 @@ namespace QC
             }
             // Free all JIT pages.
             JitAllocator::instance().freeAll();
+
+            if (m_jitDebugMode)
+                QC_LOG_INFO(LOG_MODULE, "jit_debug: invalidate_all reason=%u", static_cast<QC::u32>(reason));
 
             if (sc)
                 sc->auditLog("fn_registry_invalidated_all", "reason");
