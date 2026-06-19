@@ -12,6 +12,7 @@
 #include "AHCI/QKDrvAHCI.h"
 #include "IDE/QKDrvIDE.h"
 #include "QFSDirectory.h"
+#include "QFSFile.h"
 #include "QFSVFS.h"
 #include "QFSVolumeManager.h"
 
@@ -586,6 +587,237 @@ namespace QK
                 return hasEntry;
             }
 
+            static bool ensureDirectoryExists(const char *path)
+            {
+                if (!path || !*path)
+                    return false;
+
+                if (isPathOfType(path, QFS::FileType::Directory))
+                    return true;
+
+                char working[256];
+                QC::String::memset(working, 0, sizeof(working));
+                QC::String::strncpy(working, path, sizeof(working) - 1);
+                working[sizeof(working) - 1] = '\0';
+
+                for (QC::usize i = 1; working[i] != '\0'; ++i)
+                {
+                    if (working[i] != '/')
+                        continue;
+
+                    working[i] = '\0';
+                    if (working[0] != '\0' && !isPathOfType(working, QFS::FileType::Directory))
+                    {
+                        const QC::Status st = QFS::VFS::instance().createDir(working);
+                        if (st != QC::Status::Success && !isPathOfType(working, QFS::FileType::Directory))
+                            return false;
+                    }
+                    working[i] = '/';
+                }
+
+                if (!isPathOfType(working, QFS::FileType::Directory))
+                {
+                    const QC::Status st = QFS::VFS::instance().createDir(working);
+                    if (st != QC::Status::Success && !isPathOfType(working, QFS::FileType::Directory))
+                        return false;
+                }
+
+                return true;
+            }
+
+            static bool joinPath(char *dst, QC::usize cap, const char *base, const char *name)
+            {
+                if (!dst || cap == 0 || !base || !name)
+                    return false;
+
+                QC::usize pos = 0;
+                QC::String::memset(dst, 0, cap);
+                appendText(dst, cap, pos, base);
+                if (pos > 0 && dst[pos - 1] != '/')
+                    appendChar(dst, cap, pos, '/');
+                appendText(dst, cap, pos, name);
+                return dst[0] != '\0';
+            }
+
+            static bool copyFilePath(const char *srcPath, const char *dstPath)
+            {
+                if (!srcPath || !dstPath)
+                    return false;
+
+                QFS::File *src = QFS::VFS::instance().open(srcPath, QFS::OpenMode::Read);
+                if (!src)
+                    return false;
+
+                QFS::File *dst = QFS::VFS::instance().open(dstPath,
+                                                           QFS::OpenMode::Write | QFS::OpenMode::Create |
+                                                               QFS::OpenMode::Truncate | QFS::OpenMode::Binary);
+                if (!dst)
+                {
+                    (void)QFS::VFS::instance().close(src);
+                    return false;
+                }
+
+                char buffer[1024];
+                bool ok = true;
+                while (true)
+                {
+                    const QC::isize n = src->read(buffer, sizeof(buffer));
+                    if (n < 0)
+                    {
+                        ok = false;
+                        break;
+                    }
+                    if (n == 0)
+                        break;
+
+                    const QC::isize w = dst->write(buffer, static_cast<QC::usize>(n));
+                    if (w != n)
+                    {
+                        ok = false;
+                        break;
+                    }
+                }
+
+                (void)dst->flush();
+                (void)QFS::VFS::instance().close(dst);
+                (void)QFS::VFS::instance().close(src);
+                return ok;
+            }
+
+            static bool copyDirectoryRecursive(const char *srcDir,
+                                               const char *dstDir,
+                                               QC::u32 &outFiles,
+                                               QC::u64 &outBytes)
+            {
+                if (!srcDir || !dstDir)
+                    return false;
+
+                if (!ensureDirectoryExists(dstDir))
+                    return false;
+
+                QFS::Directory *dir = QFS::VFS::instance().openDir(srcDir);
+                if (!dir)
+                    return false;
+
+                bool ok = true;
+                QFS::DirEntry entry{};
+                while (dir->read(&entry))
+                {
+                    if ((entry.name[0] == '.' && entry.name[1] == '\0') ||
+                        (entry.name[0] == '.' && entry.name[1] == '.' && entry.name[2] == '\0'))
+                    {
+                        continue;
+                    }
+
+                    char srcPath[256];
+                    char dstPath[256];
+                    if (!joinPath(srcPath, sizeof(srcPath), srcDir, entry.name) ||
+                        !joinPath(dstPath, sizeof(dstPath), dstDir, entry.name))
+                    {
+                        ok = false;
+                        break;
+                    }
+
+                    if (entry.type == QFS::FileType::Directory)
+                    {
+                        if (!copyDirectoryRecursive(srcPath, dstPath, outFiles, outBytes))
+                        {
+                            ok = false;
+                            break;
+                        }
+                        continue;
+                    }
+
+                    if (!copyFilePath(srcPath, dstPath))
+                    {
+                        ok = false;
+                        break;
+                    }
+
+                    ++outFiles;
+                    outBytes += entry.size;
+                }
+
+                (void)QFS::VFS::instance().closeDir(dir);
+                return ok;
+            }
+
+            static bool deployInstallerPayload(const QC::Cmd::Context &ctx)
+            {
+                writeInstallerStage(ctx, "copy_payload", "begin");
+
+                static const char *kRequiredScaffoldDirs[] = {
+                    "/system/.sc",
+                    "/system/config",
+                    "/system/config/apps",
+                };
+
+                static const struct
+                {
+                    const char *src;
+                    const char *dst;
+                } kCopyMaps[] = {
+                    {"/UI", "/system/ui"},
+                    {"/WALL", "/system/wall"},
+                    {"/ICONS", "/system/icons"},
+                    {"/FONTS", "/system/fonts"},
+                };
+
+                for (QC::usize i = 0; i < (sizeof(kRequiredScaffoldDirs) / sizeof(kRequiredScaffoldDirs[0])); ++i)
+                {
+                    if (!ensureDirectoryExists(kRequiredScaffoldDirs[i]))
+                    {
+                        char line[200];
+                        QC::usize pos = 0;
+                        QC::String::memset(line, 0, sizeof(line));
+                        appendText(line, sizeof(line), pos, "installer: stage=copy_payload status=failure op=create_dir path=");
+                        appendText(line, sizeof(line), pos, kRequiredScaffoldDirs[i]);
+                        writeInstallerLine(ctx, line);
+                        return false;
+                    }
+                }
+
+                QC::u32 copiedFiles = 0;
+                QC::u64 copiedBytes = 0;
+                for (QC::usize i = 0; i < (sizeof(kCopyMaps) / sizeof(kCopyMaps[0])); ++i)
+                {
+                    if (!isPathOfType(kCopyMaps[i].src, QFS::FileType::Directory))
+                    {
+                        char line[220];
+                        QC::usize pos = 0;
+                        QC::String::memset(line, 0, sizeof(line));
+                        appendText(line, sizeof(line), pos, "installer: stage=copy_payload status=failure op=missing_source_dir path=");
+                        appendText(line, sizeof(line), pos, kCopyMaps[i].src);
+                        writeInstallerLine(ctx, line);
+                        return false;
+                    }
+
+                    if (!copyDirectoryRecursive(kCopyMaps[i].src, kCopyMaps[i].dst, copiedFiles, copiedBytes))
+                    {
+                        char line[220];
+                        QC::usize pos = 0;
+                        QC::String::memset(line, 0, sizeof(line));
+                        appendText(line, sizeof(line), pos, "installer: stage=copy_payload status=failure op=copy_tree src=");
+                        appendText(line, sizeof(line), pos, kCopyMaps[i].src);
+                        appendText(line, sizeof(line), pos, " dst=");
+                        appendText(line, sizeof(line), pos, kCopyMaps[i].dst);
+                        writeInstallerLine(ctx, line);
+                        return false;
+                    }
+                }
+
+                char line[220];
+                QC::usize pos = 0;
+                QC::String::memset(line, 0, sizeof(line));
+                appendText(line, sizeof(line), pos, "installer: stage=copy_payload status=success files=");
+                appendUnsigned(line, sizeof(line), pos, copiedFiles);
+                appendText(line, sizeof(line), pos, " bytes=");
+                appendUnsigned(line, sizeof(line), pos, copiedBytes);
+                appendText(line, sizeof(line), pos, " source=ramdisk_asset_roots dest=/system");
+                writeInstallerLine(ctx, line);
+                return true;
+            }
+
             static bool verifyInstallerPayload(const QC::Cmd::Context &ctx)
             {
                 static const char *kRequiredDirs[] = {
@@ -1017,11 +1249,12 @@ namespace QK
                     writeInstallerLine(ctx, "installer: status=failure stage=probe_mount operation=/system mount recovery=sysmount|sysformat");
                 }
 
-                writeInstallerLine(ctx, "installer: stage=copy_payload status=skipped source=unavailable dest=/system reason=sysformat_only");
-
                 bool payloadOk = false;
                 if (mounted)
-                    payloadOk = verifyInstallerPayload(ctx);
+                {
+                    const bool copyOk = deployInstallerPayload(ctx);
+                    payloadOk = copyOk && verifyInstallerPayload(ctx);
+                }
 
                 if (mounted && payloadOk)
                 {
