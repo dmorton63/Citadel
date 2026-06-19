@@ -44,6 +44,17 @@ It needs one storage path that is reliable end-to-end on the target hardware.
 - `sysformat` can partition and format an eligible detected disk as FAT32 and then attempt to mount it as `/system`.
 - `sysmount` can reprobe and mount `/system` without a reboot.
 
+### Current installer command flow
+
+Citadel already has an installer-shaped command path in [kernel/QKSystemVolumeCommands.cpp](../kernel/QKSystemVolumeCommands.cpp):
+
+- `sysdisks` for operator discovery and target selection.
+- `sysformat` for the guided format/probe/mount/verify flow.
+- `sysmount` for recovery or post-reboot remounting.
+- `sysverify` for checking the required `/system` payload after copy.
+
+The real-hardware installer effort now mainly needs validation on the target machine rather than a new storage model.
+
 ### Practical summary
 
 Citadel already has a real storage stack.
@@ -150,7 +161,7 @@ The correct next target is narrower:
 
 1. Confirm the real-hardware boot path and how `/system` is actually backed.
 2. Standardize one installer disk layout and one supported filesystem for installation.
-3. Build one safe installer flow around the storage and format support Citadel already has.
+3. Validate the existing `sysdisks` → `sysformat` → `sysverify` path on the real test machine.
 4. Expand bus and filesystem coverage only after that path works reliably on the target machine.
 
 ## Working Rule

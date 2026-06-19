@@ -201,6 +201,7 @@ Status labels used below:
 - Shared folder `/shared` mount (host <-> guest): **Working** in the known-good QEMU configs
 - Persistent system disk (`--system-vol` → `build/system.qcow2`): **Working** (used for `/system` persistence in dev)
 - System disk formatting command `sysformat`: **Working** (formats FAT32 + attempts mount)
+- Installer command flow (`sysdisks` / `sysformat` / `sysmount` / `sysverify`): **Working** and emits installer stage markers for real-hardware bring-up
 - Mount provenance reporting (`mount list`, `sysprovenance`) now emits persistence class + backing source details: **Working**
 - Export path guardrails (`auto/system/shared/usb`, ephemeral override token, preflight checks, metadata sidecars): **Working**
 

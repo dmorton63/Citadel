@@ -43,7 +43,7 @@ Contract decisions for installer v1 (2026-06-13):
 
 ## Phase 3: Target Discovery And Selection
 
-- [ ] Expose a single installer-oriented disk inventory flow based on current `sysdisks` behavior.
+- [x] Expose a single installer-oriented disk inventory flow based on current `sysdisks` behavior.
 - [x] Clearly label controller type, disk index, size, model, and current layout state.
 - [x] Show whether a disk already appears partitioned or FAT-formatted.
 - [x] Show whether a disk is already bound to `QFS_SYSTEM` or `QFS_SHARED`.
@@ -135,6 +135,18 @@ Boot-path decisions for installer v1 (2026-06-13):
 - [x] Report a final success state that tells the operator what to do next.
 - [x] Report a final failure state that points to the failed stage.
 
+Current installer command surface (implemented in [kernel/QKSystemVolumeCommands.cpp](../kernel/QKSystemVolumeCommands.cpp)):
+
+- `sysdisks` prints the install-relevant disk inventory and stage markers for discovery.
+- `sysformat [diskN|N]` wraps select, format, probe/mount, payload verification, and completion reporting.
+- `sysmount` reprobes and mounts `/system` without reformatting.
+- `sysverify` checks the installer-required payload set under `/system`.
+
+Operator note:
+
+- The current real-hardware path is centered on `/system` persistence plus explicit operator review of the disk inventory before destructive format operations.
+- The boot path already falls back to `INSTALLER` mode when `/system` is unavailable and security enforcement is active.
+
 Operator output contract for installer v1 (2026-06-13):
 
 - Every stage message must be emitted to both console UI and serial log.
@@ -175,6 +187,14 @@ Operator output contract for installer v1 (2026-06-13):
 - [ ] Verify that `/system` contents persist across reboot.
 - [ ] Verify that a production-mode boot still accepts the installed assets and configuration.
 - [ ] Verify that desktop startup still loads correctly from the installed persistent state.
+
+Verification order for real-hardware bring-up:
+
+1. Run `sysdisks` and confirm the expected controller, disk index, and layout state.
+2. Run `sysformat` against the intended target and confirm `installer: stage=format` and `installer: stage=probe_mount` succeed.
+3. Run `sysverify` and confirm the payload checklist passes for the mounted `/system`.
+4. Reboot once and confirm `/system` is still present and the installed payload remains readable.
+5. Confirm normal production-mode boot continues into the desktop using the installed persistent state.
 
 Verification procedure for installer v1 (2026-06-13):
 
