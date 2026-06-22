@@ -40,18 +40,38 @@ jobs:
               -days 1 -nodes -subj "/CN=${KEY_ID}"
           done
 
+      - name: Stage boot artifacts for signing
+        run: |
+          # CMake builds the kernel ELF; Limine EFI and boot.json live in the
+          # repo tree. Copy them into $BUILD_DIR so the signing step has a
+          # single, predictable location to search.
+          STAGE="$BUILD_DIR/signing-stage"
+          mkdir -p "$STAGE"
+
+          # Limine UEFI binary (x86-64)
+          [[ -f "limine/BOOTX64.EFI"        ]] && cp "limine/BOOTX64.EFI"        "$STAGE/Limine.efi"
+          [[ -f "iso/EFI/BOOT/BOOTX64.EFI"  ]] && cp "iso/EFI/BOOT/BOOTX64.EFI" "$STAGE/Limine.efi"
+
+          # Kernel image produced by CMake
+          [[ -f "$BUILD_DIR/kernel/citadel.elf" ]] && cp "$BUILD_DIR/kernel/citadel.elf" "$STAGE/vmlinuz-citadel"
+          [[ -f "iso/boot/citadel.elf"          ]] && cp "iso/boot/citadel.elf"           "$STAGE/vmlinuz-citadel"
+
+          # Boot policy config
+          [[ -f "boot.json" ]] && cp "boot.json" "$STAGE/boot.json"
+
+          echo "Staged signing artifacts:"
+          ls -lh "$STAGE"
+
       - name: Sign artifacts and manifest
         run: |
           mapfile -d '' ARTIFACTS < <(
-            find "$BUILD_DIR" -type f \( \
+            find "$BUILD_DIR/signing-stage" -type f \( \
               -iname "*.efi" -o -iname "bootgate" -o -iname "vmlinuz*" -o -iname "boot.json" -o -name "*.ko" \
             \) -print0 | sort -z
           )
 
           if [[ ${#ARTIFACTS[@]} -eq 0 ]]; then
-            echo "No signable artifacts found under $BUILD_DIR"
-            echo "Top-level build outputs:"
-            find "$BUILD_DIR" -maxdepth 3 -type f | sort | head -n 200
+            echo "No signable artifacts staged — check 'Stage boot artifacts' step above."
             exit 1
           fi
 
