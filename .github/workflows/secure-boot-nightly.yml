@@ -42,11 +42,23 @@ jobs:
 
       - name: Sign artifacts and manifest
         run: |
-          ARTIFACTS=$(find $BUILD_DIR \( -name "Limine.efi" -o -name "BootGate" -o -name "vmlinuz*" -o -name "boot.json" -o -name "*.ko" \) | sort)
+          mapfile -d '' ARTIFACTS < <(
+            find "$BUILD_DIR" -type f \( \
+              -iname "*.efi" -o -iname "bootgate" -o -iname "vmlinuz*" -o -iname "boot.json" -o -name "*.ko" \
+            \) -print0 | sort -z
+          )
+
+          if [[ ${#ARTIFACTS[@]} -eq 0 ]]; then
+            echo "No signable artifacts found under $BUILD_DIR"
+            echo "Top-level build outputs:"
+            find "$BUILD_DIR" -maxdepth 3 -type f | sort | head -n 200
+            exit 1
+          fi
+
           python3 tools/sign_artifacts.py \
             --environment lab \
             --key-dir $KEY_DIR \
-            --artifacts $ARTIFACTS \
+            --artifacts "${ARTIFACTS[@]}" \
             --manifest-out $BUILD_DIR/secure-boot-manifest-nightly.json \
             --signer "nightly@citadel"
 

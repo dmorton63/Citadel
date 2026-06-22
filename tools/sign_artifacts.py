@@ -42,6 +42,7 @@ from typing import Optional
 KEY_ASSIGNMENTS = {
     "lab": {
         "limine":    "CITADEL_BOOT_LAB_v1",
+        ".efi":      "CITADEL_BOOT_LAB_v1",
         "bootgate":  "CITADEL_LSK_LAB_v1",
         "vmlinuz":   "CITADEL_KSK_LAB_v1",
         "boot.json": "CITADEL_MSK_LAB_v1",
@@ -50,6 +51,7 @@ KEY_ASSIGNMENTS = {
     },
     "staging": {
         "limine":    "CITADEL_BOOT_STAGING_v1",
+        ".efi":      "CITADEL_BOOT_STAGING_v1",
         "bootgate":  "CITADEL_LSK_STAGING_v1",
         "vmlinuz":   "CITADEL_KSK_STAGING_v1",
         "boot.json": "CITADEL_MSK_STAGING_v1",
@@ -57,6 +59,7 @@ KEY_ASSIGNMENTS = {
     },
     "production": {
         "limine":    "CITADEL_BOOT_PROD_v1",
+        ".efi":      "CITADEL_BOOT_PROD_v1",
         "bootgate":  "CITADEL_LSK_PROD_v1",
         "vmlinuz":   "CITADEL_KSK_PROD_v1",
         "boot.json": "CITADEL_MSK_PROD_v1",
