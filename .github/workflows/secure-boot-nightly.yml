@@ -42,6 +42,14 @@ jobs:
 
       - name: Sign artifacts and manifest
         run: |
+          if [[ ! -f "$BUILD_DIR/BootGate" ]]; then
+            if [[ -f "$BUILD_DIR/citadel.bin" ]]; then
+              cp "$BUILD_DIR/citadel.bin" "$BUILD_DIR/BootGate"
+            elif [[ -f "$BUILD_DIR/kernel/citadel.bin" ]]; then
+              cp "$BUILD_DIR/kernel/citadel.bin" "$BUILD_DIR/BootGate"
+            fi
+          fi
+
           mapfile -d '' ARTIFACTS < <(
             find "$BUILD_DIR" -type f \( \
               -iname "*.efi" -o -iname "bootgate" -o -iname "vmlinuz*" -o -iname "boot.json" -o -name "*.ko" \
