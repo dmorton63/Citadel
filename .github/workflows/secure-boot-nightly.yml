@@ -48,7 +48,7 @@ jobs:
             elif [[ -f "$BUILD_DIR/kernel/citadel.bin" ]]; then
               cp "$BUILD_DIR/kernel/citadel.bin" "$BUILD_DIR/BootGate"
             else
-              printf 'Missing BootGate source: expected %s/citadel.bin or %s\n' "$BUILD_DIR" "$BUILD_DIR/kernel/citadel.bin"
+              printf 'Missing BootGate source: expected %s or %s\n' "$BUILD_DIR/citadel.bin" "$BUILD_DIR/kernel/citadel.bin"
               exit 1
             fi
           fi
