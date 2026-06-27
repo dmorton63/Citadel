@@ -64,6 +64,17 @@ jobs:
 
       - name: Sign artifacts and manifest
         run: |
+          if [[ ! -f "$BUILD_DIR/BootGate" ]]; then
+            if [[ -f "$BUILD_DIR/citadel.bin" ]]; then
+              cp "$BUILD_DIR/citadel.bin" "$BUILD_DIR/BootGate"
+            elif [[ -f "$BUILD_DIR/kernel/citadel.bin" ]]; then
+              cp "$BUILD_DIR/kernel/citadel.bin" "$BUILD_DIR/BootGate"
+            else
+              echo "Missing BootGate source: neither $BUILD_DIR/citadel.bin nor $BUILD_DIR/kernel/citadel.bin exists"
+              exit 1
+            fi
+          fi
+
           mapfile -d '' ARTIFACTS < <(
             find "$BUILD_DIR/signing-stage" -type f \( \
               -iname "*.efi" -o -iname "bootgate" -o -iname "vmlinuz*" -o -iname "boot.json" -o -name "*.ko" \
