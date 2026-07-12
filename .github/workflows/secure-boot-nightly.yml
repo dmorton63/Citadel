@@ -52,6 +52,16 @@ jobs:
           [[ -f "limine/BOOTX64.EFI"        ]] && cp "limine/BOOTX64.EFI"        "$STAGE/Limine.efi"
           [[ -f "iso/EFI/BOOT/BOOTX64.EFI"  ]] && cp "iso/EFI/BOOT/BOOTX64.EFI" "$STAGE/Limine.efi"
 
+          # BootGate (flat kernel binary produced by objcopy)
+          if [[ -f "$BUILD_DIR/citadel.bin" ]]; then
+            cp "$BUILD_DIR/citadel.bin" "$STAGE/BootGate"
+          elif [[ -f "$BUILD_DIR/kernel/citadel.bin" ]]; then
+            cp "$BUILD_DIR/kernel/citadel.bin" "$STAGE/BootGate"
+          else
+            echo "Missing BootGate source: neither $BUILD_DIR/citadel.bin nor $BUILD_DIR/kernel/citadel.bin exists"
+            exit 1
+          fi
+
           # Kernel image produced by CMake
           [[ -f "$BUILD_DIR/kernel/citadel.elf" ]] && cp "$BUILD_DIR/kernel/citadel.elf" "$STAGE/vmlinuz-citadel"
           [[ -f "iso/boot/citadel.elf"          ]] && cp "iso/boot/citadel.elf"           "$STAGE/vmlinuz-citadel"
@@ -64,17 +74,6 @@ jobs:
 
       - name: Sign artifacts and manifest
         run: |
-          if [[ ! -f "$BUILD_DIR/BootGate" ]]; then
-            if [[ -f "$BUILD_DIR/citadel.bin" ]]; then
-              cp "$BUILD_DIR/citadel.bin" "$BUILD_DIR/BootGate"
-            elif [[ -f "$BUILD_DIR/kernel/citadel.bin" ]]; then
-              cp "$BUILD_DIR/kernel/citadel.bin" "$BUILD_DIR/BootGate"
-            else
-              echo "Missing BootGate source: neither $BUILD_DIR/citadel.bin nor $BUILD_DIR/kernel/citadel.bin exists"
-              exit 1
-            fi
-          fi
-
           mapfile -d '' ARTIFACTS < <(
             find "$BUILD_DIR/signing-stage" -type f \( \
               -iname "*.efi" -o -iname "bootgate" -o -iname "vmlinuz*" -o -iname "boot.json" -o -name "*.ko" \
