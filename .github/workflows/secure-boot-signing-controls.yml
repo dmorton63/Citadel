@@ -37,6 +37,9 @@ jobs:
           dst = Path("build/signing/signer_host_baseline.ci.json")
           policy = json.loads(src.read_text(encoding="utf-8"))
           policy["require_efi"] = False
+          # Hosted runners can move across kernel major/minor versions.
+          # Keep kernel pinning in baseline policy, but disable it in CI overlay.
+          policy.pop("kernel_prefix", None)
           dst.write_text(json.dumps(policy, indent=2) + "\n", encoding="utf-8")
           print(f"Wrote CI policy overlay: {dst}")
           PY
