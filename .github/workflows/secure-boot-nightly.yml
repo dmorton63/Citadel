@@ -59,20 +59,20 @@ jobs:
           # Boot policy config
           [[ -f "boot.json" ]] && cp "boot.json" "$STAGE/boot.json"
 
+          # BootGate binary
+          if   [[ -f "$BUILD_DIR/BootGate"           ]]; then cp "$BUILD_DIR/BootGate"           "$STAGE/BootGate"
+          elif [[ -f "$BUILD_DIR/citadel.bin"        ]]; then cp "$BUILD_DIR/citadel.bin"        "$STAGE/BootGate"
+          elif [[ -f "$BUILD_DIR/kernel/citadel.bin" ]]; then cp "$BUILD_DIR/kernel/citadel.bin" "$STAGE/BootGate"
+          fi
+
           echo "Staged signing artifacts:"
           ls -lh "$STAGE"
 
       - name: Sign artifacts and manifest
         run: |
-          if [[ ! -f "$BUILD_DIR/BootGate" ]]; then
-            if [[ -f "$BUILD_DIR/citadel.bin" ]]; then
-              cp "$BUILD_DIR/citadel.bin" "$BUILD_DIR/BootGate"
-            elif [[ -f "$BUILD_DIR/kernel/citadel.bin" ]]; then
-              cp "$BUILD_DIR/kernel/citadel.bin" "$BUILD_DIR/BootGate"
-            else
-              echo "Missing BootGate source: neither $BUILD_DIR/citadel.bin nor $BUILD_DIR/kernel/citadel.bin exists"
-              exit 1
-            fi
+          if [[ ! -f "$BUILD_DIR/signing-stage/BootGate" ]]; then
+            echo "Missing BootGate in signing-stage — check 'Stage boot artifacts' step above."
+            exit 1
           fi
 
           mapfile -d '' ARTIFACTS < <(
