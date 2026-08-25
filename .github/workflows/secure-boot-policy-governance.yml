@@ -13,6 +13,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Verify syscall ABI registry consistency
+        run: |
+          python3 tools/check_syscall_registry_consistency.py
+
       - name: Setup Python
         uses: actions/setup-python@v5
         with:

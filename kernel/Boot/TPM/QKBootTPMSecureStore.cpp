@@ -1,4 +1,5 @@
 #include "QKBootTPMSecureStore.h"
+#include "QKBootTPMProbePolicy.h"
 
 #include "QCBuiltins.h"
 #include "QCString.h"
@@ -117,6 +118,23 @@ namespace QK::Boot::Tpm
                 QC::pause();
             }
             return false;
+        }
+
+        static void BusyWaitMilliseconds(QC::u32 Milliseconds)
+        {
+            // TPM discovery runs before the general timer subsystem is initialized,
+            // so use a bounded pause loop for short warm-up delays.
+            constexpr QC::usize kPauseIterationsPerMillisecond = 200000;
+            for (QC::u32 ms = 0; ms < Milliseconds; ++ms)
+            {
+                for (QC::usize i = 0; i < kPauseIterationsPerMillisecond; ++i)
+                    QC::pause();
+            }
+        }
+
+        static bool IsRetryableTpmResponseStatus(QC::u32 RspCode)
+        {
+            return QK::Boot::Tpm::IsRetryableTpmResponse(RspCode);
         }
 
         static bool EnsureHhdmMappedWithFlags(FLogFn Log, QC::PhysAddr Phys, QC::usize Size, QK::Memory::PageFlags Flags)
@@ -302,7 +320,7 @@ namespace QK::Boot::Tpm
             RspPhysOut = 0;
 
             QC::mmio_write32(Ctx.Reg(CTRL_REQ), QC::mmio_read32(Ctx.Reg(CTRL_REQ)) | 1u);
-            if (!SpinWaitClears32(Ctx.Reg(CTRL_REQ), 1u, 5'000'000))
+            if (!SpinWaitClears32(Ctx.Reg(CTRL_REQ), 1u, QK::Boot::Tpm::kTpmCmdReadySpinIterations))
             {
                 return 0xFFFFFFFFu;
             }
@@ -343,10 +361,10 @@ namespace QK::Boot::Tpm
             QC::memory_barrier();
 
             QC::mmio_write32(Ctx.Reg(CTRL_START), 1u);
-            if (!SpinWaitClears32(Ctx.Reg(CTRL_START), 1u, 50'000'000))
+            if (!SpinWaitClears32(Ctx.Reg(CTRL_START), 1u, QK::Boot::Tpm::kTpmStartSpinIterations))
             {
                 QC::mmio_write32(Ctx.Reg(CTRL_CANCEL), 1u);
-                (void)SpinWaitClears32(Ctx.Reg(CTRL_START), 1u, 5'000'000);
+                (void)SpinWaitClears32(Ctx.Reg(CTRL_START), 1u, QK::Boot::Tpm::kTpmCmdReadySpinIterations);
                 return 0xFFFFFFFFu;
             }
 
@@ -361,7 +379,7 @@ namespace QK::Boot::Tpm
             RspPhysOut = RspPhys;
 
             QC::mmio_write32(Ctx.Reg(CTRL_REQ), QC::mmio_read32(Ctx.Reg(CTRL_REQ)) | 2u);
-            (void)SpinWaitClears32(Ctx.Reg(CTRL_REQ), 2u, 5'000'000);
+            (void)SpinWaitClears32(Ctx.Reg(CTRL_REQ), 2u, QK::Boot::Tpm::kTpmCmdReadySpinIterations);
 
             return RspCode;
         }
@@ -382,7 +400,7 @@ namespace QK::Boot::Tpm
             RspPhysOut = 0;
 
             QC::mmio_write32(Ctx.Reg(CTRL_REQ), QC::mmio_read32(Ctx.Reg(CTRL_REQ)) | 1u);
-            if (!SpinWaitClears32(Ctx.Reg(CTRL_REQ), 1u, 5'000'000))
+            if (!SpinWaitClears32(Ctx.Reg(CTRL_REQ), 1u, QK::Boot::Tpm::kTpmCmdReadySpinIterations))
             {
                 LogStr(Log, "TPM2: CMD_READY timeout\r\n");
                 return 0xFFFFFFFFu;
@@ -432,11 +450,11 @@ namespace QK::Boot::Tpm
             QC::memory_barrier();
 
             QC::mmio_write32(Ctx.Reg(CTRL_START), 1u);
-            if (!SpinWaitClears32(Ctx.Reg(CTRL_START), 1u, 50'000'000))
+            if (!SpinWaitClears32(Ctx.Reg(CTRL_START), 1u, QK::Boot::Tpm::kTpmStartSpinIterations))
             {
                 LogStr(Log, "TPM2: START timeout; issuing CANCEL\r\n");
                 QC::mmio_write32(Ctx.Reg(CTRL_CANCEL), 1u);
-                (void)SpinWaitClears32(Ctx.Reg(CTRL_START), 1u, 5'000'000);
+                (void)SpinWaitClears32(Ctx.Reg(CTRL_START), 1u, QK::Boot::Tpm::kTpmCmdReadySpinIterations);
                 return 0xFFFFFFFFu;
             }
 
@@ -461,7 +479,7 @@ namespace QK::Boot::Tpm
             LogStr(Log, "\r\n");
 
             QC::mmio_write32(Ctx.Reg(CTRL_REQ), QC::mmio_read32(Ctx.Reg(CTRL_REQ)) | 2u);
-            (void)SpinWaitClears32(Ctx.Reg(CTRL_REQ), 2u, 5'000'000);
+            (void)SpinWaitClears32(Ctx.Reg(CTRL_REQ), 2u, QK::Boot::Tpm::kTpmCmdReadySpinIterations);
 
             return RspCode;
         }
@@ -1679,76 +1697,112 @@ namespace QK::Boot::Tpm
 
         FCrbCtx Ctx{.Base = physToVirt(PagePhys), .Off = static_cast<QC::usize>(ControlAreaPhys & 0xFFF)};
 
-        LogStr(Log, "TPM2: attempting TPM2_Startup via CRB\r\n");
         const QC::u8 StartupCmd[12] = {0x80, 0x01, 0x00, 0x00, 0x00, 0x0C, 0x00, 0x00, 0x01, 0x44, 0x00, 0x00};
-        QC::u32 StartupRspLen = 0;
-        QC::PhysAddr StartupRspPhys = 0;
-        QC::u32 StartupRspCode = CrbSubmit(Log, Ctx, StartupCmd, sizeof(StartupCmd), StartupRspLen, StartupRspPhys);
-        if (StartupRspCode == 0xFFFFFFFFu)
-        {
-            LogStr(Log, "TPM2: Startup transport failed\r\n");
-            return;
-        }
-
-        if (StartupRspCode == 0x00000100)
-        {
-            LogStr(Log, "TPM2: TPM_RC_INITIALIZE (already started)\r\n");
-        }
-        else if (StartupRspCode != 0)
-        {
-            LogStr(Log, "TPM2: Startup failed\r\n");
-            return;
-        }
-        else
-        {
-            LogStr(Log, "TPM2: Startup OK\r\n");
-        }
-
-        LogStr(Log, "TPM2: attempting TPM2_GetRandom(16)\r\n");
         const QC::u8 GetRandomCmd[12] = {0x80, 0x01, 0x00, 0x00, 0x00, 0x0C, 0x00, 0x00, 0x01, 0x7B, 0x00, 0x10};
+        constexpr QC::u32 kMaxTpmWarmupAttempts = QK::Boot::Tpm::kTpmWarmupAttempts;
+
         QC::u32 RandRspLen = 0;
         QC::PhysAddr RandRspPhys = 0;
-        QC::u32 RandRspCode = CrbSubmit(Log, Ctx, GetRandomCmd, sizeof(GetRandomCmd), RandRspLen, RandRspPhys);
-        if (RandRspCode != 0)
+        QC::usize ToDump = 0;
+        const QC::u8 *RspBuf = nullptr;
+
+        for (QC::u32 attempt = 0; attempt < kMaxTpmWarmupAttempts; ++attempt)
         {
-            LogStr(Log, "TPM2: GetRandom failed\r\n");
-            return;
+            if (attempt > 0)
+            {
+                const QC::u32 delayMs = QK::Boot::Tpm::kTpmWarmupDelayMsBase * (attempt + 1u);
+                LogStr(Log, "TPM2: warm-up retry delay ms ");
+                LogDecU32(Log, "", delayMs);
+                BusyWaitMilliseconds(delayMs);
+            }
+
+            LogStr(Log, "TPM2: attempting TPM2_Startup via CRB\r\n");
+            QC::u32 StartupRspLen = 0;
+            QC::PhysAddr StartupRspPhys = 0;
+            const QC::u32 StartupRspCode = CrbSubmit(Log, Ctx, StartupCmd, sizeof(StartupCmd), StartupRspLen, StartupRspPhys);
+            if (QK::Boot::Tpm::IsTransportFailure(StartupRspCode))
+            {
+                LogStr(Log, "TPM2: Startup transport failed\r\n");
+                if (attempt + 1u < kMaxTpmWarmupAttempts)
+                    continue;
+                return;
+            }
+
+            if (StartupRspCode == QK::Boot::Tpm::kTpmStartupAlreadyInitialized)
+            {
+                LogStr(Log, "TPM2: TPM_RC_INITIALIZE (already started)\r\n");
+            }
+            else if (StartupRspCode != 0)
+            {
+                LogStr(Log, "TPM2: Startup failed\r\n");
+                if (IsRetryableTpmResponseStatus(StartupRspCode) && attempt + 1u < kMaxTpmWarmupAttempts)
+                    continue;
+                return;
+            }
+            else
+            {
+                LogStr(Log, "TPM2: Startup OK\r\n");
+            }
+
+            LogStr(Log, "TPM2: attempting TPM2_GetRandom(16)\r\n");
+            RandRspLen = 0;
+            RandRspPhys = 0;
+            const QC::u32 RandRspCode = CrbSubmit(Log, Ctx, GetRandomCmd, sizeof(GetRandomCmd), RandRspLen, RandRspPhys);
+            if (RandRspCode != 0)
+            {
+                LogStr(Log, "TPM2: GetRandom failed\r\n");
+                if (IsRetryableTpmResponseStatus(RandRspCode) && attempt + 1u < kMaxTpmWarmupAttempts)
+                    continue;
+                return;
+            }
+
+            if (RandRspLen < 12)
+            {
+                LogStr(Log, "TPM2: GetRandom response too short\r\n");
+                if (attempt + 1u < kMaxTpmWarmupAttempts)
+                    continue;
+                return;
+            }
+
+            if (!EnsureHhdmMapped(Log, RandRspPhys, RandRspLen))
+            {
+                LogStr(Log, "TPM2: failed to map GetRandom response\r\n");
+                if (attempt + 1u < kMaxTpmWarmupAttempts)
+                    continue;
+                return;
+            }
+
+            RspBuf = reinterpret_cast<const QC::u8 *>(physToVirt(RandRspPhys));
+            const QC::u16 BytesSize = ReadBe16(RspBuf + 10);
+            LogDecU32(Log, "TPM2: GetRandom bytes ", static_cast<QC::u32>(BytesSize));
+
+            const QC::usize Avail = (RandRspLen > 12) ? (RandRspLen - 12) : 0;
+            ToDump = (BytesSize < Avail) ? BytesSize : Avail;
+            if (ToDump == 0)
+            {
+                LogStr(Log, "TPM2: GetRandom returned no entropy bytes\r\n");
+                if (attempt + 1u < kMaxTpmWarmupAttempts)
+                    continue;
+                return;
+            }
+
+            LogStr(Log, "TPM2: RAND ");
+            for (QC::usize i = 0; i < ToDump; ++i)
+            {
+                const QC::u8 b = RspBuf[12 + i];
+                const QC::u8 hi = (b >> 4) & 0xF;
+                const QC::u8 lo = b & 0xF;
+                char Buf[3];
+                Buf[0] = hi < 10 ? static_cast<char>('0' + hi) : static_cast<char>('a' + (hi - 10));
+                Buf[1] = lo < 10 ? static_cast<char>('0' + lo) : static_cast<char>('a' + (lo - 10));
+                Buf[2] = 0;
+                LogStr(Log, Buf);
+            }
+            LogStr(Log, "\r\n");
+            break;
         }
 
-        if (RandRspLen < 12)
-        {
-            LogStr(Log, "TPM2: GetRandom response too short\r\n");
-            return;
-        }
-
-        if (!EnsureHhdmMapped(Log, RandRspPhys, RandRspLen))
-        {
-            LogStr(Log, "TPM2: failed to map GetRandom response\r\n");
-            return;
-        }
-
-        auto *RspBuf = reinterpret_cast<const QC::u8 *>(physToVirt(RandRspPhys));
-        const QC::u16 BytesSize = ReadBe16(RspBuf + 10);
-        LogDecU32(Log, "TPM2: GetRandom bytes ", static_cast<QC::u32>(BytesSize));
-
-        const QC::usize Avail = (RandRspLen > 12) ? (RandRspLen - 12) : 0;
-        const QC::usize ToDump = (BytesSize < Avail) ? BytesSize : Avail;
-
-        LogStr(Log, "TPM2: RAND ");
-        for (QC::usize i = 0; i < ToDump; ++i)
-        {
-            const QC::u8 b = RspBuf[12 + i];
-            const QC::u8 hi = (b >> 4) & 0xF;
-            const QC::u8 lo = b & 0xF;
-            char Buf[3];
-            Buf[0] = hi < 10 ? static_cast<char>('0' + hi) : static_cast<char>('a' + (hi - 10));
-            Buf[1] = lo < 10 ? static_cast<char>('0' + lo) : static_cast<char>('a' + (lo - 10));
-            Buf[2] = 0;
-            LogStr(Log, Buf);
-        }
-        LogStr(Log, "\r\n");
-
-        if (ToDump > 0)
+        if (ToDump > 0 && RspBuf)
         {
             QK::Entropy::addEntropy(RspBuf + 12, ToDump);
 

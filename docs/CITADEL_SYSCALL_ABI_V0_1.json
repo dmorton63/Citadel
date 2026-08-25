@@ -1,0 +1,137 @@
+{
+  "platform": "citadel",
+  "abiVersion": "0.1",
+  "idScheme": {
+    "description": "sys_id = (family << 8) | op",
+    "familyBits": 8,
+    "opBits": 8
+  },
+  "errorCodes": [
+    { "code": -1, "name": "PLT_E_UNKNOWN" },
+    { "code": -2, "name": "PLT_E_NOT_IMPLEMENTED" },
+    { "code": -3, "name": "PLT_E_INVALID_ARG" },
+    { "code": -4, "name": "PLT_E_BAD_HANDLE" },
+    { "code": -5, "name": "PLT_E_ACCESS_DENIED" },
+    { "code": -6, "name": "PLT_E_NOT_FOUND" },
+    { "code": -7, "name": "PLT_E_ALREADY_EXISTS" },
+    { "code": -8, "name": "PLT_E_TIMEOUT" },
+    { "code": -9, "name": "PLT_E_WOULD_BLOCK" },
+    { "code": -10, "name": "PLT_E_IO" },
+    { "code": -11, "name": "PLT_E_NO_MEMORY" },
+    { "code": -12, "name": "PLT_E_BAD_STATE" },
+    { "code": -13, "name": "PLT_E_TRUNCATED" },
+    { "code": -14, "name": "PLT_E_CAPABILITY_DENIED" },
+    { "code": -15, "name": "PLT_E_ABI_MISMATCH" }
+  ],
+  "families": [
+    {
+      "id": "0x01",
+      "name": "Process",
+      "syscalls": [
+        { "id": "0x0101", "name": "Process.Self", "permission": null },
+        { "id": "0x0102", "name": "Process.Exit", "permission": null },
+        { "id": "0x0103", "name": "Process.Spawn", "permission": "process.spawn" },
+        { "id": "0x0104", "name": "Process.Wait", "permission": null },
+        { "id": "0x0105", "name": "Process.Sleep", "permission": null }
+      ]
+    },
+    {
+      "id": "0x02",
+      "name": "Thread",
+      "syscalls": [
+        { "id": "0x0201", "name": "Thread.Self", "permission": null },
+        { "id": "0x0202", "name": "Thread.Create", "permission": null },
+        { "id": "0x0203", "name": "Thread.Join", "permission": null },
+        { "id": "0x0204", "name": "Thread.Yield", "permission": null }
+      ]
+    },
+    {
+      "id": "0x03",
+      "name": "Memory",
+      "syscalls": [
+        { "id": "0x0301", "name": "Memory.Map", "permission": null },
+        { "id": "0x0302", "name": "Memory.Unmap", "permission": null },
+        { "id": "0x0303", "name": "Memory.Protect", "permission": null },
+        { "id": "0x0304", "name": "Memory.MapShared", "permission": null }
+      ]
+    },
+    {
+      "id": "0x04",
+      "name": "FileSystem",
+      "syscalls": [
+        { "id": "0x0401", "name": "File.Open", "permission": "fs.read|fs.write" },
+        { "id": "0x0402", "name": "File.Close", "permission": null },
+        { "id": "0x0403", "name": "File.Read", "permission": "fs.read" },
+        { "id": "0x0404", "name": "File.Write", "permission": "fs.write" },
+        { "id": "0x0405", "name": "File.Seek", "permission": "fs.write" },
+        { "id": "0x0406", "name": "File.Stat", "permission": "fs.read" },
+        { "id": "0x0407", "name": "File.List", "permission": "fs.read" },
+        { "id": "0x0408", "name": "File.Remove", "permission": "fs.write" },
+        { "id": "0x0409", "name": "File.Rename", "permission": "fs.write" }
+      ]
+    },
+    {
+      "id": "0x05",
+      "name": "Time",
+      "syscalls": [
+        { "id": "0x0501", "name": "Time.MonotonicNs", "permission": null },
+        { "id": "0x0502", "name": "Time.RealtimeNs", "permission": null },
+        { "id": "0x0503", "name": "Time.TimerCreate", "permission": null },
+        { "id": "0x0504", "name": "Time.TimerWait", "permission": null }
+      ]
+    },
+    {
+      "id": "0x06",
+      "name": "IPC",
+      "syscalls": [
+        { "id": "0x0601", "name": "IPC.ChannelCreate", "permission": null },
+        { "id": "0x0602", "name": "IPC.Send", "permission": null },
+        { "id": "0x0603", "name": "IPC.Recv", "permission": null }
+      ]
+    },
+    {
+      "id": "0x07",
+      "name": "Net",
+      "syscalls": [
+        { "id": "0x0701", "name": "Net.Socket", "permission": "net.client|net.server" },
+        { "id": "0x0702", "name": "Net.Connect", "permission": "net.client" },
+        { "id": "0x0703", "name": "Net.Bind", "permission": "net.server" },
+        { "id": "0x0704", "name": "Net.Listen", "permission": "net.server" },
+        { "id": "0x0705", "name": "Net.Accept", "permission": "net.server" },
+        { "id": "0x0706", "name": "Net.Send", "permission": "net.client|net.server" },
+        { "id": "0x0707", "name": "Net.Recv", "permission": "net.client|net.server" },
+        { "id": "0x0708", "name": "Net.Close", "permission": "net.client|net.server" }
+      ]
+    },
+    {
+      "id": "0x08",
+      "name": "UI",
+      "syscalls": [
+        { "id": "0x0801", "name": "UI.WindowCreate", "permission": "ui.window" },
+        { "id": "0x0802", "name": "UI.WindowDestroy", "permission": "ui.window" },
+        { "id": "0x0803", "name": "UI.WindowShow", "permission": "ui.window" },
+        { "id": "0x0804", "name": "UI.EventPoll", "permission": "ui.window|device.input" },
+        { "id": "0x0805", "name": "UI.WindowSetTitle", "permission": "ui.window" }
+      ]
+    },
+    {
+      "id": "0x09",
+      "name": "Graphics",
+      "syscalls": [
+        { "id": "0x0901", "name": "Gfx.SurfaceCreate", "permission": "ui.window" },
+        { "id": "0x0902", "name": "Gfx.SurfacePresent", "permission": "ui.window" },
+        { "id": "0x0903", "name": "Gfx.UploadBuffer", "permission": "ui.window" },
+        { "id": "0x0904", "name": "Gfx.Resize", "permission": "ui.window" }
+      ]
+    },
+    {
+      "id": "0x0A",
+      "name": "Security",
+      "syscalls": [
+        { "id": "0x0A01", "name": "Sec.CapQuery", "permission": "security.inspect" },
+        { "id": "0x0A02", "name": "Sec.TokenInfo", "permission": "security.inspect" },
+        { "id": "0x0A03", "name": "Sec.AttestSelf", "permission": "security.attest" }
+      ]
+    }
+  ]
+}

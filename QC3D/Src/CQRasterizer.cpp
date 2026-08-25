@@ -1,4 +1,5 @@
 #include "QCRasterizer.h"
+#include "QCLogger.h"
 
 namespace QC
 {
@@ -133,6 +134,11 @@ void Rasterizer::drawTriangle(const Vertex& v0,
     if (area == 0.0f)
         return;
 
+    u32 pixelCount = 0;
+    u32 insideCount = 0;
+    u32 depthRejectCount = 0;
+    u32 invalidDepthCount = 0;
+
     for (int y = y0; y <= y1; ++y)
     {
         for (int x = x0; x <= x1; ++x)
@@ -146,29 +152,54 @@ void Rasterizer::drawTriangle(const Vertex& v0,
             float w1 = edgeFunction(v2.position, v0.position, samplePoint);
             float w2 = edgeFunction(v0.position, v1.position, samplePoint);
 
-            if ((area > 0.0f && (w0 < 0.0f || w1 < 0.0f || w2 < 0.0f)) ||
-                (area < 0.0f && (w0 > 0.0f || w1 > 0.0f || w2 > 0.0f)))
+            // For CCW triangles (area > 0), all weights must be >= 0 to be inside
+            // For CW triangles (area < 0), all weights must be <= 0 to be inside
+            const bool rejected = (area > 0.0f && (w0 < 0.0f || w1 < 0.0f || w2 < 0.0f)) ||
+                                  (area < 0.0f && (w0 > 0.0f || w1 > 0.0f || w2 > 0.0f));
+            if (rejected)
             {
                 continue;
             }
+
+            insideCount++;
 
             w0 /= area;
             w1 /= area;
             w2 /= area;
 
+            const Vertex interpolated = interpolate(v0, v1, v2, w0, w1, w2);
+
+            // Position.z is already in NDC when it reaches the rasterizer.
+            // Interpolate depth directly from screen-space barycentrics to avoid
+            // applying perspective correction to depth a second time.
             const float depth =
                 v0.position.z * w0 +
                 v1.position.z * w1 +
                 v2.position.z * w2;
 
-            if (!m_depthBuffer->testAndSet(static_cast<u32>(x), static_cast<u32>(y), depth))
+            // Guard against NaN/inf-like values and unexpected NDC depth range.
+            if (!(depth == depth) || depth < -1.0f || depth > 1.0f)
+            {
+                invalidDepthCount++;
                 continue;
+            }
 
-            const Vertex interpolated = interpolate(v0, v1, v2, w0, w1, w2);
+            if (!m_depthBuffer->testAndSet(static_cast<u32>(x), static_cast<u32>(y), depth))
+            {
+                depthRejectCount++;
+                continue;
+            }
+
             const Color shaded = m_pixelShader->shade(interpolated);
             m_colorBuffer[y * static_cast<int>(m_width) + x] = shaded;
+            pixelCount++;
         }
     }
+
+    (void)pixelCount;
+    (void)insideCount;
+    (void)depthRejectCount;
+    (void)invalidDepthCount;
 }
 
 } // namespace QC

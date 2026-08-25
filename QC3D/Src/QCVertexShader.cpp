@@ -40,8 +40,8 @@ Vertex VertexShader::transform(const Vertex& in,
     // 3. View → Clip
     p = m_proj * p;
 
-    // Save clip-space Z for depth interpolation
-    float clipZ = p.z;
+    // Preserve clip-space W for perspective-correct interpolation in rasterizer.
+    const float clipW = p.w;
 
     // 4. Perspective divide (Clip → NDC)
     float invW = 1.0f / p.w;
@@ -50,13 +50,14 @@ Vertex VertexShader::transform(const Vertex& in,
     float ndcZ = p.z * invW;
 
     // 5. NDC → Screen
+    // Convert from normalized device coordinates [-1,1] to screen [0,width] x [0,height]
     float sx = (ndcX * 0.5f + 0.5f) * screenWidth;
-    float sy = (1.0f - (ndcY * 0.5f + 0.5f)) * screenHeight;
+    float sy = (1.0f - (ndcY * 0.5f + 0.5f)) * screenHeight;  // Flip Y for screen space
 
     out.position.x = sx;
     out.position.y = sy;
     out.position.z = ndcZ;   // depth in NDC space
-    out.position.w = clipZ;  // keep clip-space Z for perspective-correct interpolation
+    out.position.w = clipW;  // keep clip-space W for perspective-correct interpolation
 
     return out;
 }

@@ -267,20 +267,33 @@ namespace QFS
         if (cluster < 2)
             return false;
 
-        QC::u32 sector = clusterToSector(cluster);
-        QC::usize count = m_bootSector.sectorsPerCluster;
-        QC::Status status = m_device->readSectors(sector, count, m_clusterBuffer);
-        return status == QC::Status::Success;
+        const QC::u32 sector = clusterToSector(cluster);
+        const QC::usize count = m_bootSector.sectorsPerCluster;
+        for (QC::usize i = 0; i < count; ++i)
+        {
+            QC::Status status = m_device->readSector(sector + i,
+                                                     m_clusterBuffer + (i * m_bootSector.bytesPerSector));
+            if (status != QC::Status::Success)
+                return false;
+        }
+        return true;
     }
 
     bool FAT32::storeCluster(QC::u32 cluster)
     {
         if (cluster < 2)
             return false;
-        QC::u32 sector = clusterToSector(cluster);
-        QC::usize count = m_bootSector.sectorsPerCluster;
-        QC::Status status = m_device->writeSectors(sector, count, m_clusterBuffer);
-        return status == QC::Status::Success;
+
+        const QC::u32 sector = clusterToSector(cluster);
+        const QC::usize count = m_bootSector.sectorsPerCluster;
+        for (QC::usize i = 0; i < count; ++i)
+        {
+            QC::Status status = m_device->writeSector(sector + i,
+                                                      m_clusterBuffer + (i * m_bootSector.bytesPerSector));
+            if (status != QC::Status::Success)
+                return false;
+        }
+        return true;
     }
 
     QC::u32 FAT32::readFAT(QC::u32 cluster)

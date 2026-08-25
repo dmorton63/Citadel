@@ -37,6 +37,8 @@ namespace
     constexpr QC::u8 kAtaCmdReadDmaExt = 0x25;
     constexpr QC::u8 kAtaCmdWriteDma = 0xCA;
     constexpr QC::u8 kAtaCmdWriteDmaExt = 0x35;
+    constexpr QC::u8 kAtaCmdFlushCache = 0xE7;
+    constexpr QC::u8 kAtaCmdFlushCacheExt = 0xEA;
     constexpr QC::u32 kDmaPageSize = 4096;
     constexpr QC::u32 kMaxTransferSectors = kDmaPageSize / 512;
 
@@ -448,8 +450,7 @@ namespace
                                    QC::PhysAddr dataPhys,
                                    QC::u32 byteCount)
         {
-            if (byteCount == 0)
-                return QC::Status::InvalidParam;
+            const bool hasData = (byteCount != 0);
 
             g_lastFailure = QKDrv::AHCI::LastFailureInfo{};
 
@@ -475,14 +476,17 @@ namespace
             if (write)
                 header.cfl |= static_cast<QC::u8>(1u << 6);
             header.flags = 0;
-            header.prdtl = 1;
+            header.prdtl = hasData ? 1 : 0;
             header.ctba = static_cast<QC::u32>(m_cmdTablePhys & 0xFFFFFFFFULL);
             header.ctbau = static_cast<QC::u32>((m_cmdTablePhys >> 32) & 0xFFFFFFFFULL);
 
             QC::String::memset(m_cmdTable, 0, sizeof(AhciCommandTable));
-            m_cmdTable->prdt[0].dba = static_cast<QC::u32>(dataPhys & 0xFFFFFFFFULL);
-            m_cmdTable->prdt[0].dbau = static_cast<QC::u32>((dataPhys >> 32) & 0xFFFFFFFFULL);
-            m_cmdTable->prdt[0].dbcInterrupt = ((byteCount - 1u) & 0x3FFFFFu) | (1u << 31);
+            if (hasData)
+            {
+                m_cmdTable->prdt[0].dba = static_cast<QC::u32>(dataPhys & 0xFFFFFFFFULL);
+                m_cmdTable->prdt[0].dbau = static_cast<QC::u32>((dataPhys >> 32) & 0xFFFFFFFFULL);
+                m_cmdTable->prdt[0].dbcInterrupt = ((byteCount - 1u) & 0x3FFFFFu) | (1u << 31);
+            }
 
             auto *fis = reinterpret_cast<AhciFisRegH2D *>(m_cmdTable->cfis);
             QC::String::memset(fis, 0, sizeof(AhciFisRegH2D));
@@ -581,8 +585,21 @@ namespace
             return QC::Status::Success;
         }
 
+        QC::Status flushWriteCache(bool usedLba48)
+        {
+            const QC::u8 flushCmd = usedLba48 ? kAtaCmdFlushCacheExt : kAtaCmdFlushCache;
+            return issueAtaCommand(flushCmd,
+                                   0,
+                                   0,
+                                   false,
+                                   0,
+                                   0);
+        }
+
         QC::Status transfer(QC::u64 sector, QC::usize count, void *buffer, bool write)
         {
+            const QC::u64 startSector = sector;
+            const QC::usize initialCount = count;
             if (count == 0)
                 return QC::Status::Success;
             if (sector + count > m_sectorCount)
@@ -618,6 +635,15 @@ namespace
                 bytes += byteCount;
                 currentSector += chunk;
                 remaining -= chunk;
+            }
+
+            if (write)
+            {
+                const QC::u64 lastSector = startSector + static_cast<QC::u64>(initialCount) - 1;
+                const bool usedLba48 = (lastSector >= 0x10000000ULL);
+                st = flushWriteCache(usedLba48);
+                if (st != QC::Status::Success)
+                    return st;
             }
 
             return QC::Status::Success;
@@ -831,7 +857,9 @@ namespace
         constexpr QC::u8 kFatCount = 2;
         constexpr QC::u32 kMinFat32Clusters = 65525;
         constexpr QC::u32 kMaxFat32Clusters = 0x0FFFFFF5U;
-        const QC::u8 candidates[] = {1, 2, 4, 8, 16, 32, 64};
+        // Prefer larger clusters first; tiny clusters dramatically increase FAT allocation
+        // work during installer payload copies.
+        const QC::u8 candidates[] = {64, 32, 16, 8, 4, 2, 1};
 
         for (QC::u8 sectorsPerCluster : candidates)
         {

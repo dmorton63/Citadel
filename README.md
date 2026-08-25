@@ -186,6 +186,16 @@ build/artifacts/modules/ramdisk.img
 - **Configure CMake**: `cmake -B build -S .`
 - **Clean**: `rm -rf build`
 
+### Pre-PR check (required)
+
+Before opening or updating a PR, run the syscall ABI drift check locally:
+
+```bash
+python3 tools/check_syscall_registry_consistency.py
+```
+
+This must pass to keep `QKernel/Include/QKSyscallABI.h` aligned with `docs/CITADEL_SYSCALL_ABI_V0_1.json` and CI workflow gates.
+
 ## Running (QEMU)
 
 ```bash
@@ -362,7 +372,7 @@ Any override flag activates `m_themeOverrides`, so a minimal palette tweak is en
 See `TODO_INBOX.md` Batch 21 to 30 and `CITADEL_CURRENT_STATE.md` section 12 for implementation and evidence pointers.
 
 - Hardened pre-desktop session gating with clearer fail-closed behavior in ambiguous owner-gate restart conditions.
-- Expanded SecureStore TPM parity behavior so TPM-provisioned systems refuse non-TPM fallback when the TPM anchor path is unavailable.
+- Expanded SecureStore TPM parity behavior so TPM-provisioned systems use the TPM anchor path when the TPM probe succeeds, and otherwise report and handle the fallback path explicitly instead of silently drifting.
 - Extended shutdown robustness and observability with explicit ACPI grace-timeout/unavailable fallback diagnostics and structured boot events.
 - Added runtime keyboard/mouse tuning controls (`keyrepeat`, `mousespeed`, `mousecfg`) with startup config persistence for bring-up tuning.
 - Expanded command-layer visibility (`showmode`, `bevdump`) so fallback paths, anchor state, and active tuning values are easier to inspect and verify.

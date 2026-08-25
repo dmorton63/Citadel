@@ -421,6 +421,7 @@ namespace QKDrv
             QC::PhysAddr m_storageIoBufferPhys;
             QC::u32 m_bulkTagCounter;
             QC::u32 m_usbStorageCount;
+            bool m_sharedUsbAliasRegistered;
         };
     }
 } // namespace QKDrv

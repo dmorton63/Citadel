@@ -18,12 +18,27 @@ namespace QD
 {
     namespace
     {
-        constexpr QC::i32 DIALOG_WIDTH = 440;
-        constexpr QC::i32 DIALOG_HEIGHT = 240;
+        constexpr QC::i32 DIALOG_WIDTH = 500;
+        constexpr QC::i32 DIALOG_HEIGHT = 320;
 
         static inline bool isEmpty(const char *s)
         {
             return !s || *s == '\0';
+        }
+
+        static const char *unlockFailureText(QC::Status st)
+        {
+            switch (st)
+            {
+            case QC::Status::Timeout:
+                return "Too many attempts. Wait briefly and retry.";
+            case QC::Status::NotFound:
+                return "Owner profile was not found. Use setup to enroll an owner.";
+            case QC::Status::InvalidParam:
+                return "Invalid credentials format. Please retry.";
+            default:
+                return "Sign-in failed. Please retry.";
+            }
         }
     }
 
@@ -33,8 +48,10 @@ namespace QD
           m_root(nullptr),
           m_title(nullptr),
           m_hint(nullptr),
-          m_pinLabel(nullptr),
-          m_pinBox(nullptr),
+            m_userLabel(nullptr),
+            m_userBox(nullptr),
+            m_passwordLabel(nullptr),
+            m_passwordBox(nullptr),
           m_status(nullptr),
           m_unlockButton(nullptr),
           m_cancelButton(nullptr)
@@ -73,8 +90,10 @@ namespace QD
         m_root = nullptr;
         m_title = nullptr;
         m_hint = nullptr;
-        m_pinLabel = nullptr;
-        m_pinBox = nullptr;
+        m_userLabel = nullptr;
+        m_userBox = nullptr;
+        m_passwordLabel = nullptr;
+        m_passwordBox = nullptr;
         m_status = nullptr;
         m_unlockButton = nullptr;
         m_cancelButton = nullptr;
@@ -94,7 +113,7 @@ namespace QD
         if (!m_window)
             return;
 
-        m_window->setFlags(QW::WindowFlags::Visible | QW::WindowFlags::Movable | QW::WindowFlags::HasTitle | QW::WindowFlags::HasBorder);
+        m_window->setFlags(QW::WindowFlags::Visible | QW::WindowFlags::HasBorder);
 
         m_root = m_window->root();
         if (!m_root)
@@ -104,30 +123,54 @@ namespace QD
         m_root->setBorderStyle(QW::Controls::BorderStyle::None);
 
         QW::Rect titleBounds = {18, 18, static_cast<QC::u32>(DIALOG_WIDTH - 36), 20};
-        m_title = new QW::Controls::Label(m_window, "Unlock", titleBounds);
+        m_title = new QW::Controls::Label(m_window, "Welcome", titleBounds);
         m_root->addChild(m_title);
 
         QW::Rect hintBounds = {18, 44, static_cast<QC::u32>(DIALOG_WIDTH - 36), 40};
-        m_hint = new QW::Controls::Label(m_window, "Enter your PIN to unlock secure features.", hintBounds);
+        m_hint = new QW::Controls::Label(m_window, "Sign in to continue to CITADEL.", hintBounds);
         m_hint->setWordWrap(true);
         m_root->addChild(m_hint);
 
-        QW::Rect pinLabelBounds = {24, 108, 120, 24};
-        m_pinLabel = new QW::Controls::Label(m_window, "PIN:", pinLabelBounds);
-        m_root->addChild(m_pinLabel);
+        QW::Rect avatarBounds = {24, 82, 120, 24};
+        auto *avatarLabel = new QW::Controls::Label(m_window, "[ O ]  OWNER", avatarBounds);
+        m_root->addChild(avatarLabel);
 
-        QW::Rect pinBoxBounds = {24 + 120, 108, static_cast<QC::u32>(DIALOG_WIDTH - 24 - 120 - 24), 24};
-        m_pinBox = new QW::Controls::TextBox(m_window, pinBoxBounds);
-        m_pinBox->setPlaceholder("PIN");
-        m_pinBox->setPassword(true);
-        m_pinBox->setMaxLength(16);
-        m_root->addChild(m_pinBox);
+        const QC::i32 leftX = 24;
+        const QC::i32 labelW = 120;
+        const QC::i32 boxW = DIALOG_WIDTH - leftX - labelW - 24;
 
-        QW::Rect statusBounds = {18, 140, static_cast<QC::u32>(DIALOG_WIDTH - 36), 30};
+        QW::Rect userLabelBounds = {leftX, 124, static_cast<QC::u32>(labelW), 24};
+        m_userLabel = new QW::Controls::Label(m_window, "Username:", userLabelBounds);
+        m_root->addChild(m_userLabel);
+
+        QW::Rect userBoxBounds = {leftX + labelW, 124, static_cast<QC::u32>(boxW), 24};
+        m_userBox = new QW::Controls::TextBox(m_window, userBoxBounds);
+        m_userBox->setPlaceholder("Owner username");
+        m_userBox->setMaxLength(48);
+        m_root->addChild(m_userBox);
+
+        QW::Rect passLabelBounds = {leftX, 158, static_cast<QC::u32>(labelW), 24};
+        m_passwordLabel = new QW::Controls::Label(m_window, "Password:", passLabelBounds);
+        m_root->addChild(m_passwordLabel);
+
+        QW::Rect passBoxBounds = {leftX + labelW, 158, static_cast<QC::u32>(boxW), 24};
+        m_passwordBox = new QW::Controls::TextBox(m_window, passBoxBounds);
+        m_passwordBox->setPlaceholder("Password");
+        m_passwordBox->setPassword(true);
+        m_passwordBox->setMaxLength(96);
+        m_root->addChild(m_passwordBox);
+
+        char storedUser[48] = {};
+        const QC::Status userSt = QK::SecurityCenter::instance().getEnrolledOwnerUsername(storedUser, sizeof(storedUser));
+        if (userSt == QC::Status::Success && storedUser[0] != '\0')
+            m_userBox->setText(storedUser);
+
+        QW::Rect statusBounds = {18, 194, static_cast<QC::u32>(DIALOG_WIDTH - 36), 56};
         m_status = new QW::Controls::Label(m_window, "", statusBounds);
+        m_status->setWordWrap(true);
         m_root->addChild(m_status);
 
-        const QC::i32 buttonWidth = 140;
+        const QC::i32 buttonWidth = 170;
         const QC::i32 buttonHeight = 32;
         const QC::i32 spacing = 14;
         const QC::i32 baseY = DIALOG_HEIGHT - buttonHeight - 22;
@@ -141,13 +184,13 @@ namespace QD
         m_root->addChild(m_unlockButton);
 
         QW::Rect cancelBounds = {startX + buttonWidth + spacing, baseY, static_cast<QC::u32>(buttonWidth), static_cast<QC::u32>(buttonHeight)};
-        m_cancelButton = new QW::Controls::Button(m_window, "Cancel", cancelBounds);
+        m_cancelButton = new QW::Controls::Button(m_window, "Reset", cancelBounds);
         m_cancelButton->setContentMode(QW::ButtonContentMode::Text);
         m_cancelButton->setRole(QW::ButtonRole::Default);
         m_cancelButton->setClickHandler(&LoginDialog::onCancelClick, this);
         m_root->addChild(m_cancelButton);
 
-        setStatus("Enter PIN and select 'Unlock'.");
+        setStatus("Enter your password and select 'Unlock'.");
     }
 
     void LoginDialog::setStatus(const char *text)
@@ -165,35 +208,48 @@ namespace QD
 
         const bool bypass = QK::SecurityCenter::instance().bypassEnabled();
 
-        // NOTE: For early UI testing we accept blank PIN.
-        const char *pin = self->m_pinBox ? self->m_pinBox->text() : nullptr;
-        if (!pin)
-            pin = "";
+        const char *username = self->m_userBox ? self->m_userBox->text() : nullptr;
+        const char *password = self->m_passwordBox ? self->m_passwordBox->text() : nullptr;
+
+        if (isEmpty(username))
+        {
+            self->setStatus("Username is required.");
+            return;
+        }
+
+        if (isEmpty(password))
+        {
+            self->setStatus("Password is required.");
+            return;
+        }
 
         if (bypass)
         {
-            self->setStatus("Unlocked (SC bypass). ");
+            self->setStatus("Unlocked (SC bypass).");
             self->close();
             return;
         }
 
-        // v1: username is fixed to Owner until multi-user exists.
-        const QC::Status st = QK::SecurityCenter::instance().ownerUnlock("Owner", pin);
+        // Keep desktop login responsive: defer heavy session-key derivation from the UI click path.
+        const QC::Status st = QK::SecurityCenter::instance().ownerUnlock(username, password, false);
+        if (self->m_passwordBox)
+            self->m_passwordBox->setText("");
+
         if (st == QC::Status::Success)
         {
-            self->setStatus("Unlocked.");
+            self->setStatus("Unlocked. Continuing to desktop...");
             self->close();
             return;
         }
 
-        char msg[128];
+        char msg[192];
         QC::String::memset(msg, 0, sizeof(msg));
-        QC::String::strncpy(msg, "Denied.", sizeof(msg) - 1);
+        QC::String::strncpy(msg, unlockFailureText(st), sizeof(msg) - 1);
         const QC::u32 backoff = QK::SecurityCenter::instance().ownerUnlockBackoffMs();
         if (backoff)
         {
             const QC::usize used0 = QC::String::strlen(msg);
-            QC::String::strncpy(msg + used0, " Backoff ", sizeof(msg) - 1 - used0);
+            QC::String::strncpy(msg + used0, " Retry after ", sizeof(msg) - 1 - used0);
 
             char num[16];
             QC::String::memset(num, 0, sizeof(num));
@@ -224,7 +280,9 @@ namespace QD
         if (!self)
             return;
 
-        self->close();
+        if (self->m_passwordBox)
+            self->m_passwordBox->setText("");
+        self->setStatus("Credentials reset. Enter password to continue.");
     }
 
 } // namespace QD

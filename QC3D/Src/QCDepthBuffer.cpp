@@ -46,8 +46,9 @@ bool DepthBuffer::testAndSet(u32 x, u32 y, float depth)
         return false;
 
     u32 index = y * m_width + x;
+    float currentDepth = m_data[index];
 
-    if (depth < m_data[index])
+    if (depth < currentDepth)
     {
         m_data[index] = depth;
         return true;

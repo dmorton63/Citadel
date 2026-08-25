@@ -10,9 +10,15 @@ Canonical scope note:
 - `CQL_Database_Engine/TODO_LIST.md` tracks the standalone Windows/ImGui/service prototype and should not be treated as the canonical in-repo implementation order.
 
 Current implementation snapshot:
-- `QCQL` engine core: **Partial** (database lifecycle, table creation, page I/O, row serialization, PK index rebuild/lookup, and PK-based row operations exist)
-- `CQL_Database_Engine` service/runtime bridge: **Partial/Transitional** (message-routed service wrapper and subset query parsing exist, but the final Citadel-native runtime boundary is not settled)
-- `QDesktop` integration: **Partial** (built-in themes and seeded desktop documents already materialize into QCQL-backed storage during desktop bring-up)
+- `QCQL` engine core: **Working** (database lifecycle, table creation, page I/O, row serialization, PK index rebuild/lookup, PK-based and named-table CRUD, FK constraint enforcement on insert/update/delete, crash-safety write-barrier)
+- `QCQL` runtime surface: **Working** (canonical handle-based `QCQL::Runtime` facade with `openHandle`/`execute`/`closeHandle`; process-binding and table capability-map enforcement; INSERT/UPDATE/DELETE/SELECT/DESCRIBE execution; `SchemaIntegrityReport` and write-barrier state exposed per handle)
+- `CQL_Database_Engine` service/runtime bridge: **Partial/Transitional** (message-routed service wrapper and subset query parsing exist; Citadel-native runtime boundary settled in `QCQL::Runtime`)
+- `QDesktop` integration: **Working** (desktop bring-up uses QCQL primary source, all CMMS tables have FK-declared relational schemas, `applyBuiltInRelationshipMetadata` ensures relationships survive load from any format)
+
+Completed phases (Batch 41-50, 2026-07-19):
+- Surface A (Items 41-49): runtime boundary, handle/capability model, FK persistence + enforcement, DML execution, write-barrier, schema integrity gate, machine-parseable diagnostics, regression suite
+- Surface C (Item 45): CMMS relational schema gap closure via `applyBuiltInRelationshipMetadata`
+- Documentation (Item 50): `CITADEL_CURRENT_STATE.md` Section 15, rollback/recovery runbook, evidence table
 
 Recommended execution order:
 1. Finish and harden the `QCQL` engine core.

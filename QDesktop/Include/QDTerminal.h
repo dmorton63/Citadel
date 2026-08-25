@@ -42,6 +42,8 @@ namespace QD
     private:
         static void onSubmit(QW::Controls::TextBox *textBox, void *userData);
         static void onCloseClick(QW::Controls::Button *button, void *userData);
+        static void onMinClick(QW::Controls::Button *button, void *userData);
+        static void onMaxClick(QW::Controls::Button *button, void *userData);
         static bool onWindowMessage(QW::Window *window, const QW::Message &msg, void *userData);
         static bool onEvent(const QK::Event::Event &event, void *userData);
 
@@ -51,6 +53,15 @@ namespace QD
         void appendLine(const char *line);
         void executeLine(const char *line);
         void listDirectory(const char *path);
+        void layoutWindow();
+        void minimizeWindow();
+        void toggleMaximizeWindow();
+        bool resolveInputPath(const char *rawPath, char *outPath, QC::usize outCap) const;
+        void viewFile(const char *pathArg);
+        void openMiniEditor(const char *pathArg);
+        void handleMiniEditorLine(const char *line);
+        void showMiniEditorBuffer();
+        bool saveMiniEditorBuffer();
 
         // Access/mode testing (fake auth)
         void setCallerAccess(QC::u8 access);
@@ -77,14 +88,31 @@ namespace QD
         QC::u32 m_windowId;
         QW::Controls::Panel *m_root;
         QW::Controls::Panel *m_content;
+        QW::Controls::Panel *m_titleBar;
+        QW::Controls::Label *m_titleLabel;
         QW::Controls::ListView *m_output;
         QW::Controls::ScrollBar *m_outputScroll;
         QW::Controls::TextBox *m_input;
+        QW::Controls::Button *m_closeButton;
+        QW::Controls::Button *m_minButton;
+        QW::Controls::Button *m_maxButton;
 
         QK::Event::ListenerId m_windowListenerId;
 
         bool m_followTail;
         bool m_syncingScroll;
+        bool m_isMaximized;
+        QC::i32 m_restoreX;
+        QC::i32 m_restoreY;
+        QC::u32 m_restoreW;
+        QC::u32 m_restoreH;
+
+        bool m_editorActive;
+        bool m_editorDirty;
+        char m_editorPath[256];
+        QC::usize m_editorLen;
+        static constexpr QC::usize EDITOR_BUFFER_CAP = 32768;
+        char m_editorBuffer[EDITOR_BUFFER_CAP];
 
         // Encodes QC::Cmd::AccessLevel values (0..4). Defaults to User for desktop terminal.
         QC::u8 m_callerAccess;

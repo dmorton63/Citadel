@@ -76,7 +76,7 @@ Reference: `TODO_MAIN.md` Phase 3 sequence.
 
 ### Expand Now
 
-- [x] Item 25: Expand SecureStore/TPM parity so certified TPM-backed systems consistently use the TPM anchor path without falling back unexpectedly.
+- [x] Item 25: Expand SecureStore/TPM parity so certified TPM-backed systems use the TPM anchor path when the TPM probe succeeds; the boot path now reports and handles fallback explicitly instead of silently drifting.
 - [x] Item 26: Expand TPM-backed owner/session reporting so the console can state whether the active anchor is TPM-backed or recovery-backed.
 - [x] Item 27: Expand device-configuration surfaces for keyboard tuning so bring-up settings become user-manageable runtime controls.
 - [x] Item 28: Expand device-configuration surfaces for mouse and pointing behavior so sensitivity and related tuning remain user-adjustable at runtime.
@@ -118,3 +118,32 @@ Reference: `TODO_MAIN.md` next platform-depth sequence.
 - [x] Step D: finish evidence capture and current-state documentation updates.
 
 **Status: Batch 31-40 COMPLETE** (Commit 637e461)
+
+## Execution Batch 41 to 50 (Active)
+
+Reference: `TODO_LIST_CQL.md` remaining core/runtime/durability work.
+
+### Expand Now
+
+- [x] Item 41: Settle the QCQL runtime boundary by defining one canonical execution surface (`openHandle`, `execute`, `closeHandle`) and routing `csql`/desktop callers through it.
+- [x] Item 42: Implement `DbHandle` process binding + capability map plumbing end-to-end (issuer -> runtime service -> engine enforcement path).
+- [x] Item 43: Add schema-level relationship metadata persistence for foreign-key descriptors (parent table/column, child table/column, update/delete policy).
+- [x] Item 44: Enforce relationship integrity on insert/update/delete with deterministic rejection diagnostics (first failing table/key/operation).
+- [x] Item 45: Normalize remaining desktop runtime model gaps so layout/control/theme-binding rows are fully relational and no longer depend on chunk-only runtime reads.
+
+### Tighten Now
+
+- [x] Item 46: Tighten QCQL boot/open path with explicit integrity gates (schema compatibility/version checks + relationship metadata validation before desktop consume).
+- [x] Item 47: Tighten command diagnostics (`csql`, `qcql-desktop`, `migrate-desktop`) so relationship and permission failures emit stable machine-parseable error fields.
+- [x] Item 48: Add crash-safety phase-0 durability guard (explicit write barriers/checkpoints for critical table updates) and verify persistence across reboot loops.
+- [x] Item 49: Add a focused QCQL regression suite for: relational constraints, handle permissions, desktop boot read path, and reboot persistence of migrated data.
+- [x] Item 50: Update current-state + CQL docs after Items 41 to 49 land, including evidence locations and rollback/recovery runbook notes.
+
+### Batch 41 to 50 Order
+
+- [x] Step A: implement Items 41 to 42 (runtime boundary + handle model).
+- [x] Step B: implement Items 43 to 45 (relationship model + desktop schema depth).
+- [x] Step C: implement Items 46 to 48 (boot integrity + diagnostics + durability safeguards).
+- [x] Step D: complete Items 49 to 50 (regression coverage + docs/evidence closeout).
+
+**Status: Batch 41-50 COMPLETE** (2026-07-19, branch `copilot/fix-nightly-regression-job`)

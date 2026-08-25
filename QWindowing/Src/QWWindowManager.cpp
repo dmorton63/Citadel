@@ -62,6 +62,190 @@ namespace QW
         return (1u << (b - 1));
     }
 
+    enum ResizeEdges : QC::u32
+    {
+        ResizeNone = 0,
+        ResizeLeft = 1u << 0,
+        ResizeRight = 1u << 1,
+        ResizeTop = 1u << 2,
+        ResizeBottom = 1u << 3
+    };
+
+    enum HwCursorShape : QC::u8
+    {
+        HwCursorArrow = 0,
+        HwCursorSizeWE = 1,
+        HwCursorSizeNS = 2,
+        HwCursorSizeNWSE = 3,
+        HwCursorSizeNESW = 4
+    };
+
+    static void clearCursor(QC::u32 *pixels, QC::usize count)
+    {
+        for (QC::usize i = 0; i < count; ++i)
+            pixels[i] = 0x00000000u;
+    }
+
+    static inline void putCursorPx(QC::u32 *pixels, QC::u32 w, QC::u32 h, QC::i32 x, QC::i32 y, QC::u32 color)
+    {
+        if (!pixels || x < 0 || y < 0 || x >= static_cast<QC::i32>(w) || y >= static_cast<QC::i32>(h))
+            return;
+        pixels[static_cast<QC::usize>(y) * w + static_cast<QC::usize>(x)] = color;
+    }
+
+    static void buildHwCursorPixels(HwCursorShape shape, QC::u32 *pixels, QC::u32 &outW, QC::u32 &outH, QC::i32 &outHotX, QC::i32 &outHotY)
+    {
+        static constexpr QC::u32 W = 16;
+        static constexpr QC::u32 H = 16;
+        static constexpr QC::u32 K = 0xFF000000u;
+
+        outW = W;
+        outH = H;
+        outHotX = 0;
+        outHotY = 0;
+        clearCursor(pixels, static_cast<QC::usize>(W) * H);
+
+        if (shape == HwCursorArrow)
+        {
+            for (QC::i32 y = 0; y < 12; ++y)
+            {
+                const QC::i32 maxX = (y < 8) ? (y + 1) : 8;
+                for (QC::i32 x = 0; x < maxX; ++x)
+                    putCursorPx(pixels, W, H, x, y, K);
+            }
+            putCursorPx(pixels, W, H, 3, 12, K);
+            putCursorPx(pixels, W, H, 4, 12, K);
+            putCursorPx(pixels, W, H, 4, 13, K);
+            return;
+        }
+
+        outHotX = 8;
+        outHotY = 8;
+
+        if (shape == HwCursorSizeWE)
+        {
+            for (QC::i32 x = 3; x <= 12; ++x)
+                putCursorPx(pixels, W, H, x, 8, K);
+            putCursorPx(pixels, W, H, 2, 8, K);
+            putCursorPx(pixels, W, H, 3, 7, K);
+            putCursorPx(pixels, W, H, 3, 9, K);
+            putCursorPx(pixels, W, H, 13, 8, K);
+            putCursorPx(pixels, W, H, 12, 7, K);
+            putCursorPx(pixels, W, H, 12, 9, K);
+            return;
+        }
+
+        if (shape == HwCursorSizeNS)
+        {
+            for (QC::i32 y = 3; y <= 12; ++y)
+                putCursorPx(pixels, W, H, 8, y, K);
+            putCursorPx(pixels, W, H, 8, 2, K);
+            putCursorPx(pixels, W, H, 7, 3, K);
+            putCursorPx(pixels, W, H, 9, 3, K);
+            putCursorPx(pixels, W, H, 8, 13, K);
+            putCursorPx(pixels, W, H, 7, 12, K);
+            putCursorPx(pixels, W, H, 9, 12, K);
+            return;
+        }
+
+        if (shape == HwCursorSizeNWSE)
+        {
+            for (QC::i32 i = 4; i <= 11; ++i)
+                putCursorPx(pixels, W, H, i, i, K);
+            putCursorPx(pixels, W, H, 3, 3, K);
+            putCursorPx(pixels, W, H, 4, 3, K);
+            putCursorPx(pixels, W, H, 3, 4, K);
+            putCursorPx(pixels, W, H, 12, 12, K);
+            putCursorPx(pixels, W, H, 11, 12, K);
+            putCursorPx(pixels, W, H, 12, 11, K);
+            return;
+        }
+
+        // HwCursorSizeNESW
+        for (QC::i32 i = 4; i <= 11; ++i)
+            putCursorPx(pixels, W, H, i, 15 - i, K);
+        putCursorPx(pixels, W, H, 12, 3, K);
+        putCursorPx(pixels, W, H, 11, 3, K);
+        putCursorPx(pixels, W, H, 12, 4, K);
+        putCursorPx(pixels, W, H, 3, 12, K);
+        putCursorPx(pixels, W, H, 3, 11, K);
+        putCursorPx(pixels, W, H, 4, 12, K);
+    }
+
+    static HwCursorShape cursorShapeForResizeEdges(QC::u32 edges)
+    {
+        const bool left = (edges & ResizeLeft) != 0;
+        const bool right = (edges & ResizeRight) != 0;
+        const bool top = (edges & ResizeTop) != 0;
+        const bool bottom = (edges & ResizeBottom) != 0;
+
+        if ((left || right) && (top || bottom))
+        {
+            if ((left && top) || (right && bottom))
+                return HwCursorSizeNWSE;
+            return HwCursorSizeNESW;
+        }
+        if (left || right)
+            return HwCursorSizeWE;
+        if (top || bottom)
+            return HwCursorSizeNS;
+        return HwCursorArrow;
+    }
+
+    static void updateHardwareCursorShape(Compositor *compositor, QC::u8 &currentShape, HwCursorShape desiredShape)
+    {
+        if (!compositor || !compositor->hasHardwareCursor())
+            return;
+
+        const QC::u8 desired = static_cast<QC::u8>(desiredShape);
+        if (currentShape == desired)
+            return;
+
+        QC::u32 pixels[16 * 16];
+        QC::u32 w = 0;
+        QC::u32 h = 0;
+        QC::i32 hotX = 0;
+        QC::i32 hotY = 0;
+        buildHwCursorPixels(desiredShape, pixels, w, h, hotX, hotY);
+        compositor->setCursor(pixels, w, h, hotX, hotY);
+        currentShape = desired;
+    }
+
+    static QC::u32 hitResizeEdges(const Rect &bounds, const Point &mousePos, QC::u32 flags)
+    {
+        if ((flags & WindowFlags::Resizable) == 0)
+            return ResizeNone;
+
+        static constexpr QC::i32 kHandle = 6;
+        static constexpr QC::i32 kTitleBarHeight = 24;
+
+        const QC::i32 localX = mousePos.x - bounds.x;
+        const QC::i32 localY = mousePos.y - bounds.y;
+        const QC::i32 width = static_cast<QC::i32>(bounds.width);
+        const QC::i32 height = static_cast<QC::i32>(bounds.height);
+
+        if (localX < 0 || localY < 0 || localX >= width || localY >= height)
+            return ResizeNone;
+
+        QC::u32 edges = ResizeNone;
+        if (localX <= kHandle)
+            edges |= ResizeLeft;
+        if (localX >= (width - kHandle - 1))
+            edges |= ResizeRight;
+        if (localY <= kHandle)
+            edges |= ResizeTop;
+        if (localY >= (height - kHandle - 1))
+            edges |= ResizeBottom;
+
+        // Avoid stealing interactions from title bar buttons/drag area.
+        if ((flags & WindowFlags::HasTitle) != 0 && localY < kTitleBarHeight)
+        {
+            edges &= ~ResizeTop;
+        }
+
+        return edges;
+    }
+
     static Rect decoratedInvalidationRect(const Rect &bounds)
     {
         // Compositor decorations paint at the bounds edge, and shadow extends
@@ -387,7 +571,12 @@ namespace QW
           m_listenerId(QK::Event::InvalidListenerId),
           m_dragWindow(nullptr),
           m_dragOffset{0, 0},
-          m_dragStartBounds{0, 0, 0, 0}
+            m_dragStartBounds{0, 0, 0, 0},
+            m_resizeWindow(nullptr),
+            m_resizeStartMouse{0, 0},
+            m_resizeStartBounds{0, 0, 0, 0},
+            m_resizeEdges(ResizeNone),
+            m_hwCursorShape(static_cast<QC::u8>(HwCursorArrow))
     {
     }
 
@@ -542,6 +731,11 @@ namespace QW
                 m_hoveredWindow = nullptr;
             if (m_dragWindow == window)
                 m_dragWindow = nullptr;
+            if (m_resizeWindow == window)
+            {
+                m_resizeWindow = nullptr;
+                m_resizeEdges = ResizeNone;
+            }
             if (m_captureWindow == window)
             {
                 m_captureWindow = nullptr;
@@ -583,6 +777,11 @@ namespace QW
 
         if (m_dragWindow == window)
             m_dragWindow = nullptr;
+        if (m_resizeWindow == window)
+        {
+            m_resizeWindow = nullptr;
+            m_resizeEdges = ResizeNone;
+        }
         if (m_captureWindow == window)
         {
             m_captureWindow = nullptr;
@@ -781,7 +980,20 @@ namespace QW
 
             m_compositor->compose();
 
-            m_needsRender = false;
+            // A paint may invalidate again (e.g., animations). Keep scheduling
+            // frames while any visible window still has pending paint work.
+            bool hasPendingPaint = false;
+            for (QC::usize i = 0; i < m_windows.size(); ++i)
+            {
+                Window *window = m_windows[i];
+                if (window && window->isVisible() && window->needsPaint())
+                {
+                    hasPendingPaint = true;
+                    break;
+                }
+            }
+
+            m_needsRender = hasPendingPaint;
         }
     }
 
@@ -887,6 +1099,133 @@ namespace QW
                 m_compositor->syncHardwareCursorPosition();
             }
         };
+
+        if (m_resizeWindow)
+        {
+            updateHardwareCursorShape(m_compositor, m_hwCursorShape, cursorShapeForResizeEdges(m_resizeEdges));
+
+            if (mouse.type == Type::MouseMove)
+            {
+                const Rect oldBounds = m_resizeWindow->bounds();
+                const Rect start = m_resizeStartBounds;
+                const QC::i32 dx = m_mousePos.x - m_resizeStartMouse.x;
+                const QC::i32 dy = m_mousePos.y - m_resizeStartMouse.y;
+
+                QC::i32 newX = start.x;
+                QC::i32 newY = start.y;
+                QC::i32 newW = static_cast<QC::i32>(start.width);
+                QC::i32 newH = static_cast<QC::i32>(start.height);
+
+                if (m_resizeEdges & ResizeLeft)
+                {
+                    newX = start.x + dx;
+                    newW = static_cast<QC::i32>(start.width) - dx;
+                }
+                if (m_resizeEdges & ResizeRight)
+                {
+                    newW = static_cast<QC::i32>(start.width) + dx;
+                }
+                if (m_resizeEdges & ResizeTop)
+                {
+                    newY = start.y + dy;
+                    newH = static_cast<QC::i32>(start.height) - dy;
+                }
+                if (m_resizeEdges & ResizeBottom)
+                {
+                    newH = static_cast<QC::i32>(start.height) + dy;
+                }
+
+                static constexpr QC::i32 kMinWidth = 320;
+                static constexpr QC::i32 kMinHeight = 180;
+
+                if (newW < kMinWidth)
+                {
+                    if (m_resizeEdges & ResizeLeft)
+                        newX = start.x + static_cast<QC::i32>(start.width) - kMinWidth;
+                    newW = kMinWidth;
+                }
+                if (newH < kMinHeight)
+                {
+                    if (m_resizeEdges & ResizeTop)
+                        newY = start.y + static_cast<QC::i32>(start.height) - kMinHeight;
+                    newH = kMinHeight;
+                }
+
+                const Size screen = screenSize();
+                const QC::i32 maxW = static_cast<QC::i32>(screen.width);
+                const QC::i32 maxH = static_cast<QC::i32>(screen.height);
+
+                if (newX < 0)
+                {
+                    if (m_resizeEdges & ResizeLeft)
+                        newW += newX;
+                    newX = 0;
+                }
+                if (newY < 0)
+                {
+                    if (m_resizeEdges & ResizeTop)
+                        newH += newY;
+                    newY = 0;
+                }
+
+                if (newX + newW > maxW)
+                {
+                    if (m_resizeEdges & ResizeRight)
+                        newW = maxW - newX;
+                    else if (m_resizeEdges & ResizeLeft)
+                        newX = maxW - newW;
+                }
+                if (newY + newH > maxH)
+                {
+                    if (m_resizeEdges & ResizeBottom)
+                        newH = maxH - newY;
+                    else if (m_resizeEdges & ResizeTop)
+                        newY = maxH - newH;
+                }
+
+                if (newW < kMinWidth)
+                    newW = kMinWidth;
+                if (newH < kMinHeight)
+                    newH = kMinHeight;
+
+                if (newX < 0)
+                    newX = 0;
+                if (newY < 0)
+                    newY = 0;
+
+                Rect newBounds = oldBounds;
+                newBounds.x = newX;
+                newBounds.y = newY;
+                newBounds.width = static_cast<QC::u32>(newW);
+                newBounds.height = static_cast<QC::u32>(newH);
+
+                if (newBounds.x != oldBounds.x || newBounds.y != oldBounds.y ||
+                    newBounds.width != oldBounds.width || newBounds.height != oldBounds.height)
+                {
+                    const Rect oldDecorated = decoratedInvalidationRect(oldBounds);
+                    const Rect newDecorated = decoratedInvalidationRect(newBounds);
+
+                    m_resizeWindow->setBounds(newBounds);
+
+                    invalidate(oldDecorated);
+                    invalidate(newDecorated);
+                    postWindowEvent(QK::Event::Type::WindowResize, m_resizeWindow);
+
+                    syncRuntimeWindowRegistry(m_windows, m_focusedWindow);
+                }
+
+                syncCursorNow();
+                return;
+            }
+
+            if (mouse.type == Type::MouseButtonUp && mouse.button == MouseButton::Left)
+            {
+                m_resizeWindow = nullptr;
+                m_resizeEdges = ResizeNone;
+                syncCursorNow();
+                return;
+            }
+        }
 
         // If a title-bar drag is active, keep moving the captured window even if
         // the cursor leaves its bounds.
@@ -1003,6 +1342,23 @@ namespace QW
                 const bool isMovable = (targetWindow->flags() & WindowFlags::Movable) != 0;
                 const bool hasTitle = (targetWindow->flags() & WindowFlags::HasTitle) != 0;
                 const bool leftDown = (mouse.button == MouseButton::Left);
+
+                const QC::u32 resizeEdges = hitResizeEdges(windowBounds, m_mousePos, targetWindow->flags());
+                if (leftDown && resizeEdges != ResizeNone)
+                {
+                    m_captureWindow = nullptr;
+                    m_captureButtonsMask = 0;
+                    m_dragWindow = nullptr;
+
+                    m_resizeWindow = targetWindow;
+                    m_resizeStartMouse = m_mousePos;
+                    m_resizeStartBounds = windowBounds;
+                    m_resizeEdges = resizeEdges;
+                    updateHardwareCursorShape(m_compositor, m_hwCursorShape, cursorShapeForResizeEdges(resizeEdges));
+                    syncCursorNow();
+                    return;
+                }
+
                 const QC::i32 localY = m_mousePos.y - windowBounds.y;
                 if (leftDown && isMovable && hasTitle && localY >= 0 && localY < kTitleBarHeight)
                 {
@@ -1068,6 +1424,15 @@ namespace QW
                 if (m_captureButtonsMask == 0)
                     m_captureWindow = nullptr;
             }
+        }
+
+        // Hardware-only affordance: switch cursor shape on resize-handle hover.
+        if (m_compositor && m_compositor->hasHardwareCursor() && !m_dragWindow && !m_resizeWindow)
+        {
+            QC::u32 hoverEdges = ResizeNone;
+            if (targetWindow)
+                hoverEdges = hitResizeEdges(targetWindow->bounds(), m_mousePos, targetWindow->flags());
+            updateHardwareCursorShape(m_compositor, m_hwCursorShape, cursorShapeForResizeEdges(hoverEdges));
         }
 
         // Ensure cursor position updates even if no repaint is needed.

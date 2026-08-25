@@ -27,6 +27,11 @@ namespace QW
         void setPixel(QC::i32 x, QC::i32 y, Color color);
         Color getPixel(QC::i32 x, QC::i32 y) const;
 
+        // Copy a region of pixels out of / into the render buffer (for cursor background save/restore).
+        // dst/src must be width*height u32 pixels; unclipped regions are silently skipped.
+        void copyRegionOut(QC::i32 x, QC::i32 y, QC::u32 width, QC::u32 height, QC::u32 *dst) const;
+        void copyRegionIn(QC::i32 x, QC::i32 y, QC::u32 width, QC::u32 height, const QC::u32 *src);
+
         void drawLine(QC::i32 x1, QC::i32 y1, QC::i32 x2, QC::i32 y2, Color color);
         void drawHLine(QC::i32 x, QC::i32 y, QC::u32 length, Color color);
         void drawVLine(QC::i32 x, QC::i32 y, QC::u32 length, Color color);

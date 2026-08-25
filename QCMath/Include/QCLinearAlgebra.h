@@ -343,8 +343,10 @@ namespace QC
         r.m[2][0] = m02;
         r.m[2][1] = m12;
         r.m[2][2] = m22;
-        r.m[3][2] = -1.0f; // m23
-        r.m[2][3] = m32;   // m32
+        // Column-major storage m[col][row]:
+        // row 2, col 3 = m32 term; row 3, col 2 = -1 term.
+        r.m[3][2] = m32;
+        r.m[2][3] = -1.0f;
 
         return r;
     }

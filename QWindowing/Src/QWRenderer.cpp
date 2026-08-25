@@ -89,6 +89,50 @@ namespace QW
         return c;
     }
 
+    void Renderer::copyRegionOut(QC::i32 x, QC::i32 y, QC::u32 width, QC::u32 height, QC::u32 *dst) const
+    {
+        if (!m_buffer || !dst || width == 0 || height == 0)
+            return;
+        for (QC::u32 row = 0; row < height; ++row)
+        {
+            const QC::i32 sy = y + static_cast<QC::i32>(row);
+            if (sy < 0 || static_cast<QC::u32>(sy) >= m_height)
+            {
+                memset(dst + row * width, 0, width * sizeof(QC::u32));
+                continue;
+            }
+            const QC::u32 *srcRow = reinterpret_cast<const QC::u32 *>(
+                reinterpret_cast<const QC::u8 *>(m_buffer) + static_cast<QC::u32>(sy) * m_pitch);
+            QC::u32 *dstRow = dst + row * width;
+            for (QC::u32 col = 0; col < width; ++col)
+            {
+                const QC::i32 sx = x + static_cast<QC::i32>(col);
+                dstRow[col] = (sx >= 0 && static_cast<QC::u32>(sx) < m_width) ? srcRow[sx] : 0u;
+            }
+        }
+    }
+
+    void Renderer::copyRegionIn(QC::i32 x, QC::i32 y, QC::u32 width, QC::u32 height, const QC::u32 *src)
+    {
+        if (!m_buffer || !src || width == 0 || height == 0)
+            return;
+        for (QC::u32 row = 0; row < height; ++row)
+        {
+            const QC::i32 dy = y + static_cast<QC::i32>(row);
+            if (dy < 0 || static_cast<QC::u32>(dy) >= m_height)
+                continue;
+            QC::u32 *dstRow = reinterpret_cast<QC::u32 *>(
+                reinterpret_cast<QC::u8 *>(m_buffer) + static_cast<QC::u32>(dy) * m_pitch);
+            const QC::u32 *srcRow = src + row * width;
+            for (QC::u32 col = 0; col < width; ++col)
+            {
+                const QC::i32 dx = x + static_cast<QC::i32>(col);
+                if (dx >= 0 && static_cast<QC::u32>(dx) < m_width)
+                    dstRow[dx] = srcRow[col];
+            }
+        }
+    }
+
     void Renderer::drawLine(QC::i32 x1, QC::i32 y1, QC::i32 x2, QC::i32 y2, Color color)
     {
         // Bresenham's line algorithm

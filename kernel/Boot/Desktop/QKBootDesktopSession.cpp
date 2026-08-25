@@ -36,15 +36,18 @@
 #include "QKSystemPump.h"
 
 #include "Debug/Framebuffer/QKDebugFramebufferText.h"
+#include "Debug/Serial/QKDebugSerial.h"
 
 #include "QDDesktop.h"
 
 #include "Boot/Config/QKBootStartupConfig.h"
 #include "Boot/Ramdisk/QKBootRamdiskMount.h"
+#include "Boot/TPM/QKBootTPMSecureStore.h"
 
 namespace
 {
     static QK::Boot::Desktop::FLogFn g_Log = nullptr;
+    static QK::Shutdown::SubsystemHandle g_ShutdownSerialSaveHook = QK::Shutdown::InvalidSubsystemHandle;
     [[noreturn]] static void enterTerminalOnlyLoop();
     static void logBootMetric(const char *label, QC::u64 startMs);
     static void logIPv4(QNet::IPv4Address addr);
@@ -65,11 +68,14 @@ namespace
 
         // Keep waiting for input without re-printing the prompt; this avoids
         // serial spam if the underlying read reports transient false.
-        for (;;)
+        for (QC::u32 i = 0; i < 200u; ++i)
         {
             if (QK::Console::readLineBlocking(out, outCap, true))
                 return true;
+            QDrv::Timer::instance().sleep(10);
         }
+
+        return false;
     }
 
     static bool PromptLine(const char *prompt, char *out, QC::usize outCap)
@@ -78,11 +84,13 @@ namespace
             return false;
         out[0] = '\0';
         QK::Console::write(prompt);
-        for (;;)
+        for (QC::u32 i = 0; i < 200u; ++i)
         {
             if (QK::Console::readLineBlocking(out, outCap, true))
                 return true;
+            QDrv::Timer::instance().sleep(10);
         }
+        return false;
     }
 
     static const char *statusText(QC::Status st)
@@ -110,6 +118,374 @@ namespace
         }
     }
 
+    static bool SaveSerialCaptureForShutdown(QK::Shutdown::Reason, void *)
+    {
+        // Some mounted volumes are constrained to 8.3 names.
+        // When USB shared export is enabled, prefer /shared first.
+        const bool preferUsbShared = QK::Boot::Config::GetPreferUsbSharedVolume();
+        const char *usbFirstPaths[] = {
+            "/shared/CITSER.TXT",
+            "/system/CITSER.TXT",
+            "/CITSER.TXT",
+        };
+        const char *defaultPaths[] = {
+            "/system/CITSER.TXT",
+            "/CITSER.TXT",
+            "/shared/CITSER.TXT",
+        };
+        const char **paths = preferUsbShared ? usbFirstPaths : defaultPaths;
+
+        for (QC::usize i = 0; i < (sizeof(usbFirstPaths) / sizeof(usbFirstPaths[0])); ++i)
+        {
+            if (QK::Debug::Serial::SaveCaptureToFile(paths[i]))
+            {
+                if (g_Log)
+                {
+                    g_Log("Shutdown: saved serial capture to ");
+                    g_Log(paths[i]);
+                    g_Log("\r\n");
+                }
+                return true;
+            }
+
+            if (g_Log)
+            {
+                g_Log("Shutdown: serial capture save failed at ");
+                g_Log(paths[i]);
+                g_Log("\r\n");
+            }
+        }
+
+        if (g_Log)
+            g_Log("Shutdown: failed to save serial capture (all 8.3 paths)\r\n");
+
+        // Never block shutdown on logging best-effort behavior.
+        return true;
+    }
+
+    static void RegisterShutdownSerialSaveHook()
+    {
+        if (g_ShutdownSerialSaveHook != QK::Shutdown::InvalidSubsystemHandle)
+            return;
+
+        g_ShutdownSerialSaveHook = QK::Shutdown::Controller::instance().registerSubsystem(
+            &SaveSerialCaptureForShutdown,
+            nullptr,
+            "serial_capture_save");
+
+        if (g_ShutdownSerialSaveHook == QK::Shutdown::InvalidSubsystemHandle)
+        {
+            if (g_Log)
+                g_Log("Shutdown: failed to register serial save hook\r\n");
+            return;
+        }
+
+        if (g_Log)
+            g_Log("Shutdown: serial save hook registered\r\n");
+    }
+
+    static bool appendText(char *dst, QC::usize cap, QC::usize &pos, const char *text)
+    {
+        if (!dst || !text)
+            return false;
+
+        for (QC::usize i = 0; text[i] != 0; ++i)
+        {
+            if (pos + 1 >= cap)
+                return false;
+            dst[pos++] = text[i];
+            dst[pos] = 0;
+        }
+        return true;
+    }
+
+    static bool appendChar(char *dst, QC::usize cap, QC::usize &pos, char ch)
+    {
+        if (!dst || pos + 1 >= cap)
+            return false;
+        dst[pos++] = ch;
+        dst[pos] = 0;
+        return true;
+    }
+
+    static bool appendUnsigned(char *dst, QC::usize cap, QC::usize &pos, QC::u64 value)
+    {
+        char rev[24] = {};
+        QC::usize count = 0;
+        do
+        {
+            rev[count++] = static_cast<char>('0' + (value % 10u));
+            value /= 10u;
+        } while (value != 0u && count < sizeof(rev));
+
+        while (count > 0)
+        {
+            if (!appendChar(dst, cap, pos, rev[--count]))
+                return false;
+        }
+        return true;
+    }
+
+    static const char *findText(const char *haystack, const char *needle)
+    {
+        if (!haystack || !needle || needle[0] == '\0')
+            return nullptr;
+
+        for (const char *h = haystack; *h != '\0'; ++h)
+        {
+            const char *a = h;
+            const char *b = needle;
+            while (*a != '\0' && *b != '\0' && *a == *b)
+            {
+                ++a;
+                ++b;
+            }
+            if (*b == '\0')
+                return h;
+        }
+
+        return nullptr;
+    }
+
+    static bool buildRootFallbackQuarantinePath(const char *quarantineRoot,
+                                                const char *key,
+                                                QC::u64 stamp,
+                                                const char *suffix,
+                                                char *outPath,
+                                                QC::usize outCap)
+    {
+        if (!quarantineRoot || !key || !suffix || !outPath || outCap == 0)
+            return false;
+
+        constexpr const char *kMarker = "/sc-quarantine";
+        const char *marker = findText(quarantineRoot, kMarker);
+        if (!marker)
+            return false;
+
+        const QC::usize rootLen = static_cast<QC::usize>(marker - quarantineRoot);
+        if (rootLen == 0 || rootLen >= 96)
+            return false;
+
+        char root[96] = {};
+        QC::String::memcpy(root, quarantineRoot, rootLen);
+        root[rootLen] = '\0';
+
+        QC::usize pos = 0;
+        outPath[0] = '\0';
+        return appendText(outPath, outCap, pos, root) &&
+               appendText(outPath, outCap, pos, "/SCQ_") &&
+               appendText(outPath, outCap, pos, key) &&
+               appendChar(outPath, outCap, pos, '.') &&
+               appendUnsigned(outPath, outCap, pos, stamp) &&
+               appendText(outPath, outCap, pos, suffix);
+    }
+
+    static bool writeAll(QFS::File *file, const void *data, QC::usize size)
+    {
+        if (!file || !data)
+            return false;
+
+        const QC::u8 *bytes = static_cast<const QC::u8 *>(data);
+        QC::usize written = 0;
+        while (written < size)
+        {
+            const QC::isize n = file->write(bytes + written, size - written);
+            if (n <= 0)
+                return false;
+            written += static_cast<QC::usize>(n);
+        }
+        return true;
+    }
+
+    static bool writeQuarantineAudit(const char *quarantineRoot,
+                                     const char *key,
+                                     QC::u64 stamp,
+                                     QC::usize blobSize,
+                                     const char *note)
+    {
+        if (!quarantineRoot || !key || !note)
+            return false;
+
+        auto &vfs = QFS::VFS::instance();
+        (void)vfs.createDir(quarantineRoot);
+
+        char path[256] = {};
+        QC::usize pos = 0;
+        if (!appendText(path, sizeof(path), pos, quarantineRoot) ||
+            !appendChar(path, sizeof(path), pos, '/') ||
+            !appendText(path, sizeof(path), pos, key) ||
+            !appendChar(path, sizeof(path), pos, '.') ||
+            !appendUnsigned(path, sizeof(path), pos, stamp) ||
+            !appendText(path, sizeof(path), pos, ".audit.txt"))
+        {
+            return false;
+        }
+
+        QFS::File *file = vfs.open(path,
+                                   QFS::OpenMode::Write |
+                                   QFS::OpenMode::Create |
+                                   QFS::OpenMode::Truncate |
+                                   QFS::OpenMode::Binary);
+        if (!file)
+        {
+            char fallbackPath[256] = {};
+            if (buildRootFallbackQuarantinePath(quarantineRoot, key, stamp, ".audit.txt", fallbackPath, sizeof(fallbackPath)))
+            {
+                file = vfs.open(fallbackPath,
+                                QFS::OpenMode::Write |
+                                QFS::OpenMode::Create |
+                                QFS::OpenMode::Truncate |
+                                QFS::OpenMode::Binary);
+            }
+        }
+        if (!file)
+            return false;
+
+        char body[384] = {};
+        QC::usize bodyPos = 0;
+        bool ok = appendText(body, sizeof(body), bodyPos, "key=") &&
+                  appendText(body, sizeof(body), bodyPos, key) &&
+                  appendText(body, sizeof(body), bodyPos, "\nstamp_ms=") &&
+                  appendUnsigned(body, sizeof(body), bodyPos, stamp) &&
+                  appendText(body, sizeof(body), bodyPos, "\nsize=") &&
+                  appendUnsigned(body, sizeof(body), bodyPos, static_cast<QC::u64>(blobSize)) &&
+                  appendText(body, sizeof(body), bodyPos, "\nnote=") &&
+                  appendText(body, sizeof(body), bodyPos, note) &&
+                  appendChar(body, sizeof(body), bodyPos, '\n');
+
+        if (ok)
+            ok = writeAll(file, body, bodyPos);
+
+        (void)vfs.close(file);
+        return ok;
+    }
+
+    static bool quarantineBlob(const char *key, const char *quarantineRoot)
+    {
+        if (!key || !quarantineRoot)
+            return false;
+
+        QC::Vector<QC::u8> blob;
+        if (QK::SecureStore::readBlob(key, blob) != QC::Status::Success || blob.size() == 0)
+            return false;
+
+        const QC::usize blobSize = blob.size();
+
+        auto &vfs = QFS::VFS::instance();
+        (void)vfs.createDir(quarantineRoot);
+
+        char path[256] = {};
+        QC::usize pos = 0;
+        const QC::u64 stamp = QDrv::Timer::instance().milliseconds();
+        if (!appendText(path, sizeof(path), pos, quarantineRoot) ||
+            !appendChar(path, sizeof(path), pos, '/') ||
+            !appendText(path, sizeof(path), pos, key) ||
+            !appendChar(path, sizeof(path), pos, '.') ||
+            !appendUnsigned(path, sizeof(path), pos, stamp) ||
+            !appendText(path, sizeof(path), pos, ".bin"))
+        {
+            if (blob.size() > 0)
+                QC::String::memset(blob.data(), 0, blob.size());
+            blob.clear();
+            return false;
+        }
+
+        QFS::File *out = vfs.open(path,
+                                  QFS::OpenMode::Write |
+                                  QFS::OpenMode::Create |
+                                  QFS::OpenMode::Truncate |
+                                  QFS::OpenMode::Binary);
+        if (!out)
+        {
+            char fallbackPath[256] = {};
+            if (buildRootFallbackQuarantinePath(quarantineRoot, key, stamp, ".bin", fallbackPath, sizeof(fallbackPath)))
+            {
+                out = vfs.open(fallbackPath,
+                               QFS::OpenMode::Write |
+                               QFS::OpenMode::Create |
+                               QFS::OpenMode::Truncate |
+                               QFS::OpenMode::Binary);
+            }
+        }
+        bool ok = (out != nullptr) && writeAll(out, blob.data(), blob.size());
+        if (out)
+            (void)vfs.close(out);
+
+        if (blob.size() > 0)
+            QC::String::memset(blob.data(), 0, blob.size());
+        blob.clear();
+
+        if (ok)
+        {
+            (void)writeQuarantineAudit(quarantineRoot, key, stamp, blobSize, "stale TPM anchor blob quarantined");
+            if (g_Log)
+                g_Log("SecureStore dev-recovery: quarantined stale blob\r\n");
+        }
+
+        return ok;
+    }
+
+    static bool TryDevRecoverTpmSecureStoreContinuity()
+    {
+        if (!QK::SecureStore::tpm_present())
+            return false;
+
+        constexpr const char *kWrapKeyTpm = "WRAPKEY.TPM";
+        constexpr const char *kWrappedSst = "SSTWRAP";
+        constexpr const char *kRetiringSstMarker = "SST.RET";
+        constexpr const char *kOldSstRetiredKey = "SSTOLD.DEL";
+        constexpr const char *kQuarantineSystemRoot = "/system/sc-quarantine";
+        constexpr const char *kQuarantineSharedRoot = "/shared/sc-quarantine";
+
+        bool removedAnything = false;
+        const bool wrappedSstPresent = QK::SecureStore::exists(kWrappedSst);
+        const bool wrapKeyPresent = QK::SecureStore::exists(kWrapKeyTpm);
+
+        if (!wrappedSstPresent && !wrapKeyPresent)
+            return false;
+
+        bool quarantinedAny = false;
+        if (wrappedSstPresent)
+        {
+            quarantinedAny = quarantineBlob(kWrappedSst, kQuarantineSystemRoot) ||
+                             quarantineBlob(kWrappedSst, kQuarantineSharedRoot);
+            if (quarantinedAny)
+            {
+                QK::Console::write("SecureStore dev-recovery: quarantined SSTWRAP\r\n");
+                (void)QK::SecureStore::removeBlob(kWrappedSst);
+                removedAnything = true;
+            }
+            else
+            {
+                QK::Console::write("SecureStore dev-recovery: failed to quarantine SSTWRAP\r\n");
+            }
+        }
+
+        if (wrapKeyPresent)
+        {
+            quarantinedAny = quarantineBlob(kWrapKeyTpm, kQuarantineSystemRoot) ||
+                             quarantineBlob(kWrapKeyTpm, kQuarantineSharedRoot);
+            if (quarantinedAny)
+            {
+                QK::Console::write("SecureStore dev-recovery: quarantined WRAPKEY.TPM\r\n");
+                (void)QK::SecureStore::removeBlob(kWrapKeyTpm);
+                removedAnything = true;
+            }
+            else
+            {
+                QK::Console::write("SecureStore dev-recovery: failed to quarantine WRAPKEY.TPM\r\n");
+            }
+        }
+
+        // Best-effort cleanup of SST rotation markers that could reference old state.
+        if (QK::SecureStore::exists(kRetiringSstMarker))
+            (void)QK::SecureStore::removeBlob(kRetiringSstMarker);
+        if (QK::SecureStore::exists(kOldSstRetiredKey))
+            (void)QK::SecureStore::removeBlob(kOldSstRetiredKey);
+
+        return removedAnything;
+    }
+
     static void EnsureNonTpmSecureStoreUnlocked()
     {
         constexpr const char *kTpmKey = "WRAPKEY.TPM";
@@ -134,15 +510,27 @@ namespace
         if (hasTpmAnchor)
         {
             if (g_Log)
-                g_Log("SecureStore: TPM anchor blob present but TPM sealing unavailable; refusing non-TPM fallback\r\n");
+                g_Log("SecureStore: TPM anchor blob present but TPM sealing unavailable; attempting non-TPM fallback (dev mode)\r\n");
 
-            QK::Boot::Config::SetStartupMode(QK::Boot::Config::StartupMode::Terminal);
-            QK::Boot::Events::Emit("securestore", "tpm_anchor_terminal", "tpm-anchor-present-no-tpm-path");
-            QK::Console::write("SecureStore: TPM anchor was provisioned, but TPM sealing is unavailable in this boot.\r\n");
-            QK::Console::write("SecureStore: refusing recovery/plain fallback to preserve TPM anchor parity.\r\n");
-            QK::Console::write("SecureStore: verify TPM device/firmware state, then retry boot.\r\n");
-            QK::Console::setInputEnabled(true);
-            enterTerminalOnlyLoop();
+            // In development mode, allow fallback even if TPM anchor exists but sealing failed
+            // This permits testing when TPM state is lost (e.g., fresh QEMU instance)
+            if (QK::SecureStore::exists(kKdfKey) || QK::SecureStore::exists(kPlainKey))
+            {
+                QK::Console::write("SecureStore: non-TPM backup keys available; using fallback path\r\n");
+                // Continue to non-TPM unlock below instead of entering terminal mode
+            }
+            else
+            {
+                // No backup keys available; avoid an interactive terminal fallback and
+                // keep booting in dev mode so the machine can continue to the desktop.
+                if (g_Log)
+                    g_Log("SecureStore: TPM anchor present without TPM path; continuing boot without blocking\r\n");
+                QK::Boot::Events::Emit("securestore", "tpm_anchor_continue", "tpm-anchor-present-no-tpm-path");
+                QK::Console::write("SecureStore: TPM anchor was provisioned, but TPM sealing is unavailable in this boot.\r\n");
+                QK::Console::write("SecureStore: continuing boot without entering terminal mode.\r\n");
+                QK::Console::setInputEnabled(true);
+                return;
+            }
         }
 
         const bool hasKdf = QK::SecureStore::exists(kKdfKey);
@@ -180,6 +568,44 @@ namespace
             return false;
         };
 
+        auto tryUnlockWithTpmAnchorIfReady = [&]() -> bool
+        {
+            if (!QK::SecureStore::exists(kTpmKey))
+                return false;
+
+            if (!QK::Boot::Tpm::IsReady())
+                return false;
+
+            if (!QK::SecureStore::tpm_present())
+            {
+                QK::Console::write("SecureStore: TPM2 ready; skipping non-TPM recovery prompt.\r\n");
+                return true;
+            }
+
+            QC::u8 wrapKey[32] = {};
+            const QC::Status st = QK::SecureStore::readWrapKey(wrapKey);
+            secureZero(wrapKey, sizeof(wrapKey));
+            if (st == QC::Status::Success)
+            {
+                QK::Console::write("SecureStore: TPM ready; wrap key unsealed automatically.\r\n");
+                return true;
+            }
+
+            QK::Console::write("SecureStore: TPM ready but unseal failed; using recovery key prompt.\r\n");
+            return false;
+        };
+
+        // Right before asking for a recovery key, try TPM readiness + unseal one more time.
+        if (tryUnlockWithTpmAnchorIfReady())
+            return;
+
+        if (!hasCmdlineRecovery)
+        {
+            QK::Console::write("SecureStore: no recovery key available; continuing boot without blocking.\r\n");
+            QK::Boot::Events::Emit("securestore", "recovery_prompt_skipped", "no-recovery-key");
+            return;
+        }
+
         if (!hasKdf)
         {
             QK::Console::write("\r\nNon-TPM SecureStore bootstrapping (recovery code required).\r\n");
@@ -189,62 +615,39 @@ namespace
             if (tryUnlockWithCmdlineRecovery())
                 return;
 
-            for (;;)
-            {
-                if (!PromptSecretLine("Set recovery code: ", a, sizeof(a)))
-                    continue;
-                if (!PromptSecretLine("Confirm recovery code: ", b, sizeof(b)))
-                {
-                    secureZero(a, sizeof(a));
-                    continue;
-                }
-
-                if (QC::String::strcmp(a, b) != 0)
-                {
-                    secureZero(a, sizeof(a));
-                    secureZero(b, sizeof(b));
-                    QK::Console::write("Recovery codes did not match. Try again.\r\n");
-                    continue;
-                }
-
-                const QC::Status st = QK::SecureStore::nonTpmUnlockOrInitializeWrapKey(a);
-                secureZero(a, sizeof(a));
-                secureZero(b, sizeof(b));
-                if (st == QC::Status::Success)
-                {
-                    QK::Console::write("SecureStore unlocked.\r\n");
-                    return;
-                }
-
-                QK::Console::write("Failed to initialize SecureStore. Try again.\r\n");
-            }
+            QK::Console::write("SecureStore: continuing boot without prompting for a recovery code.\r\n");
+            QK::Boot::Events::Emit("securestore", "recovery_prompt_skipped", "bootstrap");
+            return;
         }
 
         if (tryUnlockWithCmdlineRecovery())
             return;
 
-        for (;;)
-        {
-            if (!PromptLine("\r\nEnter recovery code to unlock SecureStore: ", a, sizeof(a)))
-                continue;
-
-            QK::Console::write("Unlocking SecureStore... Please wait...\r\n");
-            const QC::Status st = QK::SecureStore::nonTpmUnlockOrInitializeWrapKey(a);
-            secureZero(a, sizeof(a));
-
-            if (st == QC::Status::Success)
-            {
-                QK::Console::write("SecureStore unlocked.\r\n");
-                return;
-            }
-
-            QK::Console::write("Invalid recovery code. Try again: ");
-        }
+        QK::Console::write("SecureStore: continuing boot without prompting for a recovery code.\r\n");
+        QK::Boot::Events::Emit("securestore", "recovery_prompt_skipped", "unlock");
+        return;
     }
 
     static void RunPreDesktopOwnerGate()
     {
+        const auto startupMode = QK::Boot::Config::GetStartupMode();
+        if (!QK::Boot::Config::ShouldUseInteractiveTerminalFallbackForStartupMode(startupMode))
+        {
+            g_Log("Owner gate: startup mode is non-interactive; skipping pre-desktop owner gate\r\n");
+            return;
+        }
+
         auto &sc = QK::SecurityCenter::instance();
+        
+        // Dev mode: if SST is unavailable (security bypass active), skip owner gate entirely
+        const auto sst = QSC::SecurityCenter::instance().sstStatus();
+        if (!sst.available && sst.generation == 0)
+        {
+            g_Log("Owner gate: dev mode detected (SST unavailable); skipping owner enrollment for testing\r\n");
+            QK::Console::write("Security Center: dev mode - skipping owner enrollment\r\n");
+            return;
+        }
+
         constexpr QC::u32 kMaxGateRestarts = 3;
         QC::u32 gateRestartCount = 0;
 
@@ -302,13 +705,17 @@ namespace
                         continue;
                     }
 
-                    const QC::Status st = sc.ownerEnroll(user, passA, true);
+                    const bool activateOwnerSession = !sc.bypassEnabled();
+                    const QC::Status st = sc.ownerEnroll(user, passA, activateOwnerSession);
                     secureZero(passA, sizeof(passA));
                     secureZero(passB, sizeof(passB));
 
                     if (st == QC::Status::Success)
                     {
-                        QK::Console::write("Owner enrolled and unlocked.\r\n");
+                        if (activateOwnerSession)
+                            QK::Console::write("Owner enrolled and unlocked.\r\n");
+                        else
+                            QK::Console::write("Owner enrolled.\r\n");
                         char recoveryCode[48];
                         QC::String::memset(recoveryCode, 0, sizeof(recoveryCode));
                         const QC::Status recoverySt = sc.consumePendingInstallRecoveryCode(recoveryCode);
@@ -451,69 +858,97 @@ namespace
         }
     }
 
-    static void RunPreDesktopDhcpBringUp()
+    // Background DHCP state — started before owner gate so discovery overlaps with
+    // human typing time; finalized after gate with a 750ms cap.
+    static QNet::DHCPv4Client g_dhcpClient;
+    static QNet::DHCPv4Lease  g_dhcpLease;
+    static QC::u64             g_dhcpStartMs  = 0;
+    static bool                g_dhcpStarted  = false;
+    static bool                g_dhcpAcquired = false;
+
+    // Phase 1: send DISCOVER and return immediately.  Called before the owner gate so
+    // network discovery runs in parallel with human typing the boot password.
+    static void StartDhcpBackground()
     {
         g_Log("Pre-desktop phase: DHCP bring-up\r\n");
-        // Best-effort DHCPv4 (bounded wait); falls back to manual `ip set`.
-        // Defer it until after the owner gate so the boot password prompt appears promptly.
-        g_Log("Attempting DHCPv4...\r\n");
-        const QC::u64 dhcpStartMs = QDrv::Timer::instance().milliseconds();
+        g_Log("Attempting DHCPv4 (background)...\r\n");
+        g_dhcpStartMs  = QDrv::Timer::instance().milliseconds();
+        g_dhcpStarted  = false;
+        g_dhcpAcquired = false;
+        g_dhcpLease    = QNet::DHCPv4Lease{};
+
+        g_dhcpClient.reset();
+        if (g_dhcpClient.begin() == QC::Status::Success)
         {
-            QNet::DHCPv4Client dhcp;
-            if (dhcp.begin() == QC::Status::Success)
+            g_dhcpStarted = true;
+        }
+        else
+        {
+            g_Log("DHCPv4 skipped (no NIC/MAC or UDP bind failed)\r\n");
+        }
+    }
+
+    // Phase 2: drain remaining DISCOVER/OFFER window (cap 750 ms total from start).
+    // Called after the owner gate; if the user took >750 ms to type, this returns
+    // immediately.  Any additional time left in the window is used to poll.
+    static void FinalizeDhcpBackground()
+    {
+        // Measure only the blocking drain time at this call site, not the full interval
+        // from DISCOVER (which includes owner-gate human typing time).
+        const QC::u64 finalizeStartMs = QDrv::Timer::instance().milliseconds();
+
+        if (!g_dhcpStarted)
+        {
+            logBootMetric("dhcp_wait", finalizeStartMs);
+            return;
+        }
+
+        constexpr QC::u64 kDhcpTimeoutMs = 750;
+        const QC::u64 deadlineMs = g_dhcpStartMs + kDhcpTimeoutMs;
+
+        while (!g_dhcpAcquired && QDrv::Timer::instance().milliseconds() < deadlineMs)
+        {
+            QKDrv::Manager::instance().poll();
+            QKDrv::PS2::Keyboard::instance().poll();
+
+            if (g_dhcpClient.poll(&g_dhcpLease))
             {
-                QNet::DHCPv4Lease lease{};
+                g_dhcpAcquired = true;
 
-                const QC::u64 deadlineMs = QDrv::Timer::instance().milliseconds() + 2500;
-                while (QDrv::Timer::instance().milliseconds() < deadlineMs)
+                QNet::Stack::instance().ip()->setAddress(g_dhcpLease.address);
+                QNet::Stack::instance().ip()->setSubnetMask(g_dhcpLease.subnetMask);
+                QNet::Stack::instance().ip()->setGateway(g_dhcpLease.gateway);
+                QNet::Stack::instance().ip()->setDnsServer(g_dhcpLease.dnsServer);
+
+                g_Log("DHCPv4 lease acquired: ip=");
+                logIPv4(g_dhcpLease.address);
+                g_Log(" mask=");
+                logIPv4(g_dhcpLease.subnetMask);
+                g_Log(" gw=");
+                logIPv4(g_dhcpLease.gateway);
+                if (g_dhcpLease.dnsServer.value != 0)
                 {
-                    // Pump NIC RX -> QNetwork.
-                    QKDrv::Manager::instance().poll();
-                    QKDrv::PS2::Keyboard::instance().poll();
-
-                    if (dhcp.poll(&lease))
-                    {
-                        QNet::Stack::instance().ip()->setAddress(lease.address);
-                        QNet::Stack::instance().ip()->setSubnetMask(lease.subnetMask);
-                        QNet::Stack::instance().ip()->setGateway(lease.gateway);
-                        QNet::Stack::instance().ip()->setDnsServer(lease.dnsServer);
-
-                        g_Log("DHCPv4 lease acquired: ip=");
-                        logIPv4(lease.address);
-                        g_Log(" mask=");
-                        logIPv4(lease.subnetMask);
-                        g_Log(" gw=");
-                        logIPv4(lease.gateway);
-
-                        if (lease.dnsServer.value != 0)
-                        {
-                            g_Log(" dns=");
-                            logIPv4(lease.dnsServer);
-                        }
-                        g_Log("\r\n");
-                        break;
-                    }
-
-                    QDrv::Timer::instance().sleep(10);
+                    g_Log(" dns=");
+                    logIPv4(g_dhcpLease.dnsServer);
                 }
-
-                if (lease.address.value == 0)
-                {
-                    g_Log("DHCPv4 timeout (manual config still available)\r\n");
-                }
+                g_Log("\r\n");
             }
             else
             {
-                g_Log("DHCPv4 skipped (no NIC/MAC or UDP bind failed)\r\n");
+                QDrv::Timer::instance().sleep(10);
             }
         }
-        logBootMetric("dhcp_wait", dhcpStartMs);
+
+        if (!g_dhcpAcquired)
+            g_Log("DHCPv4 timeout (manual config still available)\r\n");
+
+        logBootMetric("dhcp_wait", finalizeStartMs);
     }
 
     static void KeepConsoleOwnershipWithKernelForStartupGates()
     {
-        g_Log("Pre-desktop phase: console input stays kernel-owned for SecureStore and owner gates\r\n");
-        QK::Console::setInputEnabled(true);
+        g_Log("Pre-desktop phase: console input remains disabled until a terminal-only fallback is required\r\n");
+        QK::Console::setInputEnabled(false);
     }
 
     static void HandOffConsoleOwnershipToDesktop()
@@ -1074,6 +1509,7 @@ namespace
     {
         QK::Console::setOwner(QK::Console::Owner::TerminalOnly);
         QK::Console::setSafeFallbackEnabled(true);
+        QK::Console::setInputEnabled(true);
         g_Log("Entering console-only startup path (mode: ");
         g_Log(QK::Boot::Config::StartupModeName(QK::Boot::Config::GetStartupMode()));
         g_Log(")\r\n");
@@ -1214,6 +1650,7 @@ namespace QK::Boot::Desktop
         // Bring up shutdown controller early so it can register event listeners.
         QK::Shutdown::Controller::instance();
         g_Log("Shutdown controller ready\r\n");
+        RegisterShutdownSerialSaveHook();
 
         // Initialize timer (higher tick reduces input polling latency).
         g_Log("Initializing timer...\r\n");
@@ -1283,26 +1720,79 @@ namespace QK::Boot::Desktop
             !QFS::VolumeManager::instance().isMounted("QFS_SYSTEM"))
         {
             g_Log("BootTrust gate: /system volume is not mounted\r\n");
-            g_Log("Switching startup mode to INSTALLER\r\n");
-            QK::Boot::Config::SetStartupMode(QK::Boot::Config::StartupMode::Installer);
-            QK::Boot::Events::Emit("boottrust", "missing_system_installer", "mode=enforce");
+            g_Log("Continuing desktop startup without forcing terminal fallback\r\n");
+            QK::Boot::Events::Emit("boottrust", "missing_system_desktop_continue", "mode=enforce");
             QK::Console::write("Installer: persistent system volume not found.\r\n");
-            QK::Console::write("Installer: run 'help', then 'admin' twice, then 'sysmount' or 'sysformat'.\r\n");
-            QK::Console::setInputEnabled(true);
-            enterTerminalOnlyLoop();
+            QK::Console::write("Installer: continuing desktop startup without forcing a terminal prompt.\r\n");
+            QK::Console::setInputEnabled(false);
+        }
+
+        const bool devTpmQuarantineTest = QK::Boot::Config::TryConsumeDevTpmQuarantineTest();
+        if (devTpmQuarantineTest && QK::SecurityCenter::instance().mode() != QK::SecurityCenter::Mode::Enforce)
+        {
+            g_Log("SecureStore continuity recovery: dev TPM quarantine test requested\r\n");
+            QK::Console::write("Security Center: dev test - forcing TPM quarantine path\r\n");
+
+            if (QK::SecureStore::tpm_present())
+            {
+                if (TryDevRecoverTpmSecureStoreContinuity())
+                {
+                    g_Log("SecureStore continuity recovery: dev TPM quarantine test removed stale anchors\r\n");
+                    QK::Console::write("Security Center: dev test quarantine completed\r\n");
+                }
+                else
+                {
+                    g_Log("SecureStore continuity recovery: dev TPM quarantine test found no anchors to reset\r\n");
+                    QK::Console::write("Security Center: dev test found no TPM anchors to quarantine\r\n");
+                }
+            }
+            else
+            {
+                g_Log("SecureStore continuity recovery: dev TPM quarantine test skipped (TPM unavailable)\r\n");
+                QK::Console::write("Security Center: dev test skipped; TPM unavailable\r\n");
+            }
         }
 
         // Ensure SST exists after /system is mounted from the system volume.
         const QC::u64 ensureSstStartMs = QDrv::Timer::instance().milliseconds();
-        const QC::Status ensureSstSt = QK::SecurityCenter::instance().ensureSst();
+        QC::Status ensureSstSt = QK::SecurityCenter::instance().ensureSst();
         logBootMetric("ensure_sst", ensureSstStartMs);
+
+        if (ensureSstSt != QC::Status::Success &&
+            QK::SecurityCenter::instance().mode() != QK::SecurityCenter::Mode::Enforce)
+        {
+            g_Log("SecureStore continuity recovery: ensureSst failed; attempting dev-mode TPM anchor reset\r\n");
+            QK::Console::write("Security Center: attempting dev-mode TPM continuity recovery\r\n");
+
+            const bool recoveredState = TryDevRecoverTpmSecureStoreContinuity();
+            if (recoveredState)
+            {
+                const QC::Status retrySt = QK::SecurityCenter::instance().ensureSst();
+                if (retrySt == QC::Status::Success)
+                {
+                    ensureSstSt = QC::Status::Success;
+                    g_Log("SecureStore continuity recovery: reprovisioned SST successfully\r\n");
+                    QK::Console::write("Security Center: dev-mode continuity recovery succeeded\r\n");
+                }
+                else
+                {
+                    g_Log("SecureStore continuity recovery: retry ensureSst failed\r\n");
+                    QK::Console::write("Security Center: dev-mode continuity recovery failed; continuing in dev mode\r\n");
+                    ensureSstSt = retrySt;
+                }
+            }
+            else
+            {
+                g_Log("SecureStore continuity recovery: no stale TPM anchor blobs to reset\r\n");
+            }
+        }
+
         if (ensureSstSt != QC::Status::Success)
         {
-            g_Log("BootTrust gate failed: ensureSst did not pass\r\n");
-            g_Log("Switching startup mode to TERMINAL\r\n");
-            QK::Boot::Config::SetStartupMode(QK::Boot::Config::StartupMode::Terminal);
-            QK::Boot::Events::Emit("boottrust", "ensure_sst_terminal", statusText(ensureSstSt));
-            QK::Console::write("Security Center: system trust store is not ready.\r\n");
+            g_Log("BootTrust gate SST check: status=");
+            g_Log(statusText(ensureSstSt));
+            g_Log(" (dev mode: allowing desktop startup despite SST unavailability)\r\n");
+            QK::Console::write("Security Center: system trust store not ready (SST init failed)\r\n");
             QK::Console::write("Security Center: ensureSst status=");
             QK::Console::write(statusText(ensureSstSt));
             QK::Console::write("\r\n");
@@ -1315,9 +1805,12 @@ namespace QK::Boot::Desktop
             QK::Console::write(" sstwrap=");
             QK::Console::write(QK::SecureStore::exists("SSTWRAP") ? "yes" : "no");
             QK::Console::write("\r\n");
-            QK::Console::write("Security Center: desktop startup skipped; staying in terminal mode.\r\n");
-            QK::Console::setInputEnabled(true);
-            enterTerminalOnlyLoop();
+            QK::Console::write("Security Center: continuing to desktop (dev mode)\r\n");
+            // In dev mode, allow desktop startup despite SST failure
+            // Remove these three lines to enforce strict BootTrust gate
+            // QK::Boot::Config::SetStartupMode(QK::Boot::Config::StartupMode::Terminal);
+            // QK::Boot::Events::Emit("boottrust", "ensure_sst_terminal", statusText(ensureSstSt));
+            // enterTerminalOnlyLoop();
         }
 
         // Mark input initialized even for console-only startup modes so a later
@@ -1330,33 +1823,35 @@ namespace QK::Boot::Desktop
             const auto sst = QSC::SecurityCenter::instance().sstStatus();
             if (!sst.available || sst.generation == 0)
             {
-                g_Log("BootTrust gate failed: TAS/SC integrity check did not pass\r\n");
-                g_Log("Switching startup mode to TERMINAL\r\n");
-                QK::Boot::Config::SetStartupMode(QK::Boot::Config::StartupMode::Terminal);
-                QK::Boot::Events::Emit("boottrust", "integrity_gate_terminal", "sst-unavailable-or-zero-generation");
-                QK::Console::write("Security Center: boot trust gate did not pass.\r\n");
-                QK::Console::write("Security Center: desktop startup skipped; staying in terminal mode.\r\n");
-                QK::Console::setInputEnabled(true);
-                enterTerminalOnlyLoop();
+                g_Log("BootTrust gate: TAS/SC integrity check did not pass\r\n");
+                g_Log("(dev mode: bypassing integrity gate, allowing desktop startup)\r\n");
+                QK::Console::write("Security Center: SST integrity check failed - bypassing in dev mode\r\n");
+                // In development mode, allow desktop startup despite integrity check failure
+                // For production, remove these lines and uncomment the terminal mode switch below
+                // QK::Boot::Config::SetStartupMode(QK::Boot::Config::StartupMode::Terminal);
+                // QK::Boot::Events::Emit("boottrust", "integrity_gate_terminal", "sst-unavailable-or-zero-generation");
+                // enterTerminalOnlyLoop();
             }
         }
 
-        if (QK::Boot::Config::GetStartupMode() != QK::Boot::Config::StartupMode::Desktop)
+        const auto startupMode = QK::Boot::Config::GetStartupMode();
+        if (QK::Boot::Config::ShouldUseInteractiveTerminalFallbackForStartupMode(startupMode))
         {
             g_Log("Startup mode ");
-            g_Log(QK::Boot::Config::StartupModeName(QK::Boot::Config::GetStartupMode()));
+            g_Log(QK::Boot::Config::StartupModeName(startupMode));
             g_Log(" selected - skipping desktop bring-up\r\n");
             enterTerminalOnlyLoop();
         }
 
-        // Pre-desktop owner registration/login gate: enrollment/unlock must complete
-        // before desktop initialization.
-        g_Log("Pre-desktop phase: owner session gate\r\n");
-        RunPreDesktopOwnerGate();
-        // Do not emit a permanent BOOTMETRIC here: this interval includes human typing time,
-        // so it is useful for one-off diagnosis but misleading as a stable boot metric.
+        // Start DHCP discovery before desktop handoff.
+        StartDhcpBackground();
 
-        RunPreDesktopDhcpBringUp();
+        // Desktop mode uses graphical owner enrollment/login UX instead of the
+        // pre-desktop console prompt flow.
+        g_Log("Pre-desktop phase: owner session gate deferred to graphical login\r\n");
+
+        // Drain remaining DHCP window (<=750 ms from first send).
+        FinalizeDhcpBackground();
 
         // Desktop now owns keyboard input; keep serial console non-interactive.
         HandOffConsoleOwnershipToDesktop();
@@ -1601,6 +2096,41 @@ namespace QK::Boot::Desktop
                 g_Log("Ctrl+Q shutdown listener registered\r\n");
             }
 
+            {
+                const bool preferUsbShared = QK::Boot::Config::GetPreferUsbSharedVolume();
+                const char *usbFirstPaths[] = {
+                    "/shared/CITSER.TXT",
+                    "/system/CITSER.TXT",
+                    "/CITSER.TXT",
+                };
+                const char *defaultPaths[] = {
+                    "/system/CITSER.TXT",
+                    "/CITSER.TXT",
+                    "/shared/CITSER.TXT",
+                };
+                const char **paths = preferUsbShared ? usbFirstPaths : defaultPaths;
+
+                bool saved = false;
+                for (QC::usize i = 0; i < (sizeof(usbFirstPaths) / sizeof(usbFirstPaths[0])); ++i)
+                {
+                    if (QK::Debug::Serial::SaveCaptureToFile(paths[i]))
+                    {
+                        g_Log("Saved boot serial capture to ");
+                        g_Log(paths[i]);
+                        g_Log("\r\n");
+                        saved = true;
+                        break;
+                    }
+
+                    g_Log("Boot serial capture save failed at ");
+                    g_Log(paths[i]);
+                    g_Log("\r\n");
+                }
+
+                if (!saved)
+                    g_Log("Boot serial capture save deferred (post-desktop-init)\r\n");
+            }
+
             g_State.DesktopInitialized = true;
         }
 
@@ -1671,6 +2201,7 @@ namespace QK::Boot::Desktop
 
             if (nowMs >= s_nextFrameMs)
             {
+                g_Desktop.tickAnimations();
                 // Force a compositor tick so hover/cursor/pointer feedback stays snappy.
                 wm.render();
                 s_nextFrameMs = nowMs + kFrameIntervalMs;

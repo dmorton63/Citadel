@@ -18,6 +18,7 @@
 #include "QDSetupWizard.h"
 #include "QDLoginDialog.h"
 #include "QDBrowser.h"
+#include "QDView3D.h"
 #include "QDCuiMLViewer.h"
 #include "QKEventManager.h"
 #include "QKShutdownController.h"
@@ -60,8 +61,12 @@ namespace QD
         constexpr const char *CMMS_DESKTOP_LAYOUT_GOLDEN = "golden";
         constexpr QC::u32 CMMS_DESKTOP_DOCUMENT_CHUNK_BYTES = 1024;
         constexpr QC::u32 CMMS_LAYOUT_MATERIALIZATION_SCHEMA_VERSION = 2;
+        // Boot-phase fingerprint versions (incremented when schema/theme changes require re-init).
+        constexpr QC::u64 CMMS_SYSTEM_TABLES_VERSION = 1;
+        constexpr QC::u64 CMMS_THEME_IMPORT_VERSION = 1;
         constexpr bool CMMS_MATERIALIZE_RUNTIME_ON_BOOT = false;
         constexpr bool CMMS_ENSURE_ACTIVE_RUNTIME_ON_BOOT = false;
+        constexpr const char *VIEW3D_DUMP_PATH = "/dump/open3d_latest.ppm";
         constexpr float BASE_THEME_FONT_SIZE = 12.0f;
         static bool g_imageCorpusChecked = false;
 
@@ -1187,19 +1192,15 @@ namespace QD
         QD::CommandProcessor::instance().initialize();
 
         // In BYPASS mode we skip owner setup prompts during startup.
-        // Enrollment can be completed later when SC backend support is available.
+        // In ENFORCE mode, pre-desktop gates usually handle enroll/unlock already;
+        // only prompt here if the owner session is still locked.
         const bool bypass = QK::SecurityCenter::instance().bypassEnabled();
-        if (!bypass && !isOwnerEnrolled())
+        if (!bypass && !QK::SecurityCenter::instance().ownerUnlocked())
         {
-            showSetupWizard();
-        }
-        else
-        {
-            // If SC is enforcing and an owner exists, prompt to unlock early.
-            if (!QK::SecurityCenter::instance().bypassEnabled())
-            {
+            if (!isOwnerEnrolled())
+                showSetupWizard();
+            else
                 showLoginDialog();
-            }
         }
 
         if (m_desktopWindow)
@@ -2850,22 +2851,52 @@ namespace QD
                         static_cast<unsigned>(openStats.pkRowsIndexed));
 
             const QC::u64 systemTablesStartMs = QDrv::Timer::instance().milliseconds();
-            st = engine.initializeSystemTables(m_cmmsDatabase);
-            if (st != QCQL::Status::Success)
+            // Skip system_tables initialization if fingerprint matches (already done in previous boot).
+            const QC::u64 currentSystemTablesVersion = QCQL::Engine::getSystemTablesVersion(m_cmmsDatabase.header);
+            if (currentSystemTablesVersion != CMMS_SYSTEM_TABLES_VERSION)
             {
-                QC_LOG_WARN(LOG_MODULE, "CMMS DB system table init failed status=%d", static_cast<int>(st));
-                return false;
+                st = engine.initializeSystemTables(m_cmmsDatabase);
+                if (st != QCQL::Status::Success)
+                {
+                    QC_LOG_WARN(LOG_MODULE, "CMMS DB system table init failed status=%d", static_cast<int>(st));
+                    return false;
+                }
+                // Update fingerprint and persist to disk.
+                QCQL::Engine::setSystemTablesVersion(m_cmmsDatabase.header, CMMS_SYSTEM_TABLES_VERSION);
+                if (engine.flushHeader(m_cmmsDatabase) != QCQL::Status::Success)
+                {
+                    QC_LOG_WARN(LOG_MODULE, "CMMS DB system_tables version flush failed");
+                }
+            }
+            else
+            {
+                QC_LOG_INFO(LOG_MODULE, "CMMS system_tables fingerprint matched; skipping init");
             }
             QC_LOG_INFO(LOG_MODULE,
                         "CMMS init phase system_tables=%llums",
                         static_cast<unsigned long long>(QDrv::Timer::instance().milliseconds() - systemTablesStartMs));
 
             const QC::u64 themeImportStartMs = QDrv::Timer::instance().milliseconds();
-            st = ThemeImporter::importBuiltinThemes(m_cmmsDatabase);
-            if (st != QCQL::Status::Success)
+            // Skip theme import if fingerprint matches (already done in previous boot).
+            const QC::u64 currentThemeImportVersion = QCQL::Engine::getThemeImportVersion(m_cmmsDatabase.header);
+            if (currentThemeImportVersion != CMMS_THEME_IMPORT_VERSION)
             {
-                QC_LOG_WARN(LOG_MODULE, "CMMS DB theme import failed status=%d", static_cast<int>(st));
-                return false;
+                st = ThemeImporter::importBuiltinThemes(m_cmmsDatabase);
+                if (st != QCQL::Status::Success)
+                {
+                    QC_LOG_WARN(LOG_MODULE, "CMMS DB theme import failed status=%d", static_cast<int>(st));
+                    return false;
+                }
+                // Update fingerprint and persist to disk.
+                QCQL::Engine::setThemeImportVersion(m_cmmsDatabase.header, CMMS_THEME_IMPORT_VERSION);
+                if (engine.flushHeader(m_cmmsDatabase) != QCQL::Status::Success)
+                {
+                    QC_LOG_WARN(LOG_MODULE, "CMMS DB theme_import version flush failed");
+                }
+            }
+            else
+            {
+                QC_LOG_INFO(LOG_MODULE, "CMMS theme_import fingerprint matched; skipping import");
             }
             QC_LOG_INFO(LOG_MODULE,
                         "CMMS init phase builtin_theme_import=%llums",
@@ -3092,6 +3123,15 @@ namespace QD
                     "CMMS ensure phase validate_themes=%llums",
                     static_cast<unsigned long long>(QDrv::Timer::instance().milliseconds() - validateThemesStartMs));
 
+        // End boot creation phase: clear flag and issue final barrier to persist all changes.
+        if (m_cmmsDatabase.isBootCreation)
+        {
+            m_cmmsDatabase.isBootCreation = false;
+            // Issue final clean barrier to atomically persist all boot scaffolding.
+            QC_LOG_INFO(LOG_MODULE, "CMMS boot scaffolding complete; issuing final barrier write");
+            (void)engine.flushHeader(m_cmmsDatabase);
+        }
+
         m_cmmsDatabaseReady = true;
         QC_LOG_INFO(LOG_MODULE,
                     "CMMS ensure total=%llums",
@@ -3112,6 +3152,58 @@ namespace QD
         QCMS::App::instance().open(database, area);
     }
 
+    void Desktop::open3DView()
+    {
+        QC_LOG_INFO("QDesktop", "open3DView() called");
+
+        // Open a small window containing a spinning cube rendered by QC3D.
+        constexpr QC::u32 W = 420;
+        constexpr QC::u32 H = 340;
+        const QC::Rect  wa  = workArea();
+        const QC::i32   wx  = wa.x + (static_cast<QC::i32>(wa.width)  - static_cast<QC::i32>(W)) / 2;
+        const QC::i32   wy  = wa.y + (static_cast<QC::i32>(wa.height) - static_cast<QC::i32>(H)) / 2;
+
+        QC_LOG_INFO("QDesktop", "Creating 3D View window at (%d, %d) size (%u, %u)", wx, wy, W, H);
+
+        QW::Window *win = QW::WindowManager::instance().createWindow(
+            "3D View", {wx, wy, W, H});
+        if (!win)
+        {
+            QC_LOG_WARN("QDesktop", "Failed to create 3D View window");
+            return;
+        }
+
+        QC_LOG_INFO("QDesktop", "Window created successfully");
+
+        // Add the view to the window's root panel so it gets rendered.
+        auto *view = new QD::View3D(win, {0, 0, W, H});
+        QW::Controls::Panel *root = win->root();
+        if (root)
+        {
+            QC_LOG_INFO("QDesktop", "Adding View3D control to root panel");
+            root->addChild(view);
+            root->invalidate();  // Mark the root panel dirty so it re-renders
+        }
+        else
+        {
+            QC_LOG_WARN("QDesktop", "Window root panel is null");
+        }
+
+        // Spin ~1 degree per tick around Y axis.
+        view->setAutoRotate(0.0f, 1.0f, 0.0f, 1.0f);
+        m_view3DWindowId = win->windowId();
+        m_view3DControl = view;
+        m_view3DDumpSequence = 0;
+        view->requestFrameDump(VIEW3D_DUMP_PATH);
+
+        // Make the window visible
+        win->setVisible(true);
+
+        QC_LOG_INFO("QDesktop", "Calling WindowManager::render()");
+        QW::WindowManager::instance().render();
+        QC_LOG_INFO("QDesktop", "open3DView() complete");
+    }
+
     void Desktop::openBrowserFile(const char *path)
     {
         openBrowser();
@@ -3129,6 +3221,7 @@ namespace QD
             m_browser->openUrl(url);
         }
     }
+
 
     void Desktop::openBrowserHtmlText(const char *htmlText)
     {
@@ -8063,6 +8156,15 @@ namespace QD
                                 actionAttr[0] ? actionAttr : "<none>",
                                 x, y, w, h);
                 }
+                else if (actionAttr[0] && streqIgnoreCaseAscii(actionAttr, "view3d"))
+                {
+                    btn->setClickHandler(onJson3DViewClick, this);
+                    QC_LOG_INFO(LOG_MODULE,
+                                "CUI-ML: bound 3D View Button id='%s' action='%s' at x=%d y=%d w=%d h=%d",
+                                idAttr[0] ? idAttr : "<none>",
+                                actionAttr[0] ? actionAttr : "<none>",
+                                x, y, w, h);
+                }
                 else if ((idAttr[0] && QC::String::strcmp(idAttr, "shutDownButton") == 0) ||
                          (actionAttr[0] && streqIgnoreCaseAscii(actionAttr, "shutdown")))
                 {
@@ -8312,6 +8414,10 @@ namespace QD
                                 idAttr[0] ? idAttr : "<none>",
                                 actionAttr[0] ? actionAttr : "<none>",
                                 x, y, w, h);
+                }
+                else if (actionAttr[0] && streqIgnoreCaseAscii(actionAttr, "view3d"))
+                {
+                    btn->setClickHandler(onJson3DViewButtonClick, this);
                 }
                 else if ((idAttr[0] && QC::String::strcmp(idAttr, "shutDownButton") == 0) ||
                          (actionAttr[0] && streqIgnoreCaseAscii(actionAttr, "shutdown")))
@@ -9129,6 +9235,10 @@ namespace QD
                 {
                     button->setClickHandler(onJsonCMMSClick, this);
                 }
+                else if (action && equalsIgnoreCase(action, "view3d"))
+                {
+                    button->setClickHandler(onJson3DViewClick, this);
+                }
                 else if (id && QC::String::strcmp(id, "shutDownButton") == 0)
                 {
                     button->setClickHandler(onJsonShutdownClick, this);
@@ -9646,6 +9756,30 @@ namespace QD
         }
     }
 
+    void Desktop::tickAnimations()
+    {
+        if (!m_view3DControl || m_view3DWindowId == 0)
+            return;
+
+        QW::Window *window = QW::WindowManager::instance().windowById(m_view3DWindowId);
+        if (!window)
+        {
+            m_view3DWindowId = 0;
+            m_view3DControl = nullptr;
+            return;
+        }
+
+        if (!window->isVisible())
+            return;
+
+        m_view3DControl->tick();
+
+        // Keep one rolling dump for visual verification while debugging.
+        m_view3DDumpSequence++;
+        if ((m_view3DDumpSequence % 60u) == 1u)
+            m_view3DControl->requestFrameDump(VIEW3D_DUMP_PATH);
+    }
+
     void Desktop::setFocusedWindowTitle(const char *title)
     {
         if (m_titleLabel)
@@ -10078,6 +10212,16 @@ namespace QD
         desktop->openCMMS();
     }
 
+    void Desktop::onJson3DViewClick(QW::Controls::Button *button, void *userData)
+    {
+        (void)button;
+        if (!userData)
+            return;
+
+        Desktop *desktop = static_cast<Desktop *>(userData);
+        desktop->open3DView();
+    }
+
     void Desktop::onJsonTerminalButtonClick(QW::Controls::Button *button, void *userData)
     {
         (void)button;
@@ -10116,6 +10260,16 @@ namespace QD
 
         Desktop *desktop = static_cast<Desktop *>(userData);
         desktop->openCMMS();
+    }
+
+    void Desktop::onJson3DViewButtonClick(QW::Controls::Button *button, void *userData)
+    {
+        (void)button;
+        if (!userData)
+            return;
+
+        Desktop *desktop = static_cast<Desktop *>(userData);
+        desktop->open3DView();
     }
 
     void Desktop::onTaskbarClick(QW::Controls::Button *button, void *userData)

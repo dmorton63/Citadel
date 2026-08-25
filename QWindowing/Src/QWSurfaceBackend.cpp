@@ -356,14 +356,86 @@ namespace QW
                                     QC::Color color,
                                     QC::u8 opacity)
     {
-        (void)blurRadius; // Blur not supported yet on surface backend
         if (!ensureSurface() || opacity == 0)
             return;
 
         QC::Rect shadowRect = rect;
         shadowRect.x += offset.x;
         shadowRect.y += offset.y;
-        fillRectAlpha(shadowRect, color.withAlpha(opacity));
+
+        if (blurRadius <= 0)
+        {
+            // No blur — flat fill.
+            fillRectAlpha(shadowRect, color.withAlpha(opacity));
+            return;
+        }
+
+        // Box-blur shadow: expand rect by blurRadius on each side, then paint
+        // rows with alpha that falls off linearly from the center outward.
+        const QC::i32 r = blurRadius;
+        const QC::Rect expanded{shadowRect.x - r,
+                                shadowRect.y - r,
+                                shadowRect.width  + static_cast<QC::u32>(2 * r),
+                                shadowRect.height + static_cast<QC::u32>(2 * r)};
+        QC::Rect clipped{};
+        if (!clipRect(expanded, clipped))
+            return;
+
+        const QC::i32 cx1 = shadowRect.x;
+        const QC::i32 cy1 = shadowRect.y;
+        const QC::i32 cx2 = shadowRect.x + static_cast<QC::i32>(shadowRect.width);
+        const QC::i32 cy2 = shadowRect.y + static_cast<QC::i32>(shadowRect.height);
+        const QC::i32 ex1 = expanded.x;
+        const QC::i32 ey1 = expanded.y;
+        const QC::i32 ex2 = ex1 + static_cast<QC::i32>(expanded.width);
+        const QC::i32 ey2 = ey1 + static_cast<QC::i32>(expanded.height);
+
+        QC::u32 *pixels = reinterpret_cast<QC::u32 *>(m_target.pixels);
+        const QC::u32 stride = m_target.pitch / sizeof(QC::u32);
+        const QC::u32 surfW = m_target.width;
+        const QC::u32 surfH = m_target.height;
+
+        for (QC::i32 py = std::max(clipped.y, ey1); py < std::min(clipped.y + static_cast<QC::i32>(clipped.height), ey2); ++py)
+        {
+            if (py < 0 || static_cast<QC::u32>(py) >= surfH)
+                continue;
+
+            // Distance outside core shadow rect in Y direction.
+            QC::i32 yDist = 0;
+            if (py < cy1) yDist = cy1 - py;
+            else if (py >= cy2) yDist = py - cy2 + 1;
+
+            for (QC::i32 px = std::max(clipped.x, ex1); px < std::min(clipped.x + static_cast<QC::i32>(clipped.width), ex2); ++px)
+            {
+                if (px < 0 || static_cast<QC::u32>(px) >= surfW)
+                    continue;
+
+                QC::i32 xDist = 0;
+                if (px < cx1) xDist = cx1 - px;
+                else if (px >= cx2) xDist = px - cx2 + 1;
+
+                const QC::i32 dist = xDist > yDist ? xDist : yDist;
+                if (dist > r)
+                    continue;
+
+                // Linear falloff from opacity at dist=0 to 0 at dist=r.
+                const QC::u32 a = static_cast<QC::u32>(opacity) * static_cast<QC::u32>(r - dist) / static_cast<QC::u32>(r);
+                if (a == 0)
+                    continue;
+
+                QC::u32 &dst = pixels[py * stride + px];
+                const QC::u32 sr = (color.value >> 16) & 0xFF;
+                const QC::u32 sg = (color.value >>  8) & 0xFF;
+                const QC::u32 sb = (color.value      ) & 0xFF;
+                const QC::u32 dr = (dst >> 16) & 0xFF;
+                const QC::u32 dg = (dst >>  8) & 0xFF;
+                const QC::u32 db = (dst      ) & 0xFF;
+                const QC::u32 nr = (sr * a + dr * (255u - a)) / 255u;
+                const QC::u32 ng = (sg * a + dg * (255u - a)) / 255u;
+                const QC::u32 nb = (sb * a + db * (255u - a)) / 255u;
+                dst = (0xFF000000u) | (nr << 16) | (ng << 8) | nb;
+            }
+        }
     }
 
     void SurfaceBackend::blit(const QC::Rect &rect,

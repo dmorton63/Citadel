@@ -2,10 +2,10 @@
 
 namespace QC
 {
-    // Clip plane: z >= 0 (in whatever space you're using here)
+    // Clip in NDC space (OpenGL-style): near plane is z >= -1.
     static inline bool isInside(const Vertex& v)
     {
-        return v.position.z >= 0.0f;
+        return v.position.z >= -1.0f;
     }
 
     // Linear interpolation between two vertices
@@ -34,12 +34,12 @@ namespace QC
         return r;
     }
 
-    // Compute intersection t for segment a→b with plane z = 0
+    // Compute intersection t for segment a→b with plane z = -1
     static float intersectT(const Vertex& a, const Vertex& b)
     {
-        float da = a.position.z;
-        float db = b.position.z;
-        return da / (da - db); // plane at z = 0
+        const float da = a.position.z + 1.0f;
+        const float db = b.position.z + 1.0f;
+        return da / (da - db);
     }
 
     u32 Clipping::clipAgainstNearPlane(

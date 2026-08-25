@@ -84,6 +84,15 @@
                             width="160"
                             height="32"
                             role="sidebar" />
+
+                  <Button id="btn3DView"
+                            text="3D View"
+                            action="view3d"
+                            x="20"
+                            y="220"
+                            width="160"
+                            height="32"
+                            role="sidebar" />
                 </Panel>
 
                 <!-- MAIN CONTENT -->

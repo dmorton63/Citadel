@@ -67,6 +67,7 @@ namespace QD
     class LoginDialog;
     class Browser;
     class CuiMLViewer;
+    class View3D;
 
     // Layout constants
     constexpr QC::u32 TOP_BAR_HEIGHT = 32;
@@ -129,7 +130,7 @@ namespace QD
         /// Show first-boot setup wizard (Owner enrollment)
         void showSetupWizard();
 
-        /// Show simple PIN login/unlock dialog
+        /// Show username/password login/unlock dialog
         void showLoginDialog();
 
         /// Hide/close the login dialog if open
@@ -161,6 +162,9 @@ namespace QD
 
         /// Update displayed clock time
         void setTime(QC::u32 hours, QC::u32 minutes);
+
+        /// Advance desktop-owned animations (invoked by the outer run loop).
+        void tickAnimations();
 
         // ==================== Window Management ====================
 
@@ -222,6 +226,7 @@ namespace QD
         void openBrowser();
         bool ensureCmmsDatabaseReady();
         void openCMMS();
+        void open3DView();
         void openHelpWindow();
         bool applyThemeStateOnce(ThemeID activeThemeId);
         void cycleThemeFromSettings();
@@ -238,12 +243,14 @@ namespace QD
         static void onJsonShutdownClick(QW::Controls::Button *button, void *userData);
         static void onJsonSettingsClick(QW::Controls::Button *button, void *userData);
         static void onJsonCMMSClick(QW::Controls::Button *button, void *userData);
+        static void onJson3DViewClick(QW::Controls::Button *button, void *userData);
 
         // CUI-ML icon-style button action handlers
         static void onJsonTerminalButtonClick(QW::Controls::Button *button, void *userData);
         static void onJsonShutdownButtonClick(QW::Controls::Button *button, void *userData);
         static void onJsonSettingsButtonClick(QW::Controls::Button *button, void *userData);
         static void onJsonCMMSButtonClick(QW::Controls::Button *button, void *userData);
+        static void onJson3DViewButtonClick(QW::Controls::Button *button, void *userData);
 
         // Taskbar button click handler
         static void onTaskbarClick(QW::Controls::Button *button, void *userData);
@@ -336,6 +343,10 @@ namespace QD
         // Clock state
         QC::u32 m_hours;
         QC::u32 m_minutes;
+
+        QC::u32 m_view3DWindowId = 0;
+        View3D *m_view3DControl = nullptr;
+        QC::u32 m_view3DDumpSequence = 0;
 
         Terminal *m_terminal;
         Browser *m_browser;

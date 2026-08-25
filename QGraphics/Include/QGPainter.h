@@ -192,6 +192,21 @@ namespace QG
                                const QC::u32 *pixels, QC::u32 width, QC::u32 height,
                                QC::u32 stride = 0) = 0;
 
+        // ==================== Shapes ====================
+
+        /// Fill a rounded rectangle (corners clipped by radius pixels).
+        /// Default: no-op so existing backends compile without changes.
+        virtual void fillRoundedRect(const QC::Rect &rect, QC::u32 radius, QC::Color color) { (void)rect; (void)radius; (void)color; }
+
+        /// Draw the outline of a rounded rectangle.
+        virtual void drawRoundedRect(const QC::Rect &rect, QC::u32 radius, QC::Color color) { (void)rect; (void)radius; (void)color; }
+
+        /// Draw an outlined circle.
+        virtual void drawCircle(QC::i32 cx, QC::i32 cy, QC::u32 radius, QC::Color color) { (void)cx; (void)cy; (void)radius; (void)color; }
+
+        /// Fill a circle.
+        virtual void fillCircle(QC::i32 cx, QC::i32 cy, QC::u32 radius, QC::Color color) { (void)cx; (void)cy; (void)radius; (void)color; }
+
         // ==================== Clear ====================
 
         /// Clear entire surface with color

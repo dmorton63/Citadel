@@ -17,6 +17,10 @@ jobs:
         with:
           submodules: recursive
 
+      - name: Verify syscall ABI registry consistency
+        run: |
+          python3 tools/check_syscall_registry_consistency.py
+
       - name: Install dependencies
         run: |
           export DEBIAN_FRONTEND=noninteractive

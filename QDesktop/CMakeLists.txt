@@ -16,6 +16,7 @@ add_library(QDesktop STATIC
     Src/QDLoginDialog.cpp
     Src/QDCommandProcessor.cpp
     Src/QDThemeImporter.cpp
+    Src/QDView3D.cpp
 
 )
 
@@ -23,5 +24,5 @@ target_include_directories(QDesktop PUBLIC
     Include
     ${CMAKE_SOURCE_DIR}/QCMS/Include
     ${CMAKE_SOURCE_DIR}/QKernel/Include)
-target_link_libraries(QDesktop PUBLIC QCommon QKernel QGraphics QWindowing QWControls QFileSystem QNetwork QCQL QCMS)
+target_link_libraries(QDesktop PUBLIC QCommon QKernel QGraphics QWindowing QWControls QFileSystem QNetwork QCQL QCMS QC3D)
 target_compile_options(QDesktop PRIVATE ${KERNEL_COMPILE_FLAGS})

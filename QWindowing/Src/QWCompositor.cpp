@@ -1097,14 +1097,20 @@ namespace QW
 
     void Compositor::saveCursorBackground(QC::i32 x, QC::i32 y)
     {
-        (void)x;
-        (void)y;
-        // TODO: Save background under cursor for restoration
+        if (!m_renderer || !m_cursorBackground || m_cursorWidth == 0 || m_cursorHeight == 0)
+            return;
+        const QC::i32 drawX = x - m_cursorHotspotX;
+        const QC::i32 drawY = y - m_cursorHotspotY;
+        m_renderer->copyRegionOut(drawX, drawY, m_cursorWidth, m_cursorHeight, m_cursorBackground);
+        m_cursorBackX = drawX;
+        m_cursorBackY = drawY;
     }
 
     void Compositor::restoreCursorBackground()
     {
-        // TODO: Restore saved background
+        if (!m_renderer || !m_cursorBackground || m_cursorWidth == 0 || m_cursorHeight == 0)
+            return;
+        m_renderer->copyRegionIn(m_cursorBackX, m_cursorBackY, m_cursorWidth, m_cursorHeight, m_cursorBackground);
     }
 
     void Compositor::mergeDirtyRegions()

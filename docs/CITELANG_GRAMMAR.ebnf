@@ -1,0 +1,120 @@
+(* CiteLang Minimal Formal Grammar v0.1 *)
+(* This file is intentionally parser-focused and separate from narrative docs. *)
+
+program           = [ language_decl ] { top_decl } EOF ;
+
+language_decl     = "language" version ";" ;
+version           = integer "." integer ;
+
+top_decl          = import_decl
+                  | module_decl
+                  | data_decl
+                  | template_decl
+                  | func_decl
+                  | main_decl ;
+
+import_decl       = "import" import_path [ "as" identifier ] ";"
+                  | "import" import_path "." "{" import_list "}" ";" ;
+import_list       = identifier { "," identifier } ;
+import_path       = identifier { "." identifier } ;
+
+module_decl       = "mod" identifier block ;
+
+data_decl         = "data" identifier "{" { data_field [ "," ] } "}" ;
+data_field        = identifier ":" type_ref ;
+
+template_decl     = "template" identifier "{" { template_field [ "," ] } "}" ;
+template_field    = identifier ":" expr ;
+
+func_decl         = visibility_opt "func" identifier "(" [ param_list ] ")" block ;
+main_decl         = "main" "(" ")" block ;
+visibility_opt    = [ "public" | "private" ] ;
+
+param_list        = param { "," param } ;
+param             = identifier ":" type_ref ;
+
+block             = "{" { stmt } "}" ;
+
+stmt              = var_decl
+                  | if_stmt
+                  | while_stmt
+                  | for_stmt
+                  | return_stmt
+                  | expr_stmt
+                  | block ;
+
+var_decl          = ("let" | "var") identifier [ ":" type_ref ] [ "=" expr ] ";"
+                  | identifier ":" type_ref [ "=" expr ] ";" ;
+
+if_stmt           = "if" "(" expr ")" block [ "else" block ] ;
+while_stmt        = "while" "(" expr ")" block ;
+for_stmt          = "for" "(" [ expr ] ";" [ expr ] ";" [ expr ] ")" block ;
+return_stmt       = "return" [ expr ] ";" ;
+expr_stmt         = expr ";" ;
+
+expr              = assignment_expr ;
+assignment_expr   = logical_or_expr
+                  | unary_expr assignment_op assignment_expr ;
+assignment_op     = "=" | "+=" | "-=" | "*=" | "/=" ;
+
+logical_or_expr   = logical_and_expr { "||" logical_and_expr } ;
+logical_and_expr  = equality_expr { "&&" equality_expr } ;
+equality_expr     = compare_expr { ("==" | "!=") compare_expr } ;
+compare_expr      = additive_expr { ("<" | "<=" | ">" | ">=") additive_expr } ;
+additive_expr     = multiplicative_expr { ("+" | "-") multiplicative_expr } ;
+multiplicative_expr = unary_expr { ("*" | "/" | "%") unary_expr } ;
+
+unary_expr        = ("!" | "+" | "-") unary_expr
+                  | postfix_expr ;
+
+postfix_expr      = primary_expr { call_suffix | index_suffix | member_suffix } ;
+call_suffix       = "(" [ arg_list ] ")" ;
+index_suffix      = "[" expr "]" ;
+member_suffix     = "." identifier ;
+arg_list          = expr { "," expr } ;
+
+primary_expr      = literal
+                  | identifier
+                  | "(" expr ")"
+                  | cast_expr ;
+
+cast_expr         = type_name "(" expr ")" ;
+
+literal           = integer
+                  | float
+                  | decimal
+                  | string
+                  | char
+                  | bool
+                  | "null"
+                  | list_lit
+                  | map_lit
+                  | set_lit ;
+
+list_lit          = "[" [ expr { "," expr } ] "]" ;
+map_lit           = "{" [ map_pair { "," map_pair } ] "}" ;
+map_pair          = expr ":" expr ;
+set_lit           = "set" "{" [ expr { "," expr } ] "}" ;
+
+type_ref          = type_name [ "?" ] ;
+type_name         = scalar_type | width_type | collection_type | user_type ;
+scalar_type       = "Int" | "UInt" | "Float" | "Decimal" | "Bool" | "Char" | "String" ;
+width_type        = "Int8" | "Int16" | "Int32" | "Int64"
+                  | "UInt8" | "UInt16" | "UInt32" | "UInt64"
+                  | "Float32" | "Float64" ;
+collection_type   = list_type | map_type | set_type ;
+list_type         = "List" "<" type_ref ">" ;
+map_type          = "Map" "<" type_ref "," type_ref ">" ;
+set_type          = "Set" "<" type_ref ">" ;
+user_type         = identifier ;
+
+bool              = "true" | "false" ;
+
+(* Lexical nonterminals to be provided by lexer: *)
+identifier        = IDENT ;
+integer           = INT_LIT ;
+float             = FLOAT_LIT ;
+decimal           = DECIMAL_LIT ;
+string            = STRING_LIT ;
+char              = CHAR_LIT ;
+EOF               = END_OF_FILE ;

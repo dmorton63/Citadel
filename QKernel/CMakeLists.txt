@@ -3,6 +3,7 @@ add_library(QKernel STATIC
     Src/QKTaskManager.cpp
     Src/QKScheduler.cpp
     Src/QKInterrupts.cpp
+    Src/QKSyscallABI.cpp
     Src/QKCommandCenter.cpp
     Src/QKTime.cpp
     Src/QKSystemPump.cpp

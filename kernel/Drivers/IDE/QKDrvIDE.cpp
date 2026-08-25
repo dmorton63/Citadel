@@ -107,8 +107,10 @@ namespace
         return out;
     }
 
-    constexpr QC::usize kSpinsNotBusy = 20000;
-    constexpr QC::usize kSpinsDrq = 60000;
+    // Real hardware can take longer than QEMU to transition BSY/DRQ, especially
+    // under repeated write workloads during installer payload seeding.
+    constexpr QC::usize kSpinsNotBusy = 200000;
+    constexpr QC::usize kSpinsDrq = 600000;
 
     enum StatusBits : QC::u8
     {
@@ -138,6 +140,7 @@ namespace
     {
         CMD_READ_SECTORS = 0x20,
         CMD_WRITE_SECTORS = 0x30,
+        CMD_CACHE_FLUSH = 0xE7,
         CMD_IDENTIFY = 0xEC,
     };
 
@@ -187,6 +190,8 @@ namespace
                 if ((s & STATUS_BSY) == 0)
                     return true;
             }
+            if ((spins & 0xFF) == 0)
+                QArch::io_wait();
         }
         return false;
     }
@@ -201,6 +206,8 @@ namespace
                 if ((s & STATUS_BSY) == 0)
                     return true;
             }
+            if ((spins & 0xFF) == 0)
+                QArch::io_wait();
         }
         return false;
     }
@@ -216,6 +223,8 @@ namespace
                 return false;
             if ((s & STATUS_BSY) == 0 && (s & STATUS_DRQ))
                 return true;
+            if ((spins & 0xFF) == 0)
+                QArch::io_wait();
         }
         // Fall back to regular status read (some emulations are quirky)
         QC::u8 s = ioReadStatus(base);
@@ -233,6 +242,8 @@ namespace
                 return false;
             if ((s & STATUS_BSY) == 0 && (s & STATUS_DRQ))
                 return true;
+            if ((spins & 0xFF) == 0)
+                QArch::io_wait();
         }
         return false;
     }
@@ -536,6 +547,11 @@ namespace
                 if (!waitNotBusyStatus(m_base, kSpinsNotBusy))
                     return QC::Status::Timeout;
             }
+
+            // Ensure controller/device write cache is drained before returning success.
+            QArch::outb(static_cast<QC::u16>(m_base + REG_COMMAND), CMD_CACHE_FLUSH);
+            if (!waitNotBusyStatus(m_base, kSpinsDrq))
+                return QC::Status::Timeout;
 
             return QC::Status::Success;
         }
@@ -862,7 +878,9 @@ namespace
         constexpr QC::u8 kFatCount = 2;
         constexpr QC::u32 kMinFat32Clusters = 65525;
         constexpr QC::u32 kMaxFat32Clusters = 0x0FFFFFF5U;
-        const QC::u8 candidates[] = {1, 2, 4, 8, 16, 32, 64};
+        // Prefer larger clusters first; tiny clusters dramatically increase FAT allocation
+        // work during installer payload copies.
+        const QC::u8 candidates[] = {64, 32, 16, 8, 4, 2, 1};
 
         for (QC::u8 sectorsPerCluster : candidates)
         {

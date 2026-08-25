@@ -204,6 +204,7 @@ namespace QCQL
         QC::Vector<Table> tables;
         QC::u32 pageSize = kPageSizeDefault;
         QC::u32 nextPageId = 1;
+        bool isBootCreation = false;  // Skip barriers during new DB creation (no existing data to lose).
     };
 
     struct OpenStats
@@ -214,6 +215,37 @@ namespace QCQL
         QC::u32 pkPagesLoaded = 0;
         QC::u32 pkRowsScanned = 0;
         QC::u32 pkRowsIndexed = 0;
+    };
+
+    // Per-FK finding recorded during integrity validation.
+    struct FKIntegrityFinding
+    {
+        char childTable[48]       = {};
+        char childColumn[48]      = {};
+        char parentTable[48]      = {};
+        char parentColumn[48]     = {};
+        // Specific failure code:
+        //   "ok"                     – FK is coherent
+        //   "child_col_missing"      – child column not in child table schema
+        //   "parent_table_missing"   – referenced table not in database
+        //   "parent_col_missing"     – referenced column not in parent table schema
+        char code[32] = {};
+    };
+
+    static constexpr QC::usize kMaxFKIntegrityFindings = 64;
+
+    struct SchemaIntegrityReport
+    {
+        QC::u32  fileVersion       = 0;
+        bool     versionSupported  = false;
+        QC::u32  tablesChecked     = 0;
+        QC::u32  fksChecked        = 0;
+        QC::u32  fkErrors          = 0;           // count of non-"ok" findings
+        FKIntegrityFinding findings[kMaxFKIntegrityFindings] = {};
+        QC::u32  findingCount      = 0;
+        bool     allRelational     = false;        // true iff fkErrors == 0 && versionSupported
+        bool     hasDirtyBarrier   = false;        // true if the last metadata write was interrupted
+        char     firstError[128]   = {};           // first non-ok finding as a human-readable string
     };
 
 } // namespace QCQL

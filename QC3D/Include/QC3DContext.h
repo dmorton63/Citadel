@@ -7,11 +7,14 @@
 #include "QCVertex.h"
 #include "QCColor.h"
 
+namespace QG { class IPainter; }
+
 namespace QC
 {
     class DepthBuffer;
     class Rasterizer;
     class Mesh;
+    class PixelShader;
 
     class Context
     {
@@ -39,13 +42,26 @@ namespace QC
         // World transform for next draw
         void setModelMatrix(const QC::Mat4f& model);
 
+        // Lighting
+        void setLightDir(const QC::Vec3f& dir);
+        void setAmbient(float ambient);
+        void setDiffuseStrength(float diffuse);
+        void setLightingEnabled(bool enabled);
+
+        // Backface culling (enabled by default)
+        void enableBackfaceCulling(bool enabled);
+
         // Draw a mesh (triangles)
         void drawMesh(const Mesh& mesh);
 
+        // Blit the rendered color buffer into a painter surface at (x, y).
+        // Call after drawMesh to composite the 3D render into a UI window.
+        void blitTo(QG::IPainter* painter, QC::i32 x, QC::i32 y) const;
+
     private:
-        // Internal pipeline pieces
-        Rasterizer* m_rasterizer;
+        Rasterizer*  m_rasterizer;
         DepthBuffer* m_depth;
+        PixelShader* m_pixelShader;
 
         QC::u32* m_pixels;
         QC::u32 m_width;
@@ -57,6 +73,7 @@ namespace QC
         QC::Mat4f m_proj;
 
         bool m_depthEnabled;
+        bool m_backfaceCulling;
     };
 
 } // namespace QC

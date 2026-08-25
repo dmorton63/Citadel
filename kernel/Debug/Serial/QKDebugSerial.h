@@ -16,4 +16,6 @@ namespace QK::Debug::Serial
     const char *CaptureData();
     QC::usize CaptureSize();
     bool CaptureTruncated();
+
+    bool SaveCaptureToFile(const char *path);
 }

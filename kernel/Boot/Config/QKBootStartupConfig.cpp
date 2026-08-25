@@ -16,12 +16,18 @@ namespace QK::Boot::Config
         static StartupMode g_StartupMode = StartupMode::Desktop;
         static QK::SecurityCenter::Mode g_ScMode = QK::SecurityCenter::Mode::Bypass;
         static bool g_IdeSharedProbeEnabled = false;
+        static bool g_PreferUsbSharedVolume = false;
+        static bool g_SharedUsbVolumeAutoSelect = false;
+        static QC::u32 g_SharedUsbVolumeIndex = 0;
 
         static bool g_HasCmdlineStartupModeOverride = false;
         static StartupMode g_CmdlineStartupModeOverride = StartupMode::Desktop;
 
         static char g_CmdlineRecoveryCode[96] = {0};
         static bool g_HasCmdlineRecoveryCode = false;
+
+        static bool g_TpmQuarantineTestEnabled = false;
+        static bool g_HasCmdlineTpmQuarantineTest = false;
 
         static char g_BootSaveTermValue[256] = {0};
         static bool g_PowerOffAfterSaveTerm = false;
@@ -263,6 +269,22 @@ namespace QK::Boot::Config
             return QK::SecurityCenter::Mode::Bypass;
         }
 
+        static bool parseSharedSourcePrefersUsb(FLogFn Log, const char *value)
+        {
+            if (!value || *value == '\0')
+                return false;
+
+            if (equalsIgnoreCase(value, "USB"))
+                return true;
+            if (equalsIgnoreCase(value, "RAMDISK"))
+                return false;
+
+            LogStr(Log, "Unknown SHARED_SOURCE value: ");
+            LogStr(Log, value);
+            LogStr(Log, " (defaulting to RAMDISK)\r\n");
+            return false;
+        }
+
         static void handleStartupConfigLine(FLogFn Log, char *line)
         {
             if (!line)
@@ -337,6 +359,38 @@ namespace QK::Boot::Config
             if (equalsIgnoreCase(key, "IDE_SHARED"))
             {
                 g_IdeSharedProbeEnabled = parseBoolValue(value, false);
+                return;
+            }
+
+            if (equalsIgnoreCase(key, "SHARED_SOURCE"))
+            {
+                g_PreferUsbSharedVolume = parseSharedSourcePrefersUsb(Log, value);
+                return;
+            }
+
+            if (equalsIgnoreCase(key, "SHARED_USB_INDEX"))
+            {
+                if (equalsIgnoreCase(value, "AUTO"))
+                {
+                    g_SharedUsbVolumeAutoSelect = true;
+                    g_SharedUsbVolumeIndex = 0;
+                    return;
+                }
+
+                QC::u32 idx = 0;
+                if (parseU32Value(value, idx))
+                {
+                    g_SharedUsbVolumeAutoSelect = false;
+                    g_SharedUsbVolumeIndex = idx;
+                }
+                else
+                    LogStr(Log, "Invalid SHARED_USB_INDEX value; expected AUTO or integer (keeping default 0)\r\n");
+                return;
+            }
+
+            if (equalsIgnoreCase(key, "TPM_QUARANTINE_TEST"))
+            {
+                g_TpmQuarantineTestEnabled = parseBoolValue(value, false);
                 return;
             }
 
@@ -456,6 +510,20 @@ namespace QK::Boot::Config
                       writeKeyValueLine(file, "SC_MODE", QK::SecurityCenter::modeName(g_ScMode)) &&
                       writeKeyValueLine(file, "IDE_SHARED", g_IdeSharedProbeEnabled ? "ON" : "OFF");
 
+            ok = ok && writeKeyValueLine(file, "SHARED_SOURCE", g_PreferUsbSharedVolume ? "USB" : "RAMDISK");
+
+            if (g_SharedUsbVolumeAutoSelect)
+            {
+                ok = ok && writeKeyValueLine(file, "SHARED_USB_INDEX", "AUTO");
+            }
+            else
+            {
+                char sharedUsbIndex[16];
+                QC::String::memset(sharedUsbIndex, 0, sizeof(sharedUsbIndex));
+                ok = ok && appendU32(sharedUsbIndex, sizeof(sharedUsbIndex), g_SharedUsbVolumeIndex) &&
+                     writeKeyValueLine(file, "SHARED_USB_INDEX", sharedUsbIndex);
+            }
+
             char percent[16];
             QC::String::memset(percent, 0, sizeof(percent));
             ok = ok && appendU32(percent, sizeof(percent), QKDrv::Input::mouseSensitivityPercent()) &&
@@ -487,6 +555,9 @@ namespace QK::Boot::Config
             QC::String::memset(keyRepeatIntervalMs, 0, sizeof(keyRepeatIntervalMs));
             ok = ok && appendU32(keyRepeatIntervalMs, sizeof(keyRepeatIntervalMs), QKDrv::Input::keyboardRepeatIntervalMs()) &&
                  writeKeyValueLine(file, "KEY_REPEAT_INTERVAL_MS", keyRepeatIntervalMs);
+
+            if (ok)
+                ok = writeKeyValueLine(file, "TPM_QUARANTINE_TEST", g_TpmQuarantineTestEnabled ? "ON" : "OFF");
 
             if (ok && g_BootSaveTermValue[0] != '\0')
                 ok = writeKeyValueLine(file, "SAVETERM", g_BootSaveTermValue);
@@ -582,6 +653,24 @@ namespace QK::Boot::Config
 
         LogStr(Log, "IDE_SHARED loaded: ");
         LogStr(Log, g_IdeSharedProbeEnabled ? "ON" : "OFF");
+        LogStr(Log, "\r\n");
+
+        LogStr(Log, "SHARED_SOURCE loaded: ");
+        LogStr(Log, g_PreferUsbSharedVolume ? "USB" : "RAMDISK");
+        LogStr(Log, "\r\n");
+
+        LogStr(Log, "SHARED_USB_INDEX loaded: ");
+        if (g_SharedUsbVolumeAutoSelect)
+        {
+            LogStr(Log, "AUTO");
+        }
+        else
+        {
+            char idx[16];
+            QC::String::memset(idx, 0, sizeof(idx));
+            (void)appendU32(idx, sizeof(idx), g_SharedUsbVolumeIndex);
+            LogStr(Log, idx);
+        }
         LogStr(Log, "\r\n");
 
         if (g_HasCmdlineStartupModeOverride)
@@ -682,6 +771,13 @@ namespace QK::Boot::Config
                 setCmdlineStartupModeOverride(Log, StartupMode::Desktop);
                 continue;
             }
+            if (tokenEqualsIgnoreCase(tokBegin, tokEnd, "tpm_quarantine_test"))
+            {
+                g_TpmQuarantineTestEnabled = true;
+                g_HasCmdlineTpmQuarantineTest = true;
+                LogStr(Log, "Dev cmdline TPM quarantine test trigger loaded\r\n");
+                continue;
+            }
 
             // key=value.
             const char *eq = tokBegin;
@@ -732,6 +828,46 @@ namespace QK::Boot::Config
                 g_CmdlineRecoveryCode[n] = '\0';
                 g_HasCmdlineRecoveryCode = true;
                 LogStr(Log, "Dev cmdline recovery_code override loaded\r\n");
+                continue;
+            }
+
+            if (tokenEqualsIgnoreCase(keyBegin, keyEnd, "citadel.tpm_quarantine_test"))
+            {
+                const bool enabled = parseBoolValue(valBegin, true);
+                g_TpmQuarantineTestEnabled = enabled;
+                g_HasCmdlineTpmQuarantineTest = enabled;
+                if (g_HasCmdlineTpmQuarantineTest)
+                    LogStr(Log, "Dev cmdline TPM quarantine test trigger loaded\r\n");
+                continue;
+            }
+
+            if (tokenEqualsIgnoreCase(keyBegin, keyEnd, "citadel.shared_source"))
+            {
+                char valBuf[32];
+                QC::usize n = static_cast<QC::usize>(valEnd - valBegin);
+                if (n >= sizeof(valBuf))
+                    n = sizeof(valBuf) - 1;
+                QC::String::memcpy(valBuf, valBegin, n);
+                valBuf[n] = '\0';
+                g_PreferUsbSharedVolume = parseSharedSourcePrefersUsb(Log, valBuf);
+                continue;
+            }
+
+            if (tokenEqualsIgnoreCase(keyBegin, keyEnd, "citadel.shared_usb_index"))
+            {
+                char valBuf[16];
+                QC::usize n = static_cast<QC::usize>(valEnd - valBegin);
+                if (n >= sizeof(valBuf))
+                    n = sizeof(valBuf) - 1;
+                QC::String::memcpy(valBuf, valBegin, n);
+                valBuf[n] = '\0';
+
+                QC::u32 idx = 0;
+                if (parseU32Value(valBuf, idx))
+                    g_SharedUsbVolumeIndex = idx;
+                else
+                    LogStr(Log, "Invalid cmdline citadel.shared_usb_index; keeping previous value\r\n");
+                continue;
             }
         }
     }
@@ -856,6 +992,21 @@ namespace QK::Boot::Config
         return g_IdeSharedProbeEnabled;
     }
 
+    bool GetPreferUsbSharedVolume()
+    {
+        return g_PreferUsbSharedVolume;
+    }
+
+    bool GetSharedUsbVolumeAutoSelect()
+    {
+        return g_SharedUsbVolumeAutoSelect;
+    }
+
+    QC::u32 GetSharedUsbVolumeIndex()
+    {
+        return g_SharedUsbVolumeIndex;
+    }
+
     bool TryConsumeDevRecoveryCode(char *out, QC::usize outCap)
     {
         if (!out || outCap == 0)
@@ -876,6 +1027,15 @@ namespace QK::Boot::Config
         // One-shot consume and wipe.
         QC::String::memset(g_CmdlineRecoveryCode, 0, sizeof(g_CmdlineRecoveryCode));
         g_HasCmdlineRecoveryCode = false;
+        return true;
+    }
+
+    bool TryConsumeDevTpmQuarantineTest()
+    {
+        if (!g_HasCmdlineTpmQuarantineTest)
+            return false;
+
+        g_HasCmdlineTpmQuarantineTest = false;
         return true;
     }
 
