@@ -1,6 +1,6 @@
 {
   "os": "Linux",
-  "kernel_prefix": "5.",
+  "kernel_prefix": "6.",
   "require_efi": true,
   "required_tools": [
     "openssl",
