@@ -56,6 +56,15 @@ jobs:
           [[ -f "$BUILD_DIR/kernel/citadel.elf" ]] && cp "$BUILD_DIR/kernel/citadel.elf" "$STAGE/vmlinuz-citadel"
           [[ -f "iso/boot/citadel.elf"          ]] && cp "iso/boot/citadel.elf"           "$STAGE/vmlinuz-citadel"
 
+          # BootGate binary
+          [[ -f "$BUILD_DIR/BootGate"              ]] && cp "$BUILD_DIR/BootGate"              "$STAGE/BootGate"
+          [[ -f "$BUILD_DIR/citadel.bin"           ]] && [[ ! -f "$STAGE/BootGate" ]] && cp "$BUILD_DIR/citadel.bin"           "$STAGE/BootGate"
+          [[ -f "$BUILD_DIR/kernel/citadel.bin"    ]] && [[ ! -f "$STAGE/BootGate" ]] && cp "$BUILD_DIR/kernel/citadel.bin"    "$STAGE/BootGate"
+          if [[ ! -f "$STAGE/BootGate" ]]; then
+            echo "Missing BootGate source: none of $BUILD_DIR/BootGate, $BUILD_DIR/citadel.bin, or $BUILD_DIR/kernel/citadel.bin exists"
+            exit 1
+          fi
+
           # Boot policy config
           [[ -f "boot.json" ]] && cp "boot.json" "$STAGE/boot.json"
 
@@ -64,17 +73,6 @@ jobs:
 
       - name: Sign artifacts and manifest
         run: |
-          if [[ ! -f "$BUILD_DIR/BootGate" ]]; then
-            if [[ -f "$BUILD_DIR/citadel.bin" ]]; then
-              cp "$BUILD_DIR/citadel.bin" "$BUILD_DIR/BootGate"
-            elif [[ -f "$BUILD_DIR/kernel/citadel.bin" ]]; then
-              cp "$BUILD_DIR/kernel/citadel.bin" "$BUILD_DIR/BootGate"
-            else
-              echo "Missing BootGate source: neither $BUILD_DIR/citadel.bin nor $BUILD_DIR/kernel/citadel.bin exists"
-              exit 1
-            fi
-          fi
-
           mapfile -d '' ARTIFACTS < <(
             find "$BUILD_DIR/signing-stage" -type f \( \
               -iname "*.efi" -o -iname "bootgate" -o -iname "vmlinuz*" -o -iname "boot.json" -o -name "*.ko" \
