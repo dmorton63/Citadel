@@ -103,9 +103,10 @@ jobs:
 
       - name: Revocation freshness verification
         run: |
-          cat > build/policy/revocation_status.json <<'JSON'
+          NOW=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          cat > build/policy/revocation_status.json <<JSON
           {
-            "last_updated_utc": "2026-06-16T00:00:00Z",
+            "last_updated_utc": "${NOW}",
             "environments": [
               {"name": "lab", "propagated": true},
               {"name": "staging", "propagated": true},
