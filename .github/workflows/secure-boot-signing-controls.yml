@@ -55,13 +55,25 @@ jobs:
 
       - name: Verify signer image digest pinning
         run: |
-          if grep -v '^#' signing/signer-images.lock | grep -q '@'; then
-            echo "[FAIL] lock file must use '=' and digest-only format, not image@digest";
-            exit 1;
-          fi
-          if grep -v '^#' signing/signer-images.lock | grep -v 'sha256:' >/dev/null; then
-            echo "[FAIL] all signer images must be pinned with sha256 digest";
-            exit 1;
+          set -euo pipefail
+
+          # Ignore comments/blank lines, reject image@digest, and require
+          # strict image=sha256:<64hex> entries.
+          if awk '
+            /^[[:space:]]*($|#)/ { next }
+            /@/ { bad_at = 1 }
+            !/^[^=]+=sha256:[0-9a-f]{64}$/ { bad_fmt = 1 }
+            END { exit (bad_at || bad_fmt) ? 1 : 0 }
+          ' signing/signer-images.lock; then
+            echo "[OK] signer image digest pinning format is valid"
+          else
+            echo "[FAIL] all signer images must use strict image=sha256:<64hex> format"
+            echo "[INFO] offending entries:"
+            awk '
+              /^[[:space:]]*($|#)/ { next }
+              /@/ || !/^[^=]+=sha256:[0-9a-f]{64}$/ { print " - " $0 }
+            ' signing/signer-images.lock
+            exit 1
           fi
 
       - name: Verify provenance chain fixture
