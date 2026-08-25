@@ -134,6 +134,12 @@ namespace QW
         Point m_dragOffset;
         Rect m_dragStartBounds;
 
+        // Window resize state (edge/corner drag)
+        Window *m_resizeWindow;
+        Point m_resizeStartMouse;
+        Rect m_resizeStartBounds;
+        QC::u32 m_resizeEdges;
+
         // General mouse capture state (controls dragging inside a window)
         // When any mouse button is down on a window, keep routing subsequent
         // move/up events to that same window even if the cursor leaves.
@@ -154,6 +160,9 @@ namespace QW
 
         QC::u32 m_nextDragDumpSequence = 0;
         PendingDragDump m_pendingDragDump;
+
+        // Current hardware cursor shape id (0=arrow) to avoid redundant updates.
+        QC::u8 m_hwCursorShape;
 
         bool m_needsRender = true;
     };

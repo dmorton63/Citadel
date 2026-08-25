@@ -7,6 +7,7 @@
 
 #include "QCCommandRegistry.h"
 #include "QCQLEngine.h"
+#include "QCQLRuntime.h"
 #include "QCString.h"
 
 #include "QKCommandCenter.h"
@@ -154,14 +155,22 @@ namespace
         if (!readToken(cursor, modeText, sizeof(modeText)))
             QC::String::strncpy(modeText, "save", sizeof(modeText) - 1);
 
-        QCQL::Database database{};
-        QCQL::Engine &engine = QCQL::Engine::instance();
-        const QCQL::Status openSt = engine.openDatabase(CMMS_DB_PATH, database);
+        QCQL::DbHandle handle{};
+        const QCQL::Status openSt = QCQL::Runtime::openHandle(CMMS_DB_PATH, handle, false);
         if (openSt != QCQL::Status::Success)
         {
             ctx.writeLine("deskdoc: failed to open /system/CMMS.QDB");
             return true;
         }
+
+        QCQL::Database *databasePtr = nullptr;
+        if (QCQL::Runtime::borrowDatabase(handle, databasePtr) != QCQL::Status::Success || !databasePtr)
+        {
+            (void)QCQL::Runtime::closeHandle(handle);
+            ctx.writeLine("deskdoc: failed to borrow database handle");
+            return true;
+        }
+        QCQL::Database &database = *databasePtr;
 
         QD::DesktopDocumentImportResult importResult{};
         bool imported = false;
@@ -173,7 +182,7 @@ namespace
         if (!imported)
         {
             ctx.writeLine(importResult.error[0] ? importResult.error : "deskdoc: import failed");
-            (void)engine.closeDatabase(database);
+            (void)QCQL::Runtime::closeHandle(handle);
             return true;
         }
 
@@ -216,7 +225,7 @@ namespace
             ctx.writeLine(line);
         }
 
-        (void)engine.closeDatabase(database);
+        (void)QCQL::Runtime::closeHandle(handle);
         return true;
     }
 

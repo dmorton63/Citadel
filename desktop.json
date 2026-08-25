@@ -27,6 +27,7 @@
                         "shineIntensity": 0.25,
                         "glass": true
                     },
+                    "button": { "type": "button", "id": "btn3D", "text": "3D", "action": "view3d", "x": 20, "y": 220, "w": 160, "h": 32 },
                     "accent": {
                         "fillNormal": "#883f3f47",
                         "fillHover": "#AA6BB6FF",

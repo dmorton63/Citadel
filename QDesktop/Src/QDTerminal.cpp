@@ -118,6 +118,35 @@ namespace
         return p;
     }
 
+    static bool parseU32Word(const char *p, QC::u32 &out)
+    {
+        if (!p)
+            return false;
+        p = skipSpaces(p);
+        if (!p || *p == '\0')
+            return false;
+
+        QC::u64 value = 0;
+        bool hasDigit = false;
+        while (*p >= '0' && *p <= '9')
+        {
+            hasDigit = true;
+            value = (value * 10u) + static_cast<QC::u64>(*p - '0');
+            if (value > 0xFFFFFFFFull)
+                return false;
+            ++p;
+        }
+        if (!hasDigit)
+            return false;
+
+        p = skipSpaces(p);
+        if (*p != '\0')
+            return false;
+
+        out = static_cast<QC::u32>(value);
+        return true;
+    }
+
     static void destroyOwnedString(void *p)
     {
         char *s = static_cast<char *>(p);
@@ -206,28 +235,43 @@ namespace QD
           m_windowId(0),
           m_root(nullptr),
                     m_content(nullptr),
+                    m_titleBar(nullptr),
+                    m_titleLabel(nullptr),
           m_output(nullptr),
           m_outputScroll(nullptr),
           m_input(nullptr),
+                    m_closeButton(nullptr),
+                    m_minButton(nullptr),
+                    m_maxButton(nullptr),
           m_windowListenerId(QK::Event::InvalidListenerId),
           m_followTail(true),
           m_syncingScroll(false),
-            m_callerAccess(static_cast<QC::u8>(QC::Cmd::AccessLevel::User)),
-            m_chmodeWindow(nullptr),
-            m_chmodeWindowId(0),
-            m_chmodeRoot(nullptr),
-            m_chmodeUser(nullptr),
-            m_chmodePass(nullptr),
-            m_chmodeOk(nullptr),
-            m_chmodeCancel(nullptr),
-            m_chmodePendingAccess(static_cast<QC::u8>(QC::Cmd::AccessLevel::User)),
-                        m_shutdownPermWindow(nullptr),
-                        m_shutdownPermWindowId(0),
-                        m_shutdownPermRoot(nullptr),
-                        m_shutdownPermOk(nullptr),
+                    m_isMaximized(false),
+          m_restoreX(0),
+          m_restoreY(0),
+          m_restoreW(0),
+          m_restoreH(0),
+                    m_editorActive(false),
+                    m_editorDirty(false),
+                    m_editorLen(0),
+                    m_callerAccess(static_cast<QC::u8>(QC::Cmd::AccessLevel::User)),
+                    m_chmodeWindow(nullptr),
+                    m_chmodeWindowId(0),
+                    m_chmodeRoot(nullptr),
+                    m_chmodeUser(nullptr),
+                    m_chmodePass(nullptr),
+                    m_chmodeOk(nullptr),
+                    m_chmodeCancel(nullptr),
+                    m_chmodePendingAccess(static_cast<QC::u8>(QC::Cmd::AccessLevel::User)),
+                    m_shutdownPermWindow(nullptr),
+                    m_shutdownPermWindowId(0),
+                    m_shutdownPermRoot(nullptr),
+                    m_shutdownPermOk(nullptr),
           m_savetermLastSavedCount(0),
           m_savetermHasBaseline(false)
     {
+                QC::String::memset(m_editorPath, 0, sizeof(m_editorPath));
+                QC::String::memset(m_editorBuffer, 0, sizeof(m_editorBuffer));
         QC::String::memset(m_savetermLastPath, 0, sizeof(m_savetermLastPath));
         auto &eventMgr = QK::Event::EventManager::instance();
         if (eventMgr.isInitialized())
@@ -299,6 +343,15 @@ namespace QD
             }
         }
 
+        if (event.type() == QK::Event::Type::WindowResize)
+        {
+            const auto &we = event.asWindow();
+            if (self->m_windowId != 0 && we.windowId == self->m_windowId)
+            {
+                self->layoutWindow();
+            }
+        }
+
         return false;
     }
 
@@ -318,9 +371,19 @@ namespace QD
         m_window = nullptr;
         m_root = nullptr;
         m_content = nullptr;
+        m_titleBar = nullptr;
+        m_titleLabel = nullptr;
         m_output = nullptr;
         m_outputScroll = nullptr;
         m_input = nullptr;
+        m_closeButton = nullptr;
+        m_minButton = nullptr;
+        m_maxButton = nullptr;
+        m_isMaximized = false;
+        m_restoreX = 0;
+        m_restoreY = 0;
+        m_restoreW = 0;
+        m_restoreH = 0;
         m_windowId = 0;
     }
 
@@ -447,12 +510,26 @@ namespace QD
         // Receive streaming output from CommandProcessor.
         m_window->setMessageHandler(&Terminal::onWindowMessage, this);
 
-        // Disable close/min/max for now (keeps taskbar state simple).
-        m_window->setFlags(QW::WindowFlags::Visible | QW::WindowFlags::Resizable | QW::WindowFlags::Movable | QW::WindowFlags::HasTitle | QW::WindowFlags::HasBorder);
+        m_window->setFlags(QW::WindowFlags::Visible |
+                   QW::WindowFlags::Resizable |
+                   QW::WindowFlags::Movable |
+                   QW::WindowFlags::HasTitle |
+                   QW::WindowFlags::HasBorder |
+                   QW::WindowFlags::HasClose |
+                   QW::WindowFlags::HasMinimize |
+                   QW::WindowFlags::HasMaximize);
 
         m_root = m_window->root();
         m_root->setBorderStyle(QW::Controls::BorderStyle::None);
         m_root->setPadding(0);
+        m_isMaximized = false;
+        {
+            const QC::Rect b = m_window->bounds();
+            m_restoreX = b.x;
+            m_restoreY = b.y;
+            m_restoreW = b.width;
+            m_restoreH = b.height;
+        }
 
         // Content container: keeps the input textbox focused even when
         // interacting with scrollbar/output via mouse.
@@ -468,15 +545,15 @@ namespace QD
         // Title bar (dedicated region for window dragging)
         {
             QC::Rect titleBounds = {0, 0, w, static_cast<QC::u32>(kTitleBarHeight)};
-            auto *titleBar = new QW::Controls::Panel(m_window, titleBounds);
-            titleBar->setBorderStyle(QW::Controls::BorderStyle::None);
-            titleBar->setBackgroundColor(QW::Color(20, 20, 20, 255));
-            m_content->addChild(titleBar);
+            m_titleBar = new QW::Controls::Panel(m_window, titleBounds);
+            m_titleBar->setBorderStyle(QW::Controls::BorderStyle::None);
+            m_titleBar->setBackgroundColor(QW::Color(20, 20, 20, 255));
+            m_content->addChild(m_titleBar);
 
             QC::Rect titleLabelBounds = {kPad, 4, static_cast<QC::u32>(w > 64 ? (w - 64) : w), 16};
-            auto *titleLabel = new QW::Controls::Label(m_window, "Terminal", titleLabelBounds);
-            titleLabel->setTextColor(QW::Color(230, 230, 230, 255));
-            titleBar->addChild(titleLabel);
+            m_titleLabel = new QW::Controls::Label(m_window, "Terminal", titleLabelBounds);
+            m_titleLabel->setTextColor(QW::Color(230, 230, 230, 255));
+            m_titleBar->addChild(m_titleLabel);
         }
 
         // Output view + scrollbar (below title bar)
@@ -523,14 +600,29 @@ namespace QD
         m_input->setTextSubmitHandler(&Terminal::onSubmit, this);
         m_content->addChild(m_input);
 
-        // Close button in the upper-right corner
-        QC::Rect closeBounds = {static_cast<QC::i32>(w - kPad - 20), 2, 20, 20};
-        auto *closeButton = new QW::Controls::Button(m_window, "X", closeBounds);
-        closeButton->setContentMode(QW::ButtonContentMode::Text);
-        closeButton->setVariant(QW::ButtonVariant::Compact);
-        closeButton->setRole(QW::ButtonRole::Destructive);
-        closeButton->setClickHandler(&Terminal::onCloseClick, this);
-        m_content->addChild(closeButton);
+        // Window controls in title bar.
+        m_minButton = new QW::Controls::Button(m_window, "_", {0, 0, 20, 20});
+        m_minButton->setContentMode(QW::ButtonContentMode::Text);
+        m_minButton->setVariant(QW::ButtonVariant::Compact);
+        m_minButton->setRole(QW::ButtonRole::Default);
+        m_minButton->setClickHandler(&Terminal::onMinClick, this);
+        m_content->addChild(m_minButton);
+
+        m_maxButton = new QW::Controls::Button(m_window, "[]", {0, 0, 20, 20});
+        m_maxButton->setContentMode(QW::ButtonContentMode::Text);
+        m_maxButton->setVariant(QW::ButtonVariant::Compact);
+        m_maxButton->setRole(QW::ButtonRole::Default);
+        m_maxButton->setClickHandler(&Terminal::onMaxClick, this);
+        m_content->addChild(m_maxButton);
+
+        m_closeButton = new QW::Controls::Button(m_window, "X", {0, 0, 20, 20});
+        m_closeButton->setContentMode(QW::ButtonContentMode::Text);
+        m_closeButton->setVariant(QW::ButtonVariant::Compact);
+        m_closeButton->setRole(QW::ButtonRole::Destructive);
+        m_closeButton->setClickHandler(&Terminal::onCloseClick, this);
+        m_content->addChild(m_closeButton);
+
+        layoutWindow();
 
         focus();
         if (m_root && m_content)
@@ -566,9 +658,464 @@ namespace QD
         m_window = nullptr;
         m_root = nullptr;
         m_content = nullptr;
+        m_titleBar = nullptr;
+        m_titleLabel = nullptr;
         m_output = nullptr;
         m_outputScroll = nullptr;
         m_input = nullptr;
+        m_closeButton = nullptr;
+        m_minButton = nullptr;
+        m_maxButton = nullptr;
+        m_isMaximized = false;
+        m_restoreX = 0;
+        m_restoreY = 0;
+        m_restoreW = 0;
+        m_restoreH = 0;
+    }
+
+    void Terminal::layoutWindow()
+    {
+        if (!m_window)
+            return;
+
+        const QC::Rect wb = m_window->bounds();
+        const QC::u32 w = wb.width;
+        const QC::u32 h = wb.height;
+
+        static constexpr QC::i32 kTitleBarHeight = 24;
+        static constexpr QC::i32 kPad = 8;
+        static constexpr QC::u32 kInputHeight = 20;
+        static constexpr QC::u32 kButtonWidth = 20;
+        static constexpr QC::u32 kButtonGap = 2;
+        static constexpr QC::u32 kScrollW = 14;
+
+        if (m_content)
+            m_content->setBounds({0, 0, w, h});
+
+        if (m_titleBar)
+            m_titleBar->setBounds({0, 0, w, static_cast<QC::u32>(kTitleBarHeight)});
+
+        if (m_titleLabel)
+        {
+            const QC::u32 titleW = (w > 120) ? (w - 120) : 0;
+            m_titleLabel->setBounds({kPad, 4, titleW, 16});
+        }
+
+        const QC::i32 inputY = static_cast<QC::i32>(h) - kPad - static_cast<QC::i32>(kInputHeight);
+        const QC::i32 outY = kTitleBarHeight + kPad;
+        const QC::i32 outH = (inputY - kPad) - outY;
+
+        const QC::u32 outW =
+            (w > static_cast<QC::u32>(kPad * 2) + kScrollW + 4)
+                ? (w - static_cast<QC::u32>(kPad * 2) - kScrollW - 4)
+                : 0;
+
+        const QC::Rect outBounds = {kPad,
+                                    outY,
+                                    outW,
+                                    static_cast<QC::u32>(outH > 0 ? outH : 0)};
+        const QC::Rect scrollBounds = {
+            static_cast<QC::i32>(outBounds.x + static_cast<QC::i32>(outBounds.width) + 4),
+            outBounds.y,
+            kScrollW,
+            outBounds.height};
+
+        if (m_output)
+            m_output->setBounds(outBounds);
+        if (m_outputScroll)
+            m_outputScroll->setBounds(scrollBounds);
+
+        const QC::u32 inputW = (w > static_cast<QC::u32>(kPad * 2)) ? (w - static_cast<QC::u32>(kPad * 2)) : 0;
+        if (m_input)
+            m_input->setBounds({kPad, inputY, inputW, kInputHeight});
+
+        const QC::i32 closeX = static_cast<QC::i32>((w > kPad + static_cast<QC::i32>(kButtonWidth)) ? (w - kPad - kButtonWidth) : 0);
+        const QC::i32 maxX = closeX - static_cast<QC::i32>(kButtonWidth + kButtonGap);
+        const QC::i32 minX = maxX - static_cast<QC::i32>(kButtonWidth + kButtonGap);
+        if (m_closeButton)
+            m_closeButton->setBounds({closeX, 2, kButtonWidth, 20});
+        if (m_maxButton)
+            m_maxButton->setBounds({maxX, 2, kButtonWidth, 20});
+        if (m_minButton)
+            m_minButton->setBounds({minX, 2, kButtonWidth, 20});
+
+        syncScrollUi();
+    }
+
+    void Terminal::minimizeWindow()
+    {
+        if (!m_window)
+            return;
+        m_window->setVisible(false);
+        if (m_desktop)
+            m_desktop->setActiveTaskbarWindow(0);
+    }
+
+    void Terminal::toggleMaximizeWindow()
+    {
+        if (!m_window || !m_desktop)
+            return;
+
+        if (!m_isMaximized)
+        {
+            const QC::Rect b = m_window->bounds();
+            m_restoreX = b.x;
+            m_restoreY = b.y;
+            m_restoreW = b.width;
+            m_restoreH = b.height;
+            const QC::Rect wa = m_desktop->workArea();
+            m_window->setBounds({wa.x, wa.y, wa.width, wa.height});
+            m_isMaximized = true;
+            if (m_maxButton)
+                m_maxButton->setText("R");
+        }
+        else
+        {
+            if (m_restoreW == 0 || m_restoreH == 0)
+            {
+                const QC::Rect wa = m_desktop->workArea();
+                m_restoreX = wa.x + 32;
+                m_restoreY = wa.y + 32;
+                m_restoreW = 640;
+                m_restoreH = 360;
+            }
+            m_window->setBounds({m_restoreX, m_restoreY, m_restoreW, m_restoreH});
+            m_isMaximized = false;
+            if (m_maxButton)
+                m_maxButton->setText("[]");
+        }
+
+        layoutWindow();
+        m_window->invalidate();
+        QW::WindowManager::instance().render();
+    }
+
+    bool Terminal::resolveInputPath(const char *rawPath, char *outPath, QC::usize outCap) const
+    {
+        if (!outPath || outCap == 0)
+            return false;
+        outPath[0] = '\0';
+
+        const char *arg = skipSpaces(rawPath);
+        if (!arg || *arg == '\0')
+            return false;
+
+        if (!hasSlash(arg))
+        {
+            QC::String::strncpy(outPath, "/shared/", outCap - 1);
+            const QC::usize used = QC::String::strlen(outPath);
+            QC::String::strncpy(outPath + used, arg, outCap - 1 - used);
+        }
+        else
+        {
+            QC::String::strncpy(outPath, arg, outCap - 1);
+        }
+        outPath[outCap - 1] = '\0';
+        return outPath[0] != '\0';
+    }
+
+    void Terminal::viewFile(const char *pathArg)
+    {
+        char path[256];
+        QC::String::memset(path, 0, sizeof(path));
+        if (!resolveInputPath(pathArg, path, sizeof(path)))
+        {
+            appendLine("usage: view <path>");
+            appendLine("  (paths default to /shared if no slash)");
+            return;
+        }
+
+        QFS::File *file = QFS::VFS::instance().open(path, QFS::OpenMode::Read);
+        if (!file)
+        {
+            appendLine("view: cannot open file");
+            return;
+        }
+
+        appendLine("view: begin");
+        appendLine(path);
+
+        static constexpr QC::usize kChunkSize = 256;
+        static constexpr QC::usize kLineCap = 384;
+        static constexpr QC::u32 kMaxLines = 500;
+
+        char chunk[kChunkSize];
+        char line[kLineCap];
+        QC::usize lineLen = 0;
+        QC::u32 linesShown = 0;
+        bool truncated = false;
+
+        auto flushLine = [&]() {
+            line[lineLen] = '\0';
+            appendLine(line);
+            lineLen = 0;
+            ++linesShown;
+            if (linesShown >= kMaxLines)
+                truncated = true;
+        };
+
+        while (!truncated)
+        {
+            const QC::isize n = file->read(chunk, sizeof(chunk));
+            if (n <= 0)
+                break;
+
+            for (QC::isize i = 0; i < n; ++i)
+            {
+                const char c = chunk[i];
+                if (c == '\r')
+                    continue;
+                if (c == '\n')
+                {
+                    flushLine();
+                    if (truncated)
+                        break;
+                    continue;
+                }
+
+                if (lineLen + 1 < sizeof(line))
+                {
+                    line[lineLen++] = c;
+                }
+                else
+                {
+                    flushLine();
+                    if (truncated)
+                        break;
+                    line[lineLen++] = c;
+                }
+            }
+        }
+
+        if (!truncated && lineLen > 0)
+            flushLine();
+
+        QFS::VFS::instance().close(file);
+
+        if (truncated)
+            appendLine("view: output truncated (first 500 lines)");
+        appendLine("view: end");
+    }
+
+    void Terminal::openMiniEditor(const char *pathArg)
+    {
+        char path[256];
+        QC::String::memset(path, 0, sizeof(path));
+
+        const char *target = pathArg;
+        if (!target || *skipSpaces(target) == '\0')
+            target = "note.txt";
+
+        if (!resolveInputPath(target, path, sizeof(path)))
+        {
+            appendLine("edit: invalid path");
+            return;
+        }
+
+        m_editorActive = true;
+        m_editorDirty = false;
+        m_editorLen = 0;
+        QC::String::memset(m_editorBuffer, 0, sizeof(m_editorBuffer));
+        QC::String::strncpy(m_editorPath, path, sizeof(m_editorPath) - 1);
+
+        QFS::File *file = QFS::VFS::instance().open(path, QFS::OpenMode::Read);
+        if (file)
+        {
+            while (m_editorLen + 1 < EDITOR_BUFFER_CAP)
+            {
+                const QC::usize remain = EDITOR_BUFFER_CAP - 1 - m_editorLen;
+                const QC::usize chunk = (remain > 256) ? 256 : remain;
+                const QC::isize n = file->read(m_editorBuffer + m_editorLen, chunk);
+                if (n <= 0)
+                    break;
+                m_editorLen += static_cast<QC::usize>(n);
+            }
+            m_editorBuffer[m_editorLen] = '\0';
+            QFS::VFS::instance().close(file);
+        }
+
+        appendLine("mini-editor: active");
+        appendLine(m_editorPath);
+        appendLine(":h help, :p print, :w write, :q quit, :q! force quit, :wq write+quit");
+        appendLine("Type text lines to append.");
+    }
+
+    void Terminal::showMiniEditorBuffer()
+    {
+        if (!m_editorActive)
+            return;
+
+        appendLine("----- mini-editor buffer -----");
+        if (m_editorLen == 0)
+        {
+            appendLine("(empty)");
+            appendLine("------------------------------");
+            return;
+        }
+
+        char out[460];
+        char line[360];
+        QC::usize lineLen = 0;
+        QC::u32 lineNo = 1;
+
+        auto emit = [&]() {
+            line[lineLen] = '\0';
+            QC::String::memset(out, 0, sizeof(out));
+            QC::usize pos = 0;
+
+            char digits[16];
+            QC::usize di = 0;
+            QC::u32 v = lineNo;
+            do
+            {
+                digits[di++] = static_cast<char>('0' + (v % 10));
+                v /= 10;
+            } while (v && di < sizeof(digits));
+
+            for (QC::isize i = static_cast<QC::isize>(di) - 1; i >= 0 && pos + 1 < sizeof(out); --i)
+                out[pos++] = digits[static_cast<QC::usize>(i)];
+
+            if (pos + 3 < sizeof(out))
+            {
+                out[pos++] = '|';
+                out[pos++] = ' ';
+            }
+
+            for (QC::usize i = 0; i < lineLen && pos + 1 < sizeof(out); ++i)
+                out[pos++] = line[i];
+            out[pos] = '\0';
+            appendLine(out);
+            ++lineNo;
+            lineLen = 0;
+        };
+
+        for (QC::usize i = 0; i < m_editorLen; ++i)
+        {
+            const char c = m_editorBuffer[i];
+            if (c == '\r')
+                continue;
+            if (c == '\n')
+            {
+                emit();
+                continue;
+            }
+            if (lineLen + 1 < sizeof(line))
+                line[lineLen++] = c;
+        }
+        if (lineLen > 0)
+            emit();
+
+        appendLine("------------------------------");
+    }
+
+    bool Terminal::saveMiniEditorBuffer()
+    {
+        if (!m_editorActive)
+            return false;
+
+        QFS::File *file = QFS::VFS::instance().open(
+            m_editorPath,
+            QFS::OpenMode::Write | QFS::OpenMode::Create | QFS::OpenMode::Truncate);
+        if (!file)
+            return false;
+
+        QC::usize written = 0;
+        while (written < m_editorLen)
+        {
+            const QC::isize n = file->write(m_editorBuffer + written, m_editorLen - written);
+            if (n <= 0)
+                break;
+            written += static_cast<QC::usize>(n);
+        }
+
+        QFS::VFS::instance().close(file);
+        if (written != m_editorLen)
+            return false;
+
+        m_editorDirty = false;
+        return true;
+    }
+
+    void Terminal::handleMiniEditorLine(const char *line)
+    {
+        if (!m_editorActive)
+            return;
+
+        const char *p = line ? line : "";
+        p = skipSpaces(p);
+
+        if (*p == ':')
+        {
+            ++p;
+            p = skipSpaces(p);
+            if (streqIgnoreCase(p, "h") || streqIgnoreCase(p, "help"))
+            {
+                appendLine(":h help, :p print, :w write, :q quit, :q! force quit, :wq write+quit");
+                return;
+            }
+            if (streqIgnoreCase(p, "p") || streqIgnoreCase(p, "print"))
+            {
+                showMiniEditorBuffer();
+                return;
+            }
+            if (streqIgnoreCase(p, "w"))
+            {
+                if (saveMiniEditorBuffer())
+                    appendLine("mini-editor: saved");
+                else
+                    appendLine("mini-editor: save failed");
+                return;
+            }
+            if (streqIgnoreCase(p, "q"))
+            {
+                if (m_editorDirty)
+                {
+                    appendLine("mini-editor: unsaved changes; use :w or :q!");
+                    return;
+                }
+                m_editorActive = false;
+                appendLine("mini-editor: closed");
+                return;
+            }
+            if (streqIgnoreCase(p, "q!"))
+            {
+                m_editorActive = false;
+                m_editorDirty = false;
+                appendLine("mini-editor: closed (discarded)");
+                return;
+            }
+            if (streqIgnoreCase(p, "wq"))
+            {
+                if (saveMiniEditorBuffer())
+                {
+                    m_editorActive = false;
+                    appendLine("mini-editor: saved + closed");
+                }
+                else
+                {
+                    appendLine("mini-editor: save failed");
+                }
+                return;
+            }
+
+            appendLine("mini-editor: unknown command (try :h)");
+            return;
+        }
+
+        const QC::usize inLen = line ? QC::String::strlen(line) : 0;
+        const QC::usize need = inLen + 1; // keep newline
+        if (m_editorLen + need + 1 >= EDITOR_BUFFER_CAP)
+        {
+            appendLine("mini-editor: buffer full");
+            return;
+        }
+
+        if (inLen > 0)
+            QC::String::memcpy(m_editorBuffer + m_editorLen, line, inLen);
+        m_editorLen += inLen;
+        m_editorBuffer[m_editorLen++] = '\n';
+        m_editorBuffer[m_editorLen] = '\0';
+        m_editorDirty = true;
     }
 
     void Terminal::setCallerAccess(QC::u8 access)
@@ -1004,6 +1551,12 @@ namespace QD
         if (!line)
             return;
 
+        if (m_editorActive)
+        {
+            handleMiniEditorLine(line);
+            return;
+        }
+
         const char *p = skipSpaces(line);
         if (*p == '\0')
             return;
@@ -1130,6 +1683,71 @@ namespace QD
             // Admin+ falls through to the shared CommandProcessor.
         }
 
+        if (streqIgnoreCase(cmd, "min"))
+        {
+            minimizeWindow();
+            return;
+        }
+
+        if (streqIgnoreCase(cmd, "max") || streqIgnoreCase(cmd, "maximize"))
+        {
+            if (!m_isMaximized)
+                toggleMaximizeWindow();
+            return;
+        }
+
+        if (streqIgnoreCase(cmd, "restore"))
+        {
+            if (m_isMaximized)
+                toggleMaximizeWindow();
+            return;
+        }
+
+        if (streqIgnoreCase(cmd, "resize"))
+        {
+            char wWord[24];
+            char hWord[24];
+            QC::String::memset(wWord, 0, sizeof(wWord));
+            QC::String::memset(hWord, 0, sizeof(hWord));
+            const char *rest = readWord(p, wWord, sizeof(wWord));
+            (void)readWord(rest, hWord, sizeof(hWord));
+
+            QC::u32 reqW = 0;
+            QC::u32 reqH = 0;
+            if (!parseU32Word(wWord, reqW) || !parseU32Word(hWord, reqH))
+            {
+                appendLine("usage: resize <width> <height>");
+                return;
+            }
+
+            const QC::Rect wa = m_desktop ? m_desktop->workArea() : QC::Rect{0, 0, 0, 0};
+            if (reqW < 420)
+                reqW = 420;
+            if (reqH < 220)
+                reqH = 220;
+            if (wa.width && reqW > wa.width)
+                reqW = wa.width;
+            if (wa.height && reqH > wa.height)
+                reqH = wa.height;
+
+            if (m_window)
+            {
+                QC::Rect b = m_window->bounds();
+                b.width = reqW;
+                b.height = reqH;
+                m_window->setBounds(b);
+                m_isMaximized = false;
+                if (m_maxButton)
+                    m_maxButton->setText("[]");
+                layoutWindow();
+                m_window->invalidate();
+                QW::WindowManager::instance().render();
+            }
+
+            appendLine("window: resized");
+            return;
+        }
+
         if (streqIgnoreCase(cmd, "clear"))
         {
             if (m_output)
@@ -1175,11 +1793,11 @@ namespace QD
             }
             else if (!arg || *arg == '\0')
             {
-                QC::String::strncpy(outPath, "/shared/citadel.txt", sizeof(outPath) - 1);
+                QC::String::strncpy(outPath, "/dump/citadel.txt", sizeof(outPath) - 1);
             }
             else if (!hasSlash(arg))
             {
-                QC::String::strncpy(outPath, "/shared/", sizeof(outPath) - 1);
+                QC::String::strncpy(outPath, "/dump/", sizeof(outPath) - 1);
                 QC::usize used = QC::String::strlen(outPath);
                 QC::String::strncpy(outPath + used, arg, sizeof(outPath) - 1 - used);
             }
@@ -1282,6 +1900,18 @@ namespace QD
 
             // Skip the status lines we just printed.
             m_savetermLastSavedCount = m_output ? m_output->itemCount() : 0;
+            return;
+        }
+
+        if (streqIgnoreCase(cmd, "view"))
+        {
+            viewFile(p);
+            return;
+        }
+
+        if (streqIgnoreCase(cmd, "edit") || streqIgnoreCase(cmd, "nano") || streqIgnoreCase(cmd, "vim"))
+        {
+            openMiniEditor(p);
             return;
         }
 
@@ -1465,6 +2095,24 @@ namespace QD
 
         QC_LOG_INFO("QDTerminal", "Close button clicked");
         self->close();
+    }
+
+    void Terminal::onMinClick(QW::Controls::Button *button, void *userData)
+    {
+        (void)button;
+        auto *self = static_cast<Terminal *>(userData);
+        if (!self)
+            return;
+        self->minimizeWindow();
+    }
+
+    void Terminal::onMaxClick(QW::Controls::Button *button, void *userData)
+    {
+        (void)button;
+        auto *self = static_cast<Terminal *>(userData);
+        if (!self)
+            return;
+        self->toggleMaximizeWindow();
     }
 
 } // namespace QD

@@ -71,6 +71,21 @@ namespace QCQL
         // Empty string means no diagnostic is currently set.
         const char *lastDiagnostic() const;
 
+        // Validate schema version compatibility and FK relationship coherence for an opened database.
+        // Always succeeds (returns Success); results are captured in outReport.
+        // Call after openDatabase to gate consumer code on allRelational == true.
+        Status validateSchemaIntegrity(const Database &database, SchemaIntegrityReport &outReport) const;
+
+        // Boot-phase skip fingerprints (for deferred schema/theme initialization).
+        // Stored in FileHeader.reserved[8..23]; persisted when metadata is written.
+        static QC::u64 getSystemTablesVersion(const FileHeader &hdr);
+        static void setSystemTablesVersion(FileHeader &hdr, QC::u64 version);
+        static QC::u64 getThemeImportVersion(const FileHeader &hdr);
+        static void setThemeImportVersion(FileHeader &hdr, QC::u64 version);
+        
+        // Persist FileHeader changes (fingerprints, barriers, etc.) to disk.
+        static Status flushHeader(const Database &database);
+
         Engine() = default;
         Engine(const Engine &) = delete;
         Engine &operator=(const Engine &) = delete;

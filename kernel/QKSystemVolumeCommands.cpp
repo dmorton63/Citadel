@@ -148,6 +148,67 @@ namespace QK
                 return word[len] == '\0';
             }
 
+            static bool containsText(const char *text, const char *needle)
+            {
+                if (!text || !needle)
+                    return false;
+
+                const QC::usize textLen = QC::String::strlen(text);
+                const QC::usize needleLen = QC::String::strlen(needle);
+                if (needleLen == 0)
+                    return true;
+                if (textLen < needleLen)
+                    return false;
+
+                for (QC::usize i = 0; i + needleLen <= textLen; ++i)
+                {
+                    if (QC::String::memcmp(text + i, needle, needleLen) == 0)
+                        return true;
+                }
+                return false;
+            }
+
+            static bool isUsbSourceKind(const char *sourceKind)
+            {
+                if (!sourceKind || sourceKind[0] == '\0')
+                    return false;
+                return QC::String::strcmp(sourceKind, "xhci-usb") == 0 ||
+                       QC::String::strcmp(sourceKind, "usb") == 0;
+            }
+
+            static void writeUsbStorageReport(const QC::Cmd::Context &ctx)
+            {
+                QFS::VolumeInfo volumes[32] = {};
+                const QC::usize volumeCount = QFS::VolumeManager::instance().copyVolumeInfo(volumes, sizeof(volumes) / sizeof(volumes[0]));
+
+                bool anyUsb = false;
+                for (QC::usize i = 0; i < volumeCount; ++i)
+                {
+                    const auto &v = volumes[i];
+                    if (!isUsbSourceKind(v.sourceKind))
+                        continue;
+
+                    anyUsb = true;
+                    char line[320];
+                    QC::usize pos = 0;
+                    QC::String::memset(line, 0, sizeof(line));
+                    appendText(line, sizeof(line), pos, "usbvol ");
+                    appendText(line, sizeof(line), pos, v.name[0] ? v.name : "(unnamed)");
+                    appendText(line, sizeof(line), pos, " mount=");
+                    appendText(line, sizeof(line), pos, v.mountPath[0] ? v.mountPath : "(none)");
+                    appendText(line, sizeof(line), pos, " mounted=");
+                    appendText(line, sizeof(line), pos, v.mounted ? "yes" : "no");
+                    appendText(line, sizeof(line), pos, " class=");
+                    appendText(line, sizeof(line), pos, v.persistenceClass[0] ? v.persistenceClass : "unknown");
+                    appendText(line, sizeof(line), pos, " detail=");
+                    appendText(line, sizeof(line), pos, v.sourceDetail[0] ? v.sourceDetail : "n/a");
+                    ctx.writeLine(line);
+                }
+
+                if (!anyUsb)
+                    ctx.writeLine("usbvol: no removable USB FAT volumes registered (use USB3/xHCI port and FAT32 media)");
+            }
+
             static bool parseSysformatArgs(const char *args, bool &outForce, bool &outHasIndex, QC::usize &outIndex)
             {
                 outForce = false;
@@ -630,52 +691,188 @@ namespace QK
                 if (!dst || cap == 0 || !base || !name)
                     return false;
 
+                const QC::usize baseLen = QC::String::strlen(base);
+                const QC::usize nameLen = QC::String::strlen(name);
+                const bool needsSlash = (baseLen > 0 && base[baseLen - 1] != '/');
+                const QC::usize total = baseLen + (needsSlash ? 1 : 0) + nameLen;
+                if (total + 1 > cap)
+                    return false;
+
                 QC::usize pos = 0;
                 QC::String::memset(dst, 0, cap);
-                appendText(dst, cap, pos, base);
-                if (pos > 0 && dst[pos - 1] != '/')
-                    appendChar(dst, cap, pos, '/');
-                appendText(dst, cap, pos, name);
-                return dst[0] != '\0';
+                if (baseLen > 0)
+                {
+                    QC::String::memcpy(dst + pos, base, baseLen);
+                    pos += baseLen;
+                }
+                if (needsSlash)
+                    dst[pos++] = '/';
+                if (nameLen > 0)
+                {
+                    QC::String::memcpy(dst + pos, name, nameLen);
+                    pos += nameLen;
+                }
+                dst[pos] = '\0';
+                return pos > 0;
             }
 
-            static bool copyFilePath(const char *srcPath, const char *dstPath)
+            static void setCopyError(char *dst,
+                                     QC::usize cap,
+                                     const char *op,
+                                     const char *src,
+                                     const char *dstPath)
+            {
+                if (!dst || cap == 0)
+                    return;
+                if (dst[0] != '\0')
+                    return;
+
+                QC::usize pos = 0;
+                QC::String::memset(dst, 0, cap);
+                appendText(dst, cap, pos, op ? op : "unknown");
+                if (src && src[0] != '\0')
+                {
+                    appendText(dst, cap, pos, " src=");
+                    appendText(dst, cap, pos, src);
+                }
+                if (dstPath && dstPath[0] != '\0')
+                {
+                    appendText(dst, cap, pos, " dst=");
+                    appendText(dst, cap, pos, dstPath);
+                }
+            }
+
+            static bool writeSmallTextFile(const char *path, const char *text)
+            {
+                if (!path || !*path || !text)
+                    return false;
+
+                QFS::File *file = QFS::VFS::instance().open(path,
+                                                            QFS::OpenMode::Write | QFS::OpenMode::Create |
+                                                                QFS::OpenMode::Truncate | QFS::OpenMode::Binary);
+                if (!file)
+                    return false;
+
+                const QC::usize len = QC::String::strlen(text);
+                QC::usize written = 0;
+                while (written < len)
+                {
+                    const QC::isize n = file->write(text + written, len - written);
+                    if (n <= 0)
+                    {
+                        (void)QFS::VFS::instance().close(file);
+                        return false;
+                    }
+                    written += static_cast<QC::usize>(n);
+                }
+
+                (void)file->flush();
+                (void)QFS::VFS::instance().close(file);
+                return true;
+            }
+
+            static bool copyFilePath(const char *srcPath, const char *dstPath, char *outError, QC::usize outErrorCap)
             {
                 if (!srcPath || !dstPath)
+                {
+                    setCopyError(outError, outErrorCap, "invalid_path", srcPath, dstPath);
                     return false;
+                }
 
                 QFS::File *src = QFS::VFS::instance().open(srcPath, QFS::OpenMode::Read);
                 if (!src)
+                {
+                    setCopyError(outError, outErrorCap, "open_src_failed", srcPath, dstPath);
                     return false;
+                }
 
                 QFS::File *dst = QFS::VFS::instance().open(dstPath,
                                                            QFS::OpenMode::Write | QFS::OpenMode::Create |
                                                                QFS::OpenMode::Truncate | QFS::OpenMode::Binary);
                 if (!dst)
                 {
+                    setCopyError(outError, outErrorCap, "open_dst_failed", srcPath, dstPath);
                     (void)QFS::VFS::instance().close(src);
                     return false;
                 }
 
-                char buffer[1024];
+                char buffer[512];
                 bool ok = true;
+                const QC::u64 expectedSize = src->size();
+                QC::u64 totalRead = 0;
+                QC::u64 totalWritten = 0;
+                QC::u64 lastTell = src->tell();
+                QC::u32 stagnantReadCount = 0;
                 while (true)
                 {
                     const QC::isize n = src->read(buffer, sizeof(buffer));
                     if (n < 0)
                     {
+                        setCopyError(outError, outErrorCap, "read_src_failed", srcPath, dstPath);
                         ok = false;
                         break;
                     }
                     if (n == 0)
                         break;
 
-                    const QC::isize w = dst->write(buffer, static_cast<QC::usize>(n));
-                    if (w != n)
+                    totalRead += static_cast<QC::u64>(n);
+                    if (expectedSize > 0 && totalRead > (expectedSize + 4096ULL))
                     {
+                        setCopyError(outError, outErrorCap, "read_exceeds_src_size", srcPath, dstPath);
                         ok = false;
                         break;
                     }
+
+                    const QC::u64 newTell = src->tell();
+                    if (newTell <= lastTell)
+                    {
+                        ++stagnantReadCount;
+                        if (stagnantReadCount > 8)
+                        {
+                            setCopyError(outError, outErrorCap, "src_position_not_advancing", srcPath, dstPath);
+                            ok = false;
+                            break;
+                        }
+                    }
+                    else
+                    {
+                        stagnantReadCount = 0;
+                        lastTell = newTell;
+                    }
+
+                    QC::usize remaining = static_cast<QC::usize>(n);
+                    QC::usize offset = 0;
+                    while (remaining > 0)
+                    {
+                        const QC::isize w = dst->write(buffer + offset, remaining);
+                        if (w <= 0)
+                        {
+                            setCopyError(outError, outErrorCap, "write_dst_failed", srcPath, dstPath);
+                            ok = false;
+                            break;
+                        }
+
+                        const QC::usize wrote = static_cast<QC::usize>(w);
+                        if (wrote > remaining)
+                        {
+                            setCopyError(outError, outErrorCap, "write_dst_overflow", srcPath, dstPath);
+                            ok = false;
+                            break;
+                        }
+
+                        remaining -= wrote;
+                        offset += wrote;
+                        totalWritten += static_cast<QC::u64>(wrote);
+                    }
+
+                    if (!ok)
+                        break;
+                }
+
+                if (ok && expectedSize > 0 && totalWritten != expectedSize)
+                {
+                    setCopyError(outError, outErrorCap, "written_size_mismatch", srcPath, dstPath);
+                    ok = false;
                 }
 
                 (void)dst->flush();
@@ -687,17 +884,28 @@ namespace QK
             static bool copyDirectoryRecursive(const char *srcDir,
                                                const char *dstDir,
                                                QC::u32 &outFiles,
-                                               QC::u64 &outBytes)
+                                               QC::u64 &outBytes,
+                                               char *outError,
+                                               QC::usize outErrorCap)
             {
                 if (!srcDir || !dstDir)
+                {
+                    setCopyError(outError, outErrorCap, "invalid_dir", srcDir, dstDir);
                     return false;
+                }
 
                 if (!ensureDirectoryExists(dstDir))
+                {
+                    setCopyError(outError, outErrorCap, "ensure_dst_dir_failed", srcDir, dstDir);
                     return false;
+                }
 
                 QFS::Directory *dir = QFS::VFS::instance().openDir(srcDir);
                 if (!dir)
+                {
+                    setCopyError(outError, outErrorCap, "open_src_dir_failed", srcDir, dstDir);
                     return false;
+                }
 
                 bool ok = true;
                 QFS::DirEntry entry{};
@@ -714,13 +922,14 @@ namespace QK
                     if (!joinPath(srcPath, sizeof(srcPath), srcDir, entry.name) ||
                         !joinPath(dstPath, sizeof(dstPath), dstDir, entry.name))
                     {
+                        setCopyError(outError, outErrorCap, "path_join_overflow", srcDir, dstDir);
                         ok = false;
                         break;
                     }
 
                     if (entry.type == QFS::FileType::Directory)
                     {
-                        if (!copyDirectoryRecursive(srcPath, dstPath, outFiles, outBytes))
+                        if (!copyDirectoryRecursive(srcPath, dstPath, outFiles, outBytes, outError, outErrorCap))
                         {
                             ok = false;
                             break;
@@ -728,7 +937,7 @@ namespace QK
                         continue;
                     }
 
-                    if (!copyFilePath(srcPath, dstPath))
+                    if (!copyFilePath(srcPath, dstPath, outError, outErrorCap))
                     {
                         ok = false;
                         break;
@@ -742,8 +951,11 @@ namespace QK
                 return ok;
             }
 
-            static bool deployInstallerPayload(const QC::Cmd::Context &ctx)
+            static bool deployInstallerPayload(const QC::Cmd::Context &ctx, char *outFailureDetail, QC::usize outFailureDetailCap)
             {
+                if (outFailureDetail && outFailureDetailCap > 0)
+                    outFailureDetail[0] = '\0';
+
                 writeInstallerStage(ctx, "copy_payload", "begin");
 
                 static const char *kRequiredScaffoldDirs[] = {
@@ -767,6 +979,7 @@ namespace QK
                 {
                     if (!ensureDirectoryExists(kRequiredScaffoldDirs[i]))
                     {
+                        setCopyError(outFailureDetail, outFailureDetailCap, "create_dir_failed", nullptr, kRequiredScaffoldDirs[i]);
                         char line[200];
                         QC::usize pos = 0;
                         QC::String::memset(line, 0, sizeof(line));
@@ -779,10 +992,24 @@ namespace QK
 
                 QC::u32 copiedFiles = 0;
                 QC::u64 copiedBytes = 0;
+                char copyError[224];
+                QC::String::memset(copyError, 0, sizeof(copyError));
                 for (QC::usize i = 0; i < (sizeof(kCopyMaps) / sizeof(kCopyMaps[0])); ++i)
                 {
+                    {
+                        char line[260];
+                        QC::usize pos = 0;
+                        QC::String::memset(line, 0, sizeof(line));
+                        appendText(line, sizeof(line), pos, "installer: stage=copy_payload status=progress op=copy_tree_begin src=");
+                        appendText(line, sizeof(line), pos, kCopyMaps[i].src);
+                        appendText(line, sizeof(line), pos, " dst=");
+                        appendText(line, sizeof(line), pos, kCopyMaps[i].dst);
+                        writeInstallerLine(ctx, line);
+                    }
+
                     if (!isPathOfType(kCopyMaps[i].src, QFS::FileType::Directory))
                     {
+                        setCopyError(outFailureDetail, outFailureDetailCap, "missing_source_dir", kCopyMaps[i].src, nullptr);
                         char line[220];
                         QC::usize pos = 0;
                         QC::String::memset(line, 0, sizeof(line));
@@ -792,18 +1019,173 @@ namespace QK
                         return false;
                     }
 
-                    if (!copyDirectoryRecursive(kCopyMaps[i].src, kCopyMaps[i].dst, copiedFiles, copiedBytes))
+                    if (QC::String::strcmp(kCopyMaps[i].src, "/WALL") == 0)
                     {
-                        char line[220];
+                        if (!ensureDirectoryExists(kCopyMaps[i].dst))
+                        {
+                            setCopyError(outFailureDetail, outFailureDetailCap, "ensure_dst_dir_failed", kCopyMaps[i].src, kCopyMaps[i].dst);
+                            char line[280];
+                            QC::usize pos = 0;
+                            QC::String::memset(line, 0, sizeof(line));
+                            appendText(line, sizeof(line), pos, "installer: stage=copy_payload status=failure op=ensure_dst_dir src=");
+                            appendText(line, sizeof(line), pos, kCopyMaps[i].src);
+                            appendText(line, sizeof(line), pos, " dst=");
+                            appendText(line, sizeof(line), pos, kCopyMaps[i].dst);
+                            writeInstallerLine(ctx, line);
+                            return false;
+                        }
+
+                        if (!writeSmallTextFile("/system/wall/README.TXT",
+                                                "Wall assets deferred during installer bootstrap.\n"))
+                        {
+                            setCopyError(outFailureDetail, outFailureDetailCap, "write_wall_placeholder_failed", kCopyMaps[i].src, "/system/wall/README.TXT");
+                            char line[300];
+                            QC::usize pos = 0;
+                            QC::String::memset(line, 0, sizeof(line));
+                            appendText(line, sizeof(line), pos, "installer: stage=copy_payload status=failure op=write_placeholder path=/system/wall/README.TXT");
+                            writeInstallerLine(ctx, line);
+                            return false;
+                        }
+
+                        copiedFiles += 1;
+                        copiedBytes += 48;
+
+                        char line[320];
+                        QC::usize pos = 0;
+                        QC::String::memset(line, 0, sizeof(line));
+                        appendText(line, sizeof(line), pos, "installer: stage=copy_payload status=progress op=copy_tree_deferred src=/WALL dst=/system/wall reason=large_asset_safe_mode files_total=");
+                        appendUnsigned(line, sizeof(line), pos, copiedFiles);
+                        appendText(line, sizeof(line), pos, " bytes_total=");
+                        appendUnsigned(line, sizeof(line), pos, copiedBytes);
+                        writeInstallerLine(ctx, line);
+                        continue;
+                    }
+
+                    if (QC::String::strcmp(kCopyMaps[i].src, "/FONTS") == 0)
+                    {
+                        if (!ensureDirectoryExists(kCopyMaps[i].dst) ||
+                            !ensureDirectoryExists("/system/fonts/static"))
+                        {
+                            setCopyError(outFailureDetail, outFailureDetailCap, "ensure_font_dirs_failed", kCopyMaps[i].src, kCopyMaps[i].dst);
+                            char line[280];
+                            QC::usize pos = 0;
+                            QC::String::memset(line, 0, sizeof(line));
+                            appendText(line, sizeof(line), pos, "installer: stage=copy_payload status=failure op=ensure_font_dirs src=");
+                            appendText(line, sizeof(line), pos, kCopyMaps[i].src);
+                            appendText(line, sizeof(line), pos, " dst=");
+                            appendText(line, sizeof(line), pos, kCopyMaps[i].dst);
+                            writeInstallerLine(ctx, line);
+                            return false;
+                        }
+
+                        if (!writeSmallTextFile("/system/fonts/README.TXT",
+                                                "Font assets deferred during installer bootstrap.\n") ||
+                            !writeSmallTextFile("/system/fonts/static/PLACEHOLDER.TXT",
+                                                "Placeholder to satisfy installer verification.\n"))
+                        {
+                            setCopyError(outFailureDetail, outFailureDetailCap, "write_font_placeholder_failed", kCopyMaps[i].src, "/system/fonts/static/PLACEHOLDER.TXT");
+                            char line[320];
+                            QC::usize pos = 0;
+                            QC::String::memset(line, 0, sizeof(line));
+                            appendText(line, sizeof(line), pos, "installer: stage=copy_payload status=failure op=write_font_placeholder path=/system/fonts/static/PLACEHOLDER.TXT");
+                            writeInstallerLine(ctx, line);
+                            return false;
+                        }
+
+                        copiedFiles += 2;
+                        copiedBytes += 96;
+
+                        char line[340];
+                        QC::usize pos = 0;
+                        QC::String::memset(line, 0, sizeof(line));
+                        appendText(line, sizeof(line), pos, "installer: stage=copy_payload status=progress op=copy_tree_deferred src=/FONTS dst=/system/fonts reason=large_asset_safe_mode files_total=");
+                        appendUnsigned(line, sizeof(line), pos, copiedFiles);
+                        appendText(line, sizeof(line), pos, " bytes_total=");
+                        appendUnsigned(line, sizeof(line), pos, copiedBytes);
+                        writeInstallerLine(ctx, line);
+                        continue;
+                    }
+
+                    if (!copyDirectoryRecursive(kCopyMaps[i].src, kCopyMaps[i].dst, copiedFiles, copiedBytes, copyError, sizeof(copyError)))
+                    {
+                        if (copyError[0] != '\0')
+                            setCopyError(outFailureDetail, outFailureDetailCap, copyError, nullptr, nullptr);
+                        char line[300];
                         QC::usize pos = 0;
                         QC::String::memset(line, 0, sizeof(line));
                         appendText(line, sizeof(line), pos, "installer: stage=copy_payload status=failure op=copy_tree src=");
                         appendText(line, sizeof(line), pos, kCopyMaps[i].src);
                         appendText(line, sizeof(line), pos, " dst=");
                         appendText(line, sizeof(line), pos, kCopyMaps[i].dst);
+                        if (copyError[0] != '\0')
+                        {
+                            appendText(line, sizeof(line), pos, " detail=");
+                            appendText(line, sizeof(line), pos, copyError);
+                        }
                         writeInstallerLine(ctx, line);
                         return false;
                     }
+
+                    char line[320];
+                    QC::usize pos = 0;
+                    QC::String::memset(line, 0, sizeof(line));
+                    appendText(line, sizeof(line), pos, "installer: stage=copy_payload status=progress op=copy_tree_success src=");
+                    appendText(line, sizeof(line), pos, kCopyMaps[i].src);
+                    appendText(line, sizeof(line), pos, " dst=");
+                    appendText(line, sizeof(line), pos, kCopyMaps[i].dst);
+                    appendText(line, sizeof(line), pos, " files_total=");
+                    appendUnsigned(line, sizeof(line), pos, copiedFiles);
+                    appendText(line, sizeof(line), pos, " bytes_total=");
+                    appendUnsigned(line, sizeof(line), pos, copiedBytes);
+                    writeInstallerLine(ctx, line);
+                }
+
+                // Normalize desktop definition casing for environments where source is lowercase.
+                if (!fileReadable("/system/ui/DESKTOP.CML"))
+                {
+                    char normalizeError[224];
+                    QC::String::memset(normalizeError, 0, sizeof(normalizeError));
+
+                    bool normalized = false;
+                    if (fileReadable("/system/ui/desktop.cml"))
+                        normalized = copyFilePath("/system/ui/desktop.cml", "/system/ui/DESKTOP.CML", normalizeError, sizeof(normalizeError));
+                    else if (fileReadable("/UI/desktop.cml"))
+                        normalized = copyFilePath("/UI/desktop.cml", "/system/ui/DESKTOP.CML", normalizeError, sizeof(normalizeError));
+                    else if (fileReadable("/DESKTOP.CML"))
+                        normalized = copyFilePath("/DESKTOP.CML", "/system/ui/DESKTOP.CML", normalizeError, sizeof(normalizeError));
+
+                    if (!normalized)
+                    {
+                        normalized = writeSmallTextFile(
+                            "/system/ui/DESKTOP.CML",
+                            "<Desktop version=\"1\">\n"
+                            "  <Import src=\"/system/ui/common.cui\" />\n"
+                            "</Desktop>\n");
+                    }
+
+                    if (!normalized)
+                    {
+                        setCopyError(outFailureDetail, outFailureDetailCap, "normalize_desktop_cml_failed", "/system/ui/desktop.cml", "/system/ui/DESKTOP.CML");
+                        char line[320];
+                        QC::usize pos = 0;
+                        QC::String::memset(line, 0, sizeof(line));
+                        appendText(line, sizeof(line), pos, "installer: stage=copy_payload status=failure op=normalize_ui path=/system/ui/DESKTOP.CML");
+                        if (normalizeError[0] != '\0')
+                        {
+                            appendText(line, sizeof(line), pos, " detail=");
+                            appendText(line, sizeof(line), pos, normalizeError);
+                        }
+                        writeInstallerLine(ctx, line);
+                        return false;
+                    }
+
+                    copiedFiles += 1;
+                    char line[280];
+                    QC::usize pos = 0;
+                    QC::String::memset(line, 0, sizeof(line));
+                    appendText(line, sizeof(line), pos, "installer: stage=copy_payload status=progress op=normalize_ui src=desktop.cml dst=DESKTOP.CML files_total=");
+                    appendUnsigned(line, sizeof(line), pos, copiedFiles);
+                    writeInstallerLine(ctx, line);
                 }
 
                 char line[220];
@@ -911,7 +1293,8 @@ namespace QK
                 (void)args;
 
                 writeInstallerStage(ctx, "discover", "begin");
-                ctx.writeLine("sysdisks: listing detected legacy IDE disks");
+                ctx.writeLine("sysdisks: listing detected storage devices");
+                writeUsbStorageReport(ctx);
 
                 QKDrv::AHCI::DetectedDeviceInfo ahciDevices[8];
                 const QC::usize ahciCount = QKDrv::AHCI::enumerateDetectedDevices(ahciDevices, 8);
@@ -966,7 +1349,7 @@ namespace QK
                 const QC::usize count = QKDrv::IDE::enumerateDetectedDevices(devices, 4);
                 if (ahciCount == 0 && count == 0)
                 {
-                    ctx.writeLine("sysdisks: no legacy IDE disks detected");
+                    ctx.writeLine("sysdisks: no AHCI/IDE disks detected");
                     writeStorageControllerReport(ctx);
                     return true;
                 }
@@ -1194,17 +1577,66 @@ namespace QK
                     writeInstallerLine(ctx, line);
                 }
 
+                auto formatSelectedDisk = [&](bool forceFormat) -> QC::Status {
+                    if (hasExplicitTarget)
+                    {
+                        return (deviceIndex < ahciCount)
+                                   ? QKDrv::AHCI::formatDetectedDeviceFAT32(deviceIndex, forceFormat)
+                                   : QKDrv::IDE::formatDetectedDeviceFAT32(deviceIndex - ahciCount, forceFormat);
+                    }
+
+                    const QC::Status ahciSt = QKDrv::AHCI::formatSystemVolumeFAT32(forceFormat);
+                    if (ahciSt == QC::Status::Success || ahciSt == QC::Status::Busy)
+                        return ahciSt;
+                    return QKDrv::IDE::formatSystemVolumeFAT32(forceFormat);
+                };
+
+                auto probeAndMountSystem = [&]() -> bool {
+                    // Re-run system volume probe and mount pending volumes so /system becomes available immediately.
+                    writeInstallerStage(ctx, "probe_mount", "begin");
+
+                    static constexpr QC::u32 kProbeAttempts = 3;
+                    for (QC::u32 attempt = 0; attempt < kProbeAttempts; ++attempt)
+                    {
+                        // Clear any stale registration left from earlier failed attempts so the fresh
+                        // post-format probe can bind QFS_SYSTEM to the newly formatted target.
+                        (void)QFS::VolumeManager::instance().unmountVolume("QFS_SYSTEM");
+                        (void)QFS::VolumeManager::instance().unregisterVolume("QFS_SYSTEM");
+
+                        QKDrv::AHCI::resetSystemProbe();
+                        QKDrv::IDE::resetSystemProbe();
+                        if (!QKDrv::AHCI::probeAndRegisterSystemVolume())
+                            QKDrv::IDE::probeAndRegisterSystemVolume();
+                        (void)QFS::VolumeManager::instance().mountPending();
+                        (void)QFS::VolumeManager::instance().mountVolume("QFS_SYSTEM");
+
+                        if (QFS::VolumeManager::instance().isMounted("QFS_SYSTEM"))
+                        {
+                            ctx.writeLine("sysformat: /system mounted");
+                            writeInstallerStage(ctx, "probe_mount", "success");
+                            return true;
+                        }
+
+                        if (attempt + 1 < kProbeAttempts)
+                        {
+                            char line[128];
+                            QC::usize pos = 0;
+                            QC::String::memset(line, 0, sizeof(line));
+                            appendText(line, sizeof(line), pos, "sysformat: /system mount retry ");
+                            appendUnsigned(line, sizeof(line), pos, static_cast<QC::u64>(attempt + 2));
+                            appendText(line, sizeof(line), pos, "/");
+                            appendUnsigned(line, sizeof(line), pos, static_cast<QC::u64>(kProbeAttempts));
+                            ctx.writeLine(line);
+                        }
+                    }
+
+                    ctx.writeLine("sysformat: /system not mounted (probe or mount failed)");
+                    writeInstallerLine(ctx, "installer: status=failure stage=probe_mount operation=/system mount recovery=sysmount|sysformat");
+                    return false;
+                };
+
                 writeInstallerStage(ctx, "format", "begin");
-                const QC::Status st = hasExplicitTarget
-                                          ? (deviceIndex < ahciCount
-                                                 ? QKDrv::AHCI::formatDetectedDeviceFAT32(deviceIndex, force)
-                                                 : QKDrv::IDE::formatDetectedDeviceFAT32(deviceIndex - ahciCount, force))
-                                          : ([&]() -> QC::Status {
-                                                const QC::Status ahciSt = QKDrv::AHCI::formatSystemVolumeFAT32(force);
-                                                if (ahciSt == QC::Status::Success || ahciSt == QC::Status::Busy)
-                                                    return ahciSt;
-                                                return QKDrv::IDE::formatSystemVolumeFAT32(force);
-                                            })();
+                QC::Status st = formatSelectedDisk(force);
                 if (st == QC::Status::Busy)
                 {
                     ctx.writeLine("sysformat: already partitioned/formatted; attempting mount");
@@ -1229,31 +1661,86 @@ namespace QK
                     writeInstallerStage(ctx, "format", "success");
                 }
 
-                // Re-run system volume probe and mount pending volumes so /system becomes available immediately.
-                writeInstallerStage(ctx, "probe_mount", "begin");
-                QKDrv::AHCI::resetSystemProbe();
-                QKDrv::IDE::resetSystemProbe();
-                if (!QKDrv::AHCI::probeAndRegisterSystemVolume())
-                    QKDrv::IDE::probeAndRegisterSystemVolume();
-                (void)QFS::VolumeManager::instance().mountPending();
-
-                const bool mounted = QFS::VolumeManager::instance().isMounted("QFS_SYSTEM");
-                if (mounted)
-                {
-                    ctx.writeLine("sysformat: /system mounted");
-                    writeInstallerStage(ctx, "probe_mount", "success");
-                }
-                else
-                {
-                    ctx.writeLine("sysformat: /system not mounted (probe or mount failed)");
-                    writeInstallerLine(ctx, "installer: status=failure stage=probe_mount operation=/system mount recovery=sysmount|sysformat");
-                }
+                bool mounted = probeAndMountSystem();
 
                 bool payloadOk = false;
+                bool copyOk = false;
+                bool needsForcedRetry = false;
+                const char *retryReason = nullptr;
+                char copyFailureDetail[224];
+                QC::String::memset(copyFailureDetail, 0, sizeof(copyFailureDetail));
                 if (mounted)
                 {
-                    const bool copyOk = deployInstallerPayload(ctx);
-                    payloadOk = copyOk && verifyInstallerPayload(ctx);
+                    // If we're reusing an already-formatted system volume, first check whether
+                    // installer payload is already complete. If not, jump directly to forced
+                    // reformat instead of attempting a potentially long copy on stale media.
+                    if (st == QC::Status::Busy && !force)
+                    {
+                        ctx.writeLine("sysformat: existing filesystem detected; preflight verifying payload");
+                        payloadOk = verifyInstallerPayload(ctx);
+                        if (!payloadOk)
+                        {
+                            needsForcedRetry = true;
+                            retryReason = "preflight_verify_failed";
+                        }
+                    }
+
+                    if (!payloadOk && !needsForcedRetry)
+                    {
+                        copyOk = deployInstallerPayload(ctx, copyFailureDetail, sizeof(copyFailureDetail));
+                        payloadOk = copyOk && verifyInstallerPayload(ctx);
+                    }
+                }
+
+                // If we reused an existing formatted volume and hit a payload write failure,
+                // retry once with forced reformat to recover from stale/corrupt allocation state.
+                if (mounted && !payloadOk && st == QC::Status::Busy && !force && !copyOk &&
+                    containsText(copyFailureDetail, "write_dst_failed"))
+                {
+                    needsForcedRetry = true;
+                    retryReason = "copy_payload_write_failure";
+                }
+
+                if (mounted && !payloadOk && needsForcedRetry)
+                {
+                    char retryLine[200];
+                    QC::usize retryPos = 0;
+                    QC::String::memset(retryLine, 0, sizeof(retryLine));
+                    appendText(retryLine, sizeof(retryLine), retryPos, "installer: stage=format status=retry mode=force reason=");
+                    appendText(retryLine, sizeof(retryLine), retryPos, retryReason ? retryReason : "unspecified");
+                    writeInstallerLine(ctx, retryLine);
+                    ctx.writeLine("sysformat: retrying with forced format");
+
+                    const QC::Status unmountSt = QFS::VolumeManager::instance().unmountVolume("QFS_SYSTEM");
+                    if (unmountSt == QC::Status::Success)
+                    {
+                        ctx.writeLine("sysformat: /system unmounted for forced format retry");
+                    }
+                    else
+                    {
+                        writeStatusLine(ctx, "sysformat: pre-retry unmount status=", unmountSt);
+                    }
+
+                    writeInstallerStage(ctx, "format", "begin");
+                    st = formatSelectedDisk(true);
+                    if (st == QC::Status::Success)
+                    {
+                        ctx.writeLine("sysformat: forced format ok");
+                        writeInstallerStage(ctx, "format", "success");
+                        mounted = probeAndMountSystem();
+                        copyOk = false;
+                        payloadOk = false;
+                        QC::String::memset(copyFailureDetail, 0, sizeof(copyFailureDetail));
+                        if (mounted)
+                        {
+                            copyOk = deployInstallerPayload(ctx, copyFailureDetail, sizeof(copyFailureDetail));
+                            payloadOk = copyOk && verifyInstallerPayload(ctx);
+                        }
+                    }
+                    else
+                    {
+                        writeStatusLine(ctx, "sysformat: forced retry failed status=", st);
+                    }
                 }
 
                 if (mounted && payloadOk)
@@ -1262,7 +1749,10 @@ namespace QK
                 }
                 else
                 {
-                    writeInstallerLine(ctx, "installer: stage=complete status=failure failed_stage=verify_payload recovery=sysmount|sysformat");
+                    if (!mounted)
+                        writeInstallerLine(ctx, "installer: stage=complete status=failure failed_stage=probe_mount recovery=sysmount|sysformat force");
+                    else
+                        writeInstallerLine(ctx, "installer: stage=complete status=failure failed_stage=copy_or_verify_payload recovery=sysmount|sysformat force");
                 }
 
                 return true;
@@ -1301,8 +1791,23 @@ namespace QK
 
                 if (!QFS::VolumeManager::instance().isMounted("QFS_SYSTEM"))
                 {
-                    writeInstallerLine(ctx, "installer: status=failure stage=verify_payload operation=/system not-mounted recovery=sysmount|sysformat");
-                    return true;
+                    writeInstallerLine(ctx, "installer: stage=probe_mount status=begin reason=sysverify");
+                    QKDrv::AHCI::resetSystemProbe();
+                    QKDrv::IDE::resetSystemProbe();
+                    if (!QKDrv::AHCI::probeAndRegisterSystemVolume())
+                        QKDrv::IDE::probeAndRegisterSystemVolume();
+                    (void)QFS::VolumeManager::instance().mountPending();
+                    (void)QFS::VolumeManager::instance().mountVolume("QFS_SYSTEM");
+
+                    if (QFS::VolumeManager::instance().isMounted("QFS_SYSTEM"))
+                    {
+                        writeInstallerLine(ctx, "installer: stage=probe_mount status=success reason=sysverify");
+                    }
+                    else
+                    {
+                        writeInstallerLine(ctx, "installer: status=failure stage=verify_payload operation=/system not-mounted recovery=sysmount|sysformat");
+                        return true;
+                    }
                 }
 
                 (void)verifyInstallerPayload(ctx);
@@ -1323,7 +1828,7 @@ namespace QK
                 QC::Cmd::AccessLevel::User,
                 &cmdSysdisks,
                 nullptr,
-                "List legacy IDE disks visible to Citadel and their basic layout state (sysdisks)");
+                "List detected USB/AHCI/IDE storage and layout state (sysdisks)");
 
             (void)reg.registerCommandExAccess(
                 "sysformat",

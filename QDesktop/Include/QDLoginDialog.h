@@ -1,6 +1,6 @@
 #pragma once
 
-// QDesktop Login Dialog - simple PIN unlock screen
+// QDesktop Login Dialog - basic username/password sign-in screen
 // Namespace: QD
 
 #include "QCTypes.h"
@@ -45,8 +45,10 @@ namespace QD
         QW::Controls::Panel *m_root;
         QW::Controls::Label *m_title;
         QW::Controls::Label *m_hint;
-        QW::Controls::Label *m_pinLabel;
-        QW::Controls::TextBox *m_pinBox;
+        QW::Controls::Label *m_userLabel;
+        QW::Controls::TextBox *m_userBox;
+        QW::Controls::Label *m_passwordLabel;
+        QW::Controls::TextBox *m_passwordBox;
         QW::Controls::Label *m_status;
         QW::Controls::Button *m_unlockButton;
         QW::Controls::Button *m_cancelButton;

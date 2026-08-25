@@ -1,6 +1,8 @@
 #include "QKDebugSerial.h"
 
 #include "QCBuiltins.h"
+#include "QFSFile.h"
+#include "QFSVFS.h"
 
 namespace
 {
@@ -130,5 +132,43 @@ namespace QK::Debug::Serial
     bool CaptureTruncated()
     {
         return GCaptureTruncated;
+    }
+
+    bool SaveCaptureToFile(const char *path)
+    {
+        if (!path || !*path)
+            return false;
+
+        auto &vfs = QFS::VFS::instance();
+        QFS::File *file = vfs.open(path, QFS::OpenMode::Write | QFS::OpenMode::Create | QFS::OpenMode::Truncate);
+        if (!file)
+            return false;
+
+        const char *capture = CaptureData();
+        const QC::usize captureLen = CaptureSize();
+        bool wroteAll = true;
+        if (capture && captureLen > 0)
+        {
+            QC::usize offset = 0;
+            while (offset < captureLen)
+            {
+                const QC::usize chunk = (captureLen - offset > 4096u) ? 4096u : (captureLen - offset);
+                const QC::isize written = file->write(capture + offset, chunk);
+                if (written <= 0)
+                {
+                    wroteAll = false;
+                    break;
+                }
+                offset += static_cast<QC::usize>(written);
+            }
+        }
+
+        if (wroteAll)
+        {
+            (void)file->sync();
+        }
+
+        vfs.close(file);
+        return wroteAll;
     }
 }

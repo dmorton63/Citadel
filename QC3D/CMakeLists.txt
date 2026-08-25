@@ -11,5 +11,5 @@ add_library(QC3D STATIC
 )
 
 target_include_directories(QC3D PUBLIC Include)
-target_link_libraries(QC3D PUBLIC QCommon)
+target_link_libraries(QC3D PUBLIC QCommon QGraphics)
 target_compile_options(QC3D PRIVATE ${KERNEL_COMPILE_FLAGS})

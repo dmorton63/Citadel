@@ -1266,7 +1266,7 @@ namespace QK
             g_savetermLastSavedLen = 0;
             g_savetermHasBaseline = false;
             QC::String::memset(g_savetermLastPath, 0, sizeof(g_savetermLastPath));
-            g_inputEnabled = true;
+            g_inputEnabled = false;
             g_role = QC::Cmd::AccessLevel::User;
             g_warnedAdminEnable = false;
             g_warnedSystemEnable = false;

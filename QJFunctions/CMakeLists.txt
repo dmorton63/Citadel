@@ -3,6 +3,7 @@ add_library(QJFunctions STATIC
     Src/QJFunctionRegistry.cpp
     Src/QJFExecutor.cpp
     Src/QJFJitAllocator.cpp
+    Src/QJFCitadelSyscalls.cpp
 )
 
 target_include_directories(QJFunctions PUBLIC Include)

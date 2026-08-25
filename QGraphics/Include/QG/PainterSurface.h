@@ -69,6 +69,11 @@ namespace QG
 
         void clear(QC::Color color) override;
 
+        void fillRoundedRect(const QC::Rect &rect, QC::u32 radius, QC::Color color) override;
+        void drawRoundedRect(const QC::Rect &rect, QC::u32 radius, QC::Color color) override;
+        void drawCircle(QC::i32 cx, QC::i32 cy, QC::u32 radius, QC::Color color) override;
+        void fillCircle(QC::i32 cx, QC::i32 cy, QC::u32 radius, QC::Color color) override;
+
     private:
         bool inClip(QC::i32 x, QC::i32 y) const;
         QC::i32 textPixelScale() const;

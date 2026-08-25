@@ -17,6 +17,10 @@ jobs:
         with:
           submodules: recursive
 
+      - name: Verify syscall ABI registry consistency
+        run: |
+          python3 tools/check_syscall_registry_consistency.py
+
       - name: Install dependencies
         run: |
           export DEBIAN_FRONTEND=noninteractive
@@ -42,39 +46,38 @@ jobs:
 
       - name: Stage boot artifacts for signing
         run: |
-          # CMake builds the kernel ELF; Limine EFI and boot.json live in the
-          # repo tree. Copy them into $BUILD_DIR so the signing step has a
-          # single, predictable location to search.
-          STAGE="$BUILD_DIR/signing-stage"
-          mkdir -p "$STAGE"
+          STAGE_DIR="$BUILD_DIR/secureboot_stage"
+          mkdir -p "$STAGE_DIR"
 
-          # Limine UEFI binary (x86-64)
-          [[ -f "limine/BOOTX64.EFI"        ]] && cp "limine/BOOTX64.EFI"        "$STAGE/Limine.efi"
-          [[ -f "iso/EFI/BOOT/BOOTX64.EFI"  ]] && cp "iso/EFI/BOOT/BOOTX64.EFI" "$STAGE/Limine.efi"
+          cp limine/BOOTX64.EFI "$STAGE_DIR/Limine.efi"
 
-          # Kernel image produced by CMake
-          [[ -f "$BUILD_DIR/kernel/citadel.elf" ]] && cp "$BUILD_DIR/kernel/citadel.elf" "$STAGE/vmlinuz-citadel"
-          [[ -f "iso/boot/citadel.elf"          ]] && cp "iso/boot/citadel.elf"           "$STAGE/vmlinuz-citadel"
+          if [[ -f "$BUILD_DIR/citadel.bin" ]]; then
+            cp "$BUILD_DIR/citadel.bin" "$STAGE_DIR/BootGate"
+          elif [[ -f "$BUILD_DIR/kernel/citadel.bin" ]]; then
+            cp "$BUILD_DIR/kernel/citadel.bin" "$STAGE_DIR/BootGate"
+          else
+            echo "Missing kernel binary output for BootGate staging"
+            exit 1
+          fi
 
-          # Boot policy config
-          [[ -f "boot.json" ]] && cp "boot.json" "$STAGE/boot.json"
+          if [[ -f "$BUILD_DIR/kernel/citadel.elf" ]]; then
+            cp "$BUILD_DIR/kernel/citadel.elf" "$STAGE_DIR/vmlinuz"
+          else
+            echo "Missing kernel ELF output for vmlinuz staging"
+            exit 1
+          fi
 
-          echo "Staged signing artifacts:"
-          ls -lh "$STAGE"
+          if [[ -f "boot.json" ]]; then
+            cp boot.json "$STAGE_DIR/boot.json"
+          elif [[ -f "kernel/Boot/Config/boot.json" ]]; then
+            cp kernel/Boot/Config/boot.json "$STAGE_DIR/boot.json"
+          else
+            echo "Missing boot.json source for staging"
+            exit 1
+          fi
 
       - name: Sign artifacts and manifest
         run: |
-          if [[ ! -f "$BUILD_DIR/BootGate" ]]; then
-            if [[ -f "$BUILD_DIR/citadel.bin" ]]; then
-              cp "$BUILD_DIR/citadel.bin" "$BUILD_DIR/BootGate"
-            elif [[ -f "$BUILD_DIR/kernel/citadel.bin" ]]; then
-              cp "$BUILD_DIR/kernel/citadel.bin" "$BUILD_DIR/BootGate"
-            else
-              echo "Missing BootGate source: neither $BUILD_DIR/citadel.bin nor $BUILD_DIR/kernel/citadel.bin exists"
-              exit 1
-            fi
-          fi
-
           mapfile -d '' ARTIFACTS < <(
             find "$BUILD_DIR/signing-stage" -type f \( \
               -iname "*.efi" -o -iname "bootgate" -o -iname "vmlinuz*" -o -iname "boot.json" -o -name "*.ko" \

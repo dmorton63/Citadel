@@ -1,5 +1,6 @@
 add_library(QCQL STATIC
     Src/QCQLEngine.cpp
+    Src/QCQLRuntime.cpp
 )
 
 target_include_directories(QCQL PUBLIC Include)

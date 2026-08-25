@@ -14,6 +14,7 @@
 #include "QKStorageRegistry.h"
 
 #include "IDE/QKDrvIDE.h"
+#include "Debug/Serial/QKDebugSerial.h"
 
 namespace QK::Boot::Ramdisk
 {
@@ -123,7 +124,13 @@ namespace QK::Boot::Ramdisk
 
         static void ApplyStartupConfigSideEffects(FLogFn Log)
         {
-            QKDrv::IDE::setSharedProbeEnabled(QK::Boot::Config::GetIdeSharedProbeEnabled());
+            bool enableIdeSharedProbe = QK::Boot::Config::GetIdeSharedProbeEnabled();
+            if (QK::Boot::Config::GetPreferUsbSharedVolume())
+            {
+                enableIdeSharedProbe = false;
+                LogStr(Log, "SHARED_SOURCE=USB: disabling IDE shared probe for this boot\r\n");
+            }
+            QKDrv::IDE::setSharedProbeEnabled(enableIdeSharedProbe);
 
             auto &securityCenter = QK::SecurityCenter::instance();
             const auto startupScMode = QK::Boot::Config::GetSecurityCenterMode();
@@ -145,6 +152,10 @@ namespace QK::Boot::Ramdisk
             const QC::Status sharedSt = vfs->createDir("/shared");
             if (sharedSt == QC::Status::Success)
                 LogStr(Log, "Ramdisk: created /shared\r\n");
+
+            const QC::Status dumpSt = vfs->createDir("/dump");
+            if (dumpSt == QC::Status::Success)
+                LogStr(Log, "Ramdisk: created /dump\r\n");
         }
 
         static bool MountRamdiskVolume(QFS::VFS *vfs, QC::u64 ModuleRequest[], FLogFn Log, const InitOptions &Options)

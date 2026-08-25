@@ -72,11 +72,40 @@ namespace QW
 
     void Window::setBounds(const Rect &bounds)
     {
+        const Rect oldBounds = m_bounds;
+        const bool moved = (bounds.x != oldBounds.x) || (bounds.y != oldBounds.y);
         const bool sizeChanged = (bounds.width != m_bounds.width) ||
                                  (bounds.height != m_bounds.height);
         m_bounds = bounds;
+
+        if ((moved || sizeChanged) && isVisible())
+        {
+            // Include decoration/shadow fringe so old window footprints are fully cleaned.
+            static constexpr QC::i32 kLeftExpand = 1;
+            static constexpr QC::i32 kTopExpand = 1;
+            static constexpr QC::i32 kRightExpand = 7;
+            static constexpr QC::i32 kBottomExpand = 7;
+
+            const Rect oldDecor = {
+                oldBounds.x - kLeftExpand,
+                oldBounds.y - kTopExpand,
+                oldBounds.width + static_cast<QC::u32>(kLeftExpand + kRightExpand),
+                oldBounds.height + static_cast<QC::u32>(kTopExpand + kBottomExpand)};
+
+            const Rect newDecor = {
+                m_bounds.x - kLeftExpand,
+                m_bounds.y - kTopExpand,
+                m_bounds.width + static_cast<QC::u32>(kLeftExpand + kRightExpand),
+                m_bounds.height + static_cast<QC::u32>(kTopExpand + kBottomExpand)};
+
+            WindowManager::instance().invalidate(oldDecor);
+            WindowManager::instance().invalidate(newDecor);
+        }
+
         if (sizeChanged)
             onResize(bounds.width, bounds.height);
+        else if (moved)
+            invalidate();
     }
 
     bool Window::isVisible() const

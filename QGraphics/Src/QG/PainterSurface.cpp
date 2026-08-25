@@ -1298,6 +1298,153 @@ namespace QG
         }
     }
 
+    // Helper: set one pixel with clip check.
+    static inline void ps_setPixel(QC::u32 *pixels, QC::u32 pitch,
+                                    QC::u32 w, QC::u32 h,
+                                    QC::i32 x, QC::i32 y, QC::u32 v)
+    {
+        if (x >= 0 && y >= 0 && static_cast<QC::u32>(x) < w && static_cast<QC::u32>(y) < h)
+            pixels[y * pitch + x] = v;
+    }
+
+    void PainterSurface::fillRoundedRect(const QC::Rect &rect, QC::u32 radius, QC::Color color)
+    {
+        if (!m_pixels || rect.width == 0 || rect.height == 0)
+            return;
+        const QC::i32 ox = m_origin.x;
+        const QC::i32 oy = m_origin.y;
+        const QC::i32 x0 = rect.x + ox;
+        const QC::i32 y0 = rect.y + oy;
+        const QC::i32 x1 = x0 + static_cast<QC::i32>(rect.width)  - 1;
+        const QC::i32 y1 = y0 + static_cast<QC::i32>(rect.height) - 1;
+        const QC::u32 r  = radius < rect.width / 2 ? radius : rect.width / 2;
+        const QC::u32 r2 = r < rect.height / 2 ? r : rect.height / 2;
+        const QC::u32 cr = r < r2 ? r : r2;
+
+        for (QC::i32 py = y0; py <= y1; ++py)
+        {
+            QC::i32 rowStart = x0;
+            QC::i32 rowEnd   = x1;
+
+            // Corner clipping: find span start/end for this row.
+            QC::i32 dy0 = py - y0;
+            QC::i32 dy1 = y1 - py;
+            QC::i32 dy = dy0 < dy1 ? dy0 : dy1;
+
+            if (static_cast<QC::u32>(dy) < cr)
+            {
+                // Find how many corner pixels to trim.
+                QC::i32 trim = static_cast<QC::i32>(cr);
+                for (QC::i32 t = 0; t < static_cast<QC::i32>(cr); ++t)
+                {
+                    const QC::i32 d2 = (static_cast<QC::i32>(cr) - 1 - t) * (static_cast<QC::i32>(cr) - 1 - t) +
+                                       (dy - static_cast<QC::i32>(cr) + 1) * (dy - static_cast<QC::i32>(cr) + 1);
+                    if (d2 <= static_cast<QC::i32>(cr * cr))
+                    {
+                        trim = t;
+                        break;
+                    }
+                }
+                rowStart = x0 + trim;
+                rowEnd   = x1 - trim;
+            }
+
+            for (QC::i32 px = rowStart; px <= rowEnd; ++px)
+                ps_setPixel(m_pixels, m_pitch, m_width, m_height, px, py, color.value);
+        }
+    }
+
+    void PainterSurface::drawRoundedRect(const QC::Rect &rect, QC::u32 radius, QC::Color color)
+    {
+        if (!m_pixels || rect.width == 0 || rect.height == 0)
+            return;
+        // Draw top/bottom edges and left/right edges, skipping corners.
+        const QC::i32 ox = m_origin.x;
+        const QC::i32 oy = m_origin.y;
+        const QC::i32 x0 = rect.x + ox;
+        const QC::i32 y0 = rect.y + oy;
+        const QC::i32 x1 = x0 + static_cast<QC::i32>(rect.width)  - 1;
+        const QC::i32 y1 = y0 + static_cast<QC::i32>(rect.height) - 1;
+        const QC::i32 cr = static_cast<QC::i32>(radius < rect.width / 2 ? radius : rect.width / 2);
+
+        for (QC::i32 px = x0 + cr; px <= x1 - cr; ++px)
+        {
+            ps_setPixel(m_pixels, m_pitch, m_width, m_height, px, y0, color.value);
+            ps_setPixel(m_pixels, m_pitch, m_width, m_height, px, y1, color.value);
+        }
+        for (QC::i32 py = y0 + cr; py <= y1 - cr; ++py)
+        {
+            ps_setPixel(m_pixels, m_pitch, m_width, m_height, x0, py, color.value);
+            ps_setPixel(m_pixels, m_pitch, m_width, m_height, x1, py, color.value);
+        }
+        // Corners using midpoint circle for each of 4 quadrants.
+        auto arcPixels = [&](QC::i32 cx, QC::i32 cy, bool flipX, bool flipY)
+        {
+            QC::i32 x = static_cast<QC::i32>(radius), y = 0, err = 0;
+            while (x >= y)
+            {
+                const QC::i32 px2 = flipX ? cx - x : cx + x;
+                const QC::i32 py2 = flipY ? cy - y : cy + y;
+                const QC::i32 px3 = flipX ? cx - y : cx + y;
+                const QC::i32 py3 = flipY ? cy - x : cy + x;
+                ps_setPixel(m_pixels, m_pitch, m_width, m_height, px2, py2, color.value);
+                ps_setPixel(m_pixels, m_pitch, m_width, m_height, px3, py3, color.value);
+                if (err <= 0) { ++y; err += 2*y + 1; }
+                else          { --x; err -= 2*x + 1; }
+            }
+        };
+        arcPixels(x0 + cr, y0 + cr, true,  true);
+        arcPixels(x1 - cr, y0 + cr, false, true);
+        arcPixels(x0 + cr, y1 - cr, true,  false);
+        arcPixels(x1 - cr, y1 - cr, false, false);
+    }
+
+    void PainterSurface::drawCircle(QC::i32 cx, QC::i32 cy, QC::u32 radius, QC::Color color)
+    {
+        if (!m_pixels)
+            return;
+        const QC::i32 ocx = cx + m_origin.x;
+        const QC::i32 ocy = cy + m_origin.y;
+        QC::i32 x = static_cast<QC::i32>(radius), y = 0, err = 0;
+        while (x >= y)
+        {
+            ps_setPixel(m_pixels, m_pitch, m_width, m_height, ocx + x, ocy + y, color.value);
+            ps_setPixel(m_pixels, m_pitch, m_width, m_height, ocx + y, ocy + x, color.value);
+            ps_setPixel(m_pixels, m_pitch, m_width, m_height, ocx - y, ocy + x, color.value);
+            ps_setPixel(m_pixels, m_pitch, m_width, m_height, ocx - x, ocy + y, color.value);
+            ps_setPixel(m_pixels, m_pitch, m_width, m_height, ocx - x, ocy - y, color.value);
+            ps_setPixel(m_pixels, m_pitch, m_width, m_height, ocx - y, ocy - x, color.value);
+            ps_setPixel(m_pixels, m_pitch, m_width, m_height, ocx + y, ocy - x, color.value);
+            ps_setPixel(m_pixels, m_pitch, m_width, m_height, ocx + x, ocy - y, color.value);
+            if (err <= 0) { ++y; err += 2*y + 1; }
+            else          { --x; err -= 2*x + 1; }
+        }
+    }
+
+    void PainterSurface::fillCircle(QC::i32 cx, QC::i32 cy, QC::u32 radius, QC::Color color)
+    {
+        if (!m_pixels || radius == 0)
+            return;
+        const QC::i32 ocx = cx + m_origin.x;
+        const QC::i32 ocy = cy + m_origin.y;
+        QC::i32 x = static_cast<QC::i32>(radius), y = 0, err = 0;
+        while (x >= y)
+        {
+            for (QC::i32 px = ocx - x; px <= ocx + x; ++px)
+            {
+                ps_setPixel(m_pixels, m_pitch, m_width, m_height, px, ocy + y, color.value);
+                ps_setPixel(m_pixels, m_pitch, m_width, m_height, px, ocy - y, color.value);
+            }
+            for (QC::i32 px = ocx - y; px <= ocx + y; ++px)
+            {
+                ps_setPixel(m_pixels, m_pitch, m_width, m_height, px, ocy + x, color.value);
+                ps_setPixel(m_pixels, m_pitch, m_width, m_height, px, ocy - x, color.value);
+            }
+            if (err <= 0) { ++y; err += 2*y + 1; }
+            else          { --x; err -= 2*x + 1; }
+        }
+    }
+
     bool PainterSurface::inClip(QC::i32 x, QC::i32 y) const
     {
         if (!m_hasClip)

@@ -9,8 +9,16 @@
 #include "QKInputSettings.h"
 #include "QFSFAT32.h"
 #include "QFSFATProbe.h"
+#include "QFSVFS.h"
 #include "QKStorageRegistry.h"
 #include "PS2/QKDrvPS2Keyboard.h"
+
+namespace QK::Boot::Config
+{
+    bool GetPreferUsbSharedVolume();
+    bool GetSharedUsbVolumeAutoSelect();
+    QC::u32 GetSharedUsbVolumeIndex();
+}
 
 // Early page allocator (defined in QKMain.cpp, returns physical address)
 extern "C" QC::PhysAddr earlyAllocatePage();
@@ -30,6 +38,37 @@ namespace QKDrv
             QC::PhysAddr phys;
             void *virt;
         };
+
+        static bool mountPathHasBootMarkers(const char *mountPath)
+        {
+            if (!mountPath || mountPath[0] == '\0')
+                return false;
+
+            const char *markers[] = {
+                "/BOOT.JSN",
+                "/BOOT.SIG",
+                "/STARTUP.CFG",
+            };
+
+            for (QC::usize i = 0; i < (sizeof(markers) / sizeof(markers[0])); ++i)
+            {
+                char candidate[160];
+                QC::String::memset(candidate, 0, sizeof(candidate));
+                QC::String::strncpy(candidate, mountPath, sizeof(candidate) - 1);
+
+                const QC::usize used = QC::String::strlen(candidate);
+                if (used + QC::String::strlen(markers[i]) >= sizeof(candidate))
+                    continue;
+
+                QC::String::strncpy(candidate + used, markers[i], sizeof(candidate) - 1 - used);
+
+                QFS::FileInfo info{};
+                if (QFS::VFS::instance().stat(candidate, &info) == QC::Status::Success)
+                    return true;
+            }
+
+            return false;
+        }
 
         // Helper: allocate a DMA page, returning both physical and virtual addresses
         static DMAPage allocateDMAPage()
@@ -60,6 +99,8 @@ namespace QKDrv
         constexpr QC::u8 USB_PROTOCOL_KEYBOARD = 0x01;
         constexpr QC::u8 USB_PROTOCOL_MOUSE = 0x02;
         constexpr QC::u8 USB_REQ_GET_MAX_LUN = 0xFE;
+        constexpr QC::u8 USB_REQ_BULK_ONLY_RESET = 0xFF;
+        constexpr QC::u8 USB_REQ_TYPE_CLASS_INTERFACE_OUT = 0x21;
 
         constexpr QC::u32 USB_MSC_CBW_SIGNATURE = 0x43425355u;
         constexpr QC::u32 USB_MSC_CSW_SIGNATURE = 0x53425355u;
@@ -846,7 +887,7 @@ namespace QKDrv
         }
 
         XHCIControllerImpl::XHCIControllerImpl(QArch::PCIDevice *pciDevice)
-            : m_pciDevice(pciDevice), m_mmioBase(0), m_capRegs(nullptr), m_opRegs(nullptr), m_doorbells(nullptr), m_portRegs(nullptr), m_interrupter(nullptr), m_portCount(0), m_maxSlots(0), m_maxIntrs(0), m_pageSize(4096), m_contextSize(32), m_dcbaa(nullptr), m_commandRing(nullptr), m_commandEnqueue(0), m_commandCycle(true), m_eventRing(nullptr), m_erst(nullptr), m_eventDequeue(0), m_eventCycle(true), m_inputContext(nullptr), m_deviceCount(0), m_tabletSlot(0), m_mouseSlot(0), m_keyboardSlot(0), m_commandPending(false), m_lastCompletionCode(CompletionCode::Invalid), m_lastSlotId(0), m_transferPending(false), m_transferPendingSlot(0), m_transferPendingEndpoint(0), m_transferCompletionCode(CompletionCode::Invalid), m_mouseCallback(nullptr), m_screenWidth(1024), m_screenHeight(768), m_tabletDriver(nullptr), m_mouseDriver(nullptr), m_keyboardDriver(nullptr), m_storageIoBuffer(nullptr), m_storageIoBufferPhys(0), m_bulkTagCounter(1), m_usbStorageCount(0)
+            : m_pciDevice(pciDevice), m_mmioBase(0), m_capRegs(nullptr), m_opRegs(nullptr), m_doorbells(nullptr), m_portRegs(nullptr), m_interrupter(nullptr), m_portCount(0), m_maxSlots(0), m_maxIntrs(0), m_pageSize(4096), m_contextSize(32), m_dcbaa(nullptr), m_commandRing(nullptr), m_commandEnqueue(0), m_commandCycle(true), m_eventRing(nullptr), m_erst(nullptr), m_eventDequeue(0), m_eventCycle(true), m_inputContext(nullptr), m_deviceCount(0), m_tabletSlot(0), m_mouseSlot(0), m_keyboardSlot(0), m_commandPending(false), m_lastCompletionCode(CompletionCode::Invalid), m_lastSlotId(0), m_transferPending(false), m_transferPendingSlot(0), m_transferPendingEndpoint(0), m_transferCompletionCode(CompletionCode::Invalid), m_mouseCallback(nullptr), m_screenWidth(1024), m_screenHeight(768), m_tabletDriver(nullptr), m_mouseDriver(nullptr), m_keyboardDriver(nullptr), m_storageIoBuffer(nullptr), m_storageIoBufferPhys(0), m_bulkTagCounter(1), m_usbStorageCount(0), m_sharedUsbAliasRegistered(false)
         {
             QC_LOG_INFO("xHCI", "Constructor body entered");
 
@@ -2419,11 +2460,17 @@ namespace QKDrv
         {
             USBConfigDescriptor *config = reinterpret_cast<USBConfigDescriptor *>(const_cast<QC::u8 *>(configData));
             if (config->bDescriptorType != USB_DESC_CONFIG)
+            {
+                QC_LOG_WARN("xHCI", "Mass-storage probe skipped: config descriptor type=%02x on slot %u",
+                            config->bDescriptorType, slotId);
                 return false;
+            }
 
             QC::u16 totalLen = config->wTotalLength;
             if (totalLen > length)
                 totalLen = length;
+
+            QC_LOG_INFO("xHCI", "Scanning config for mass-storage on slot %u (totalLen=%u)", slotId, totalLen);
 
             QC::u16 offset = config->bLength;
             USBInterfaceDescriptor *mscIface = nullptr;
@@ -2440,6 +2487,9 @@ namespace QKDrv
                 if (descType == USB_DESC_INTERFACE)
                 {
                     USBInterfaceDescriptor *iface = reinterpret_cast<USBInterfaceDescriptor *>(const_cast<QC::u8 *>(&configData[offset]));
+                    QC_LOG_INFO("xHCI", "Interface desc on slot %u: number=%u class=%02x subclass=%02x protocol=%02x",
+                                slotId, iface->bInterfaceNumber, iface->bInterfaceClass,
+                                iface->bInterfaceSubClass, iface->bInterfaceProtocol);
                     if (iface->bInterfaceClass == USB_CLASS_MASS_STORAGE &&
                         iface->bInterfaceSubClass == USB_SUBCLASS_SCSI &&
                         iface->bInterfaceProtocol == USB_PROTOCOL_BULK_ONLY)
@@ -2447,10 +2497,19 @@ namespace QKDrv
                         mscIface = iface;
                         bulkInEp = nullptr;
                         bulkOutEp = nullptr;
-                        QC_LOG_INFO("xHCI", "Found USB mass-storage interface %u on slot %u", iface->bInterfaceNumber, slotId);
+                        QC_LOG_INFO("xHCI", "Matched USB mass-storage interface %u on slot %u",
+                                    iface->bInterfaceNumber, slotId);
                     }
                     else
                     {
+                        if (iface->bInterfaceClass == USB_CLASS_MASS_STORAGE &&
+                            iface->bInterfaceSubClass == USB_SUBCLASS_SCSI)
+                        {
+                            QC_LOG_WARN("xHCI", "Mass-storage interface %u on slot %u uses unsupported protocol %02x (expected BOT 50)",
+                                        iface->bInterfaceNumber,
+                                        slotId,
+                                        iface->bInterfaceProtocol);
+                        }
                         mscIface = nullptr;
                         bulkInEp = nullptr;
                         bulkOutEp = nullptr;
@@ -2459,6 +2518,8 @@ namespace QKDrv
                 else if (descType == USB_DESC_ENDPOINT && mscIface)
                 {
                     USBEndpointDescriptor *ep = reinterpret_cast<USBEndpointDescriptor *>(const_cast<QC::u8 *>(&configData[offset]));
+                    QC_LOG_INFO("xHCI", "Endpoint desc on slot %u: addr=%02x attrs=%02x",
+                                slotId, ep->bEndpointAddress, ep->bmAttributes);
                     if ((ep->bmAttributes & 0x03) == 0x02)
                     {
                         if (ep->bEndpointAddress & 0x80)
@@ -2472,18 +2533,29 @@ namespace QKDrv
             }
 
             if (!mscIface || !bulkInEp || !bulkOutEp)
+            {
+                QC_LOG_WARN("xHCI", "Mass-storage probe incomplete on slot %u (iface=%d bulkIn=%d bulkOut=%d)",
+                            slotId, mscIface != nullptr, bulkInEp != nullptr, bulkOutEp != nullptr);
                 return false;
+            }
 
             setConfiguration(slotId, config->bConfigurationValue);
             if (!configureEndpoint(slotId, *bulkInEp) || !configureEndpoint(slotId, *bulkOutEp))
+            {
+                QC_LOG_WARN("xHCI", "Failed to configure USB mass-storage endpoints on slot %u", slotId);
                 return false;
+            }
 
             dev.interfaceNumber = mscIface->bInterfaceNumber;
             dev.bulkInEndpoint = static_cast<QC::u8>((bulkInEp->bEndpointAddress & 0x0F) * 2 + 1);
             dev.bulkOutEndpoint = static_cast<QC::u8>((bulkOutEp->bEndpointAddress & 0x0F) * 2);
 
             QC::u8 maxLun = 0;
-            (void)controlTransfer(slotId, 0xA1, USB_REQ_GET_MAX_LUN, 0, dev.interfaceNumber, &maxLun, sizeof(maxLun));
+            const bool maxLunOk = controlTransfer(slotId, 0xA1, USB_REQ_GET_MAX_LUN, 0, dev.interfaceNumber, &maxLun, sizeof(maxLun));
+            if (!maxLunOk)
+            {
+                QC_LOG_WARN("xHCI", "GET_MAX_LUN failed on slot %u", slotId);
+            }
             QC_LOG_INFO("xHCI", "USB mass-storage detected on slot %u (bulkIn=%u bulkOut=%u maxLun=%u)",
                         slotId, dev.bulkInEndpoint, dev.bulkOutEndpoint, static_cast<unsigned>(maxLun));
             return true;
@@ -2507,56 +2579,112 @@ namespace QKDrv
             if (dev.bulkInEndpoint == 0 || dev.bulkOutEndpoint == 0)
                 return false;
 
-            BulkOnlyCBW cbw{};
-            cbw.signature = USB_MSC_CBW_SIGNATURE;
-            cbw.tag = m_bulkTagCounter++;
-            cbw.transferLength = dataLen;
-            cbw.flags = dataIn ? USB_MSC_DIR_IN : 0;
-            cbw.lun = 0;
-            cbw.cdbLength = cdbLen;
-            QC::String::memcpy(cbw.cdb, cdb, cdbLen);
-
-            QC::String::memset(m_storageIoBuffer, 0, 4096);
-            QC::String::memcpy(m_storageIoBuffer, &cbw, sizeof(cbw));
-            if (!submitTransferAndWait(dev, dev.bulkOutEndpoint, m_storageIoBufferPhys, sizeof(cbw), 0, 5000))
-                return false;
-
-            if (dataLen > 0)
+            for (int attempt = 0; attempt < 3; ++attempt)
             {
-                if (dataIn)
+                BulkOnlyCBW cbw{};
+                cbw.signature = USB_MSC_CBW_SIGNATURE;
+                cbw.tag = m_bulkTagCounter++;
+                cbw.transferLength = dataLen;
+                cbw.flags = dataIn ? USB_MSC_DIR_IN : 0;
+                cbw.lun = 0;
+                cbw.cdbLength = cdbLen;
+                QC::String::memcpy(cbw.cdb, cdb, cdbLen);
+
+                QC::String::memset(m_storageIoBuffer, 0, 4096);
+                QC::String::memcpy(m_storageIoBuffer, &cbw, sizeof(cbw));
+                if (!submitTransferAndWait(dev, dev.bulkOutEndpoint, m_storageIoBufferPhys, sizeof(cbw), 0, 5000))
                 {
-                    QC::String::memset(m_storageIoBuffer, 0, 4096);
-                    if (!submitTransferAndWait(dev, dev.bulkInEndpoint, m_storageIoBufferPhys, dataLen, 0, 10000))
-                        return false;
-                    if (data)
-                        QC::String::memcpy(data, m_storageIoBuffer, dataLen);
+                    if (attempt < 2)
+                    {
+                        QC_LOG_WARN("xHCI", "Bulk-only CBW transfer failed on slot %u (attempt %d/3)", dev.slotId, attempt + 1);
+                        (void)controlTransfer(dev.slotId, USB_REQ_TYPE_CLASS_INTERFACE_OUT,
+                                              USB_REQ_BULK_ONLY_RESET, 0, dev.interfaceNumber, nullptr, 0);
+                        continue;
+                    }
+                    return false;
                 }
-                else
+
+                if (dataLen > 0)
                 {
-                    if (data)
-                        QC::String::memcpy(m_storageIoBuffer, data, dataLen);
-                    if (!submitTransferAndWait(dev, dev.bulkOutEndpoint, m_storageIoBufferPhys, dataLen, 0, 10000))
-                        return false;
+                    if (dataIn)
+                    {
+                        QC::String::memset(m_storageIoBuffer, 0, 4096);
+                        if (!submitTransferAndWait(dev, dev.bulkInEndpoint, m_storageIoBufferPhys, dataLen, 0, 10000))
+                        {
+                            if (attempt < 2)
+                            {
+                                QC_LOG_WARN("xHCI", "Bulk-only data-in transfer failed on slot %u (attempt %d/3)", dev.slotId, attempt + 1);
+                                (void)controlTransfer(dev.slotId, USB_REQ_TYPE_CLASS_INTERFACE_OUT,
+                                                      USB_REQ_BULK_ONLY_RESET, 0, dev.interfaceNumber, nullptr, 0);
+                                continue;
+                            }
+                            return false;
+                        }
+                        if (data)
+                            QC::String::memcpy(data, m_storageIoBuffer, dataLen);
+                    }
+                    else
+                    {
+                        if (data)
+                            QC::String::memcpy(m_storageIoBuffer, data, dataLen);
+                        if (!submitTransferAndWait(dev, dev.bulkOutEndpoint, m_storageIoBufferPhys, dataLen, 0, 10000))
+                        {
+                            if (attempt < 2)
+                            {
+                                QC_LOG_WARN("xHCI", "Bulk-only data-out transfer failed on slot %u (attempt %d/3)", dev.slotId, attempt + 1);
+                                (void)controlTransfer(dev.slotId, USB_REQ_TYPE_CLASS_INTERFACE_OUT,
+                                                      USB_REQ_BULK_ONLY_RESET, 0, dev.interfaceNumber, nullptr, 0);
+                                continue;
+                            }
+                            return false;
+                        }
+                    }
                 }
+
+                QC::String::memset(m_storageIoBuffer, 0, 4096);
+                if (!submitTransferAndWait(dev, dev.bulkInEndpoint, m_storageIoBufferPhys, sizeof(BulkOnlyCSW), 0, 5000))
+                {
+                    if (attempt < 2)
+                    {
+                        QC_LOG_WARN("xHCI", "Bulk-only CSW transfer failed on slot %u (attempt %d/3)", dev.slotId, attempt + 1);
+                        (void)controlTransfer(dev.slotId, USB_REQ_TYPE_CLASS_INTERFACE_OUT,
+                                              USB_REQ_BULK_ONLY_RESET, 0, dev.interfaceNumber, nullptr, 0);
+                        continue;
+                    }
+                    return false;
+                }
+
+                BulkOnlyCSW csw{};
+                QC::String::memcpy(&csw, m_storageIoBuffer, sizeof(csw));
+                if (csw.signature != USB_MSC_CSW_SIGNATURE || csw.tag != cbw.tag || csw.status != 0)
+                {
+                    if (attempt < 2)
+                    {
+                        QC_LOG_WARN("xHCI", "USB MSC CSW failed on slot %u (attempt %d/3): sig=%08x tag=%08x status=%u residue=%u",
+                                    dev.slotId,
+                                    attempt + 1,
+                                    static_cast<unsigned>(csw.signature),
+                                    static_cast<unsigned>(csw.tag),
+                                    static_cast<unsigned>(csw.status),
+                                    static_cast<unsigned>(csw.residue));
+                        (void)controlTransfer(dev.slotId, USB_REQ_TYPE_CLASS_INTERFACE_OUT,
+                                              USB_REQ_BULK_ONLY_RESET, 0, dev.interfaceNumber, nullptr, 0);
+                        continue;
+                    }
+
+                    QC_LOG_WARN("xHCI", "USB MSC CSW failed on slot %u after retries: sig=%08x tag=%08x status=%u residue=%u",
+                                dev.slotId,
+                                static_cast<unsigned>(csw.signature),
+                                static_cast<unsigned>(csw.tag),
+                                static_cast<unsigned>(csw.status),
+                                static_cast<unsigned>(csw.residue));
+                    return false;
+                }
+
+                return true;
             }
 
-            QC::String::memset(m_storageIoBuffer, 0, 4096);
-            if (!submitTransferAndWait(dev, dev.bulkInEndpoint, m_storageIoBufferPhys, sizeof(BulkOnlyCSW), 0, 5000))
-                return false;
-
-            BulkOnlyCSW csw{};
-            QC::String::memcpy(&csw, m_storageIoBuffer, sizeof(csw));
-            if (csw.signature != USB_MSC_CSW_SIGNATURE || csw.tag != cbw.tag || csw.status != 0)
-            {
-                QC_LOG_WARN("xHCI", "USB MSC CSW failed: sig=%08x tag=%08x status=%u residue=%u",
-                            static_cast<unsigned>(csw.signature),
-                            static_cast<unsigned>(csw.tag),
-                            static_cast<unsigned>(csw.status),
-                            static_cast<unsigned>(csw.residue));
-                return false;
-            }
-
-            return true;
+            return false;
         }
 
         bool XHCIControllerImpl::queryMassStorageCapacity(DeviceInfo &dev, QC::u32 &blockSize, QC::u64 &sectorCount)
@@ -2722,6 +2850,57 @@ namespace QKDrv
             const QC::Status st = QKStorage::registerBlockDevice(reg);
             if (st == QC::Status::Success || st == QC::Status::Busy)
             {
+                const QC::u32 usbIndex = m_usbStorageCount;
+                const bool autoSelectShared = QK::Boot::Config::GetSharedUsbVolumeAutoSelect();
+                const QC::u32 sharedUsbIndex = QK::Boot::Config::GetSharedUsbVolumeIndex();
+                bool shouldAliasShared = false;
+
+                if (QK::Boot::Config::GetPreferUsbSharedVolume() && !m_sharedUsbAliasRegistered)
+                {
+                    if (autoSelectShared)
+                    {
+                        shouldAliasShared = !mountPathHasBootMarkers(mountPath);
+                        if (!shouldAliasShared)
+                        {
+                            QC_LOG_INFO("xHCI", "Skipping USB shared alias candidate %s (usb_index=%u): boot-media markers detected",
+                                        mountPath,
+                                        usbIndex);
+                        }
+                    }
+                    else
+                    {
+                        shouldAliasShared = (usbIndex == sharedUsbIndex);
+                    }
+                }
+
+                if (shouldAliasShared)
+                {
+                    QKStorage::BlockDeviceRegistration sharedReg{};
+                    sharedReg.name = "QFS_SHARED";
+                    sharedReg.mountPath = "/shared";
+                    sharedReg.fsKind = QFS::FileSystemKind::FAT_AUTO;
+                    sharedReg.device = mountDev;
+                    sharedReg.autoMount = true;
+                    sharedReg.sourceKind = "xhci-usb";
+                    sharedReg.sourceDetail = "shared-usb-alias";
+                    sharedReg.persistent = true;
+
+                    const QC::Status sharedSt = QKStorage::registerBlockDevice(sharedReg);
+                    if (sharedSt == QC::Status::Success || sharedSt == QC::Status::Busy)
+                    {
+                        m_sharedUsbAliasRegistered = true;
+                        QC_LOG_INFO("xHCI", "Registered USB shared alias QFS_SHARED at /shared (usb_index=%u status=%d)",
+                                    usbIndex,
+                                    static_cast<int>(sharedSt));
+                    }
+                    else
+                    {
+                        QC_LOG_WARN("xHCI", "Failed to register USB shared alias at /shared (usb_index=%u status=%d)",
+                                    usbIndex,
+                                    static_cast<int>(sharedSt));
+                    }
+                }
+
                 ++m_usbStorageCount;
                 QC_LOG_INFO("xHCI", "Registered USB storage volume %s at %s (slot=%u sectors=%llu fatKind=%u)",
                             volName,

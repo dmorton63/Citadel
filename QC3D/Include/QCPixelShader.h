@@ -13,18 +13,20 @@ namespace QC
     public:
         PixelShader();
 
-        // Simple shading: just return interpolated vertex color
+        // Lighting parameters.
+        void setLightDir(const QC::Vec3f &dir);    // should be normalised
+        void setAmbient(float ambient);             // 0..1
+        void setDiffuseStrength(float diffuse);     // 0..1
+        void setLightingEnabled(bool enabled);
+
+        // Shade an interpolated vertex; applies ambient + Lambert diffuse when
+        // lighting is enabled, otherwise returns interpolated vertex color.
         QC::Color shade(const QC::Vertex& vInterp) const;
 
-        // Future expansion:
-        // - texture sampling
-        // - normal mapping
-        // - lighting models
-        // - material parameters
-        // - specular highlights
-        // - shadows
-        // - fog
-        // - gamma correction
-    };
+    private:
+        QC::Vec3f m_lightDir;     // world-space light direction (normalised)
+        float     m_ambient;
+        float     m_diffuse;
+        bool      m_lighting;    };
 
 } // namespace QC

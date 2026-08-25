@@ -31,6 +31,21 @@ namespace QK::Boot::Config
 
     StartupMode GetStartupMode();
     void SetStartupMode(StartupMode Mode);
+    inline bool ShouldUseInteractiveTerminalFallbackForStartupMode(StartupMode Mode)
+    {
+        switch (Mode)
+        {
+        case StartupMode::Terminal:
+        case StartupMode::Installer:
+        case StartupMode::Recovery:
+        case StartupMode::Safe:
+            return true;
+        case StartupMode::Desktop:
+        case StartupMode::Network:
+        default:
+            return false;
+        }
+    }
     QC::Status PersistStartupMode(StartupMode Mode, FLogFn Log);
     QC::u32 GetMouseSensitivityPercent();
     void SetMouseSensitivityPercent(QC::u32 Percent);
@@ -54,11 +69,20 @@ namespace QK::Boot::Config
     QC::Status PersistKeyboardRepeatTiming(QC::u32 DelayMs, QC::u32 IntervalMs, FLogFn Log);
     QK::SecurityCenter::Mode GetSecurityCenterMode();
     bool GetIdeSharedProbeEnabled();
+    bool GetPreferUsbSharedVolume();
+    bool GetSharedUsbVolumeAutoSelect();
+    QC::u32 GetSharedUsbVolumeIndex();
 
     // Dev-only non-TPM SecureStore recovery code override from kernel cmdline.
     // Supported form: citadel.recovery_code=<code>
     // Returns true once per boot when an override is available and copies it to out.
     bool TryConsumeDevRecoveryCode(char *out, QC::usize outCap);
+
+    // Dev-only test trigger for TPM quarantine/reprovision.
+    // Supported forms:
+    // - startup.cfg: TPM_QUARANTINE_TEST=1
+    // - cmdline: citadel.tpm_quarantine_test=1 or bare tpm_quarantine_test
+    bool TryConsumeDevTpmQuarantineTest();
 
     // SAVETERM support. Currently not invoked by QKMain, but kept here so the
     // policy lives with config parsing rather than the main entrypoint.

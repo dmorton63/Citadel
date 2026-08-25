@@ -104,6 +104,85 @@ namespace QCQL
             return n == static_cast<QC::isize>(sizeof(FileHeader));
         }
 
+        // Write-barrier helpers.
+        // reserved[0..3] = writeGeneration  (non-zero during a write window)
+        // reserved[4..7] = checkpointGeneration  (set equal to writeGeneration on clean commit)
+        // Both zero means pre-barrier legacy database — treated as clean.
+
+        static QC::u32 getU32LE(const QC::u8 *p)
+        {
+            return static_cast<QC::u32>(p[0]) |
+                   (static_cast<QC::u32>(p[1]) << 8) |
+                   (static_cast<QC::u32>(p[2]) << 16) |
+                   (static_cast<QC::u32>(p[3]) << 24);
+        }
+
+        static void setU32LE(QC::u8 *p, QC::u32 v)
+        {
+            p[0] = static_cast<QC::u8>(v & 0xFF);
+            p[1] = static_cast<QC::u8>((v >> 8) & 0xFF);
+            p[2] = static_cast<QC::u8>((v >> 16) & 0xFF);
+            p[3] = static_cast<QC::u8>((v >> 24) & 0xFF);
+        }
+
+        static bool writeBarrierDirty(const Database &db)
+        {
+            // Increment writeGeneration; leave checkpointGeneration behind → dirty state.
+            const QC::u32 wgen = getU32LE(db.header.reserved) + 1;
+            const QC::u32 newGen = (wgen == 0) ? 1 : wgen; // never allow gen=0 once started
+            const_cast<Database &>(db).header.reserved[0] = static_cast<QC::u8>(newGen & 0xFF);
+            const_cast<Database &>(db).header.reserved[1] = static_cast<QC::u8>((newGen >> 8) & 0xFF);
+            const_cast<Database &>(db).header.reserved[2] = static_cast<QC::u8>((newGen >> 16) & 0xFF);
+            const_cast<Database &>(db).header.reserved[3] = static_cast<QC::u8>((newGen >> 24) & 0xFF);
+            return writeHeader(db);
+        }
+
+        static bool writeBarrierClean(const Database &db)
+        {
+            // Set checkpointGeneration = writeGeneration → clean committed state.
+            const QC::u32 wgen = getU32LE(db.header.reserved);
+            const_cast<Database &>(db).header.reserved[4] = static_cast<QC::u8>(wgen & 0xFF);
+            const_cast<Database &>(db).header.reserved[5] = static_cast<QC::u8>((wgen >> 8) & 0xFF);
+            const_cast<Database &>(db).header.reserved[6] = static_cast<QC::u8>((wgen >> 16) & 0xFF);
+            const_cast<Database &>(db).header.reserved[7] = static_cast<QC::u8>((wgen >> 24) & 0xFF);
+            return writeHeader(db);
+        }
+
+        static bool writeBarrierIsDirty(const FileHeader &hdr)
+        {
+            const QC::u32 wgen = getU32LE(hdr.reserved);
+            const QC::u32 cgen = getU32LE(hdr.reserved + 4);
+            // Pre-barrier legacy databases have both == 0 → treated as clean.
+            if (wgen == 0 && cgen == 0)
+                return false;
+            return wgen != cgen;
+        }
+
+        // Boot-phase skip fingerprints in FileHeader.reserved[8..23].
+        static QC::u64 getU64LE(const QC::u8 *p)
+        {
+            return (static_cast<QC::u64>(p[0]) |
+                    (static_cast<QC::u64>(p[1]) << 8) |
+                    (static_cast<QC::u64>(p[2]) << 16) |
+                    (static_cast<QC::u64>(p[3]) << 24) |
+                    (static_cast<QC::u64>(p[4]) << 32) |
+                    (static_cast<QC::u64>(p[5]) << 40) |
+                    (static_cast<QC::u64>(p[6]) << 48) |
+                    (static_cast<QC::u64>(p[7]) << 56));
+        }
+
+        static void setU64LE(QC::u8 *p, QC::u64 v)
+        {
+            p[0] = static_cast<QC::u8>(v & 0xFF);
+            p[1] = static_cast<QC::u8>((v >> 8) & 0xFF);
+            p[2] = static_cast<QC::u8>((v >> 16) & 0xFF);
+            p[3] = static_cast<QC::u8>((v >> 24) & 0xFF);
+            p[4] = static_cast<QC::u8>((v >> 32) & 0xFF);
+            p[5] = static_cast<QC::u8>((v >> 40) & 0xFF);
+            p[6] = static_cast<QC::u8>((v >> 48) & 0xFF);
+            p[7] = static_cast<QC::u8>((v >> 56) & 0xFF);
+        }
+
         static bool readAt(QFS::File *f, QC::u64 off, void *out, QC::usize size)
         {
             if (!f || !out || size == 0)
@@ -499,11 +578,56 @@ namespace QCQL
             schema.foreignKeys.push_back(static_cast<ForeignKey &&>(foreignKey));
         }
 
+        // Helper: patch FKs onto a named table if it exists.  Safe to call repeatedly.
+        static void patchFKs(Database &database, const char *tableName,
+                             const char *col, const char *parentTable, const char *parentCol)
+        {
+            Table *t = findTableByName(database, tableName);
+            if (t)
+                addForeignKey(t->schema, col, parentTable, parentCol);
+        }
+
         static void applyBuiltInRelationshipMetadata(Database &database)
         {
-            Table *themeTokens = findTableByName(database, "ThemeTokens");
-            if (themeTokens)
-                addForeignKey(themeTokens->schema, "themeId", "Themes", "id");
+            // Theme / token relationship (general).
+            patchFKs(database, "ThemeTokens",  "themeId", "Themes", "id");
+
+            // DesktopLayouts is the root anchor – no FK needed on it.
+
+            // Chunk tables reference their document tables.
+            patchFKs(database, "DesktopLayoutChunks", "documentId", "DesktopLayouts", "id");
+            patchFKs(database, "DesktopCuimlChunks",  "documentId", "DesktopCuiml",   "id");
+
+            // Relational region / control tables reference layouts.
+            patchFKs(database, "DesktopRegions", "layoutId", "DesktopLayouts", "id");
+
+            patchFKs(database, "DesktopControls", "layoutId", "DesktopLayouts",  "id");
+            patchFKs(database, "DesktopControls", "regionId", "DesktopRegions",  "id");
+
+            patchFKs(database, "DesktopControlRuntime", "layoutId",  "DesktopLayouts",  "id");
+            patchFKs(database, "DesktopControlRuntime", "controlId", "DesktopControls", "id");
+
+            patchFKs(database, "DesktopControlProperties", "layoutId",  "DesktopLayouts",  "id");
+            patchFKs(database, "DesktopControlProperties", "controlId", "DesktopControls", "id");
+
+            patchFKs(database, "DesktopControlBindings", "layoutId",  "DesktopLayouts",  "id");
+            patchFKs(database, "DesktopControlBindings", "controlId", "DesktopControls", "id");
+
+            // Theme and capability junction tables.
+            patchFKs(database, "DesktopLayoutThemes", "layoutId", "DesktopLayouts", "id");
+            patchFKs(database, "DesktopLayoutThemes", "themeId",  "Themes",         "id");
+
+            patchFKs(database, "DesktopLayoutCapabilities", "layoutId",     "DesktopLayouts", "id");
+            patchFKs(database, "DesktopLayoutCapabilities", "capabilityId", "Capabilities",   "id");
+
+            patchFKs(database, "DesktopLayoutAssets", "layoutId", "DesktopLayouts", "id");
+
+            patchFKs(database, "DesktopLayoutMaterialization", "layoutId", "DesktopLayouts", "id");
+
+            // Control hierarchy (parent–child self-referential via DesktopControls).
+            patchFKs(database, "DesktopControlHierarchy", "layoutId",        "DesktopLayouts",  "id");
+            patchFKs(database, "DesktopControlHierarchy", "parentControlId", "DesktopControls", "id");
+            patchFKs(database, "DesktopControlHierarchy", "childControlId",  "DesktopControls", "id");
         }
 
         static QC::u32 nextTableId(const Database &database)
@@ -773,9 +897,13 @@ namespace QCQL
         if (n != static_cast<QC::isize>(sizeof(FileHeader)))
             return Status::Error;
 
+        // Mark as boot creation to skip barriers during scaffolding.
+        db.isBootCreation = true;
+        (void)writeBarrierDirty(db);
         const Status metaSt = persistMetadata(db);
         if (metaSt != Status::Success)
             return metaSt;
+        (void)writeBarrierClean(db);
 
         outDatabase = static_cast<Database &&>(db);
         return Status::Success;
@@ -836,6 +964,20 @@ namespace QCQL
                 return idxSt;
         }
 
+        // Run FK coherence check; set diagnostic if anything is incoherent.
+        // Non-fatal: callers that need strict integrity should inspect lastDiagnostic() or call
+        // validateSchemaIntegrity() directly for the full SchemaIntegrityReport.
+        {
+            SchemaIntegrityReport integrityReport{};
+            (void)validateSchemaIntegrity(db, integrityReport);
+            if (!integrityReport.allRelational && integrityReport.firstError[0] != '\0')
+                setDiagnostic(integrityReport.firstError);
+        }
+
+        // Phase-0 write-barrier: warn if the database was left dirty by a crashed write.
+        if (writeBarrierIsDirty(db.header))
+            setDiagnostic("write_barrier_dirty: last metadata write may be incomplete");
+
         outDatabase = static_cast<Database &&>(db);
         return Status::Success;
     }
@@ -894,7 +1036,14 @@ namespace QCQL
         if (!writeHeader(database))
             return Status::Error;
 
-        return persistMetadata(database);
+        (void)writeBarrierDirty(database);
+        const Status barrMetaSt = persistMetadata(database);
+        if (barrMetaSt != Status::Success)
+            return barrMetaSt;
+        // Skip clean barrier during boot creation (no user data to lose yet).
+        if (!database.isBootCreation)
+            (void)writeBarrierClean(database);
+        return Status::Success;
     }
 
     Status Engine::initializeDatabaseHeader(Database &database) const
@@ -1327,9 +1476,13 @@ namespace QCQL
         if (!writeHeader(database))
             return Status::Error;
 
+        (void)writeBarrierDirty(database);
         const Status metaSt = persistMetadata(database);
         if (metaSt != Status::Success)
             return metaSt;
+        // Skip clean barrier during boot creation (no user data to lose yet).
+        if (!database.isBootCreation)
+            (void)writeBarrierClean(database);
 
         return Status::Success;
     }
@@ -1376,9 +1529,13 @@ namespace QCQL
         if (table->rootPage == 0)
             table->rootPage = newPage.header.pageId;
 
+        (void)writeBarrierDirty(database);
         const Status metaSt = persistMetadata(database);
         if (metaSt != Status::Success)
             return metaSt;
+        // Skip clean barrier during boot creation (no user data to lose yet).
+        if (!database.isBootCreation)
+            (void)writeBarrierClean(database);
 
         outPageId = newPage.header.pageId;
         return Status::Success;
@@ -1802,6 +1959,154 @@ namespace QCQL
     const char *Engine::lastDiagnostic() const
     {
         return s_lastDiagnostic;
+    }
+
+    QC::u64 Engine::getSystemTablesVersion(const FileHeader &hdr)
+    {
+        const QC::u8 *p = hdr.reserved + 8;
+        return (static_cast<QC::u64>(p[0]) |
+                (static_cast<QC::u64>(p[1]) << 8) |
+                (static_cast<QC::u64>(p[2]) << 16) |
+                (static_cast<QC::u64>(p[3]) << 24) |
+                (static_cast<QC::u64>(p[4]) << 32) |
+                (static_cast<QC::u64>(p[5]) << 40) |
+                (static_cast<QC::u64>(p[6]) << 48) |
+                (static_cast<QC::u64>(p[7]) << 56));
+    }
+
+    void Engine::setSystemTablesVersion(FileHeader &hdr, QC::u64 version)
+    {
+        QC::u8 *p = hdr.reserved + 8;
+        p[0] = static_cast<QC::u8>(version & 0xFF);
+        p[1] = static_cast<QC::u8>((version >> 8) & 0xFF);
+        p[2] = static_cast<QC::u8>((version >> 16) & 0xFF);
+        p[3] = static_cast<QC::u8>((version >> 24) & 0xFF);
+        p[4] = static_cast<QC::u8>((version >> 32) & 0xFF);
+        p[5] = static_cast<QC::u8>((version >> 40) & 0xFF);
+        p[6] = static_cast<QC::u8>((version >> 48) & 0xFF);
+        p[7] = static_cast<QC::u8>((version >> 56) & 0xFF);
+    }
+
+    QC::u64 Engine::getThemeImportVersion(const FileHeader &hdr)
+    {
+        const QC::u8 *p = hdr.reserved + 16;
+        return (static_cast<QC::u64>(p[0]) |
+                (static_cast<QC::u64>(p[1]) << 8) |
+                (static_cast<QC::u64>(p[2]) << 16) |
+                (static_cast<QC::u64>(p[3]) << 24) |
+                (static_cast<QC::u64>(p[4]) << 32) |
+                (static_cast<QC::u64>(p[5]) << 40) |
+                (static_cast<QC::u64>(p[6]) << 48) |
+                (static_cast<QC::u64>(p[7]) << 56));
+    }
+
+    void Engine::setThemeImportVersion(FileHeader &hdr, QC::u64 version)
+    {
+        QC::u8 *p = hdr.reserved + 16;
+        p[0] = static_cast<QC::u8>(version & 0xFF);
+        p[1] = static_cast<QC::u8>((version >> 8) & 0xFF);
+        p[2] = static_cast<QC::u8>((version >> 16) & 0xFF);
+        p[3] = static_cast<QC::u8>((version >> 24) & 0xFF);
+        p[4] = static_cast<QC::u8>((version >> 32) & 0xFF);
+        p[5] = static_cast<QC::u8>((version >> 40) & 0xFF);
+        p[6] = static_cast<QC::u8>((version >> 48) & 0xFF);
+        p[7] = static_cast<QC::u8>((version >> 56) & 0xFF);
+    }
+
+    Status Engine::flushHeader(const Database &database)
+    {
+        QFS::File *f = QFS::VFS::instance().open(database.path,
+                                                 QFS::OpenMode::Write | QFS::OpenMode::Create);
+        if (!f)
+            return Status::Error;
+
+        const QC::isize n = f->write(&database.header, sizeof(FileHeader));
+        QFS::VFS::instance().close(f);
+        return n == static_cast<QC::isize>(sizeof(FileHeader)) ? Status::Success : Status::Error;
+    }
+
+    Status Engine::validateSchemaIntegrity(const Database &database, SchemaIntegrityReport &outReport) const
+    {
+        QC::String::memset(&outReport, 0, sizeof(outReport));
+
+        outReport.fileVersion      = database.header.version;
+        outReport.versionSupported = (database.header.version == kFileVersion1 ||
+                                      database.header.version == kFileVersion2);
+        outReport.tablesChecked    = static_cast<QC::u32>(database.tables.size());
+
+        for (QC::usize ti = 0; ti < database.tables.size(); ++ti)
+        {
+            const Table &childTable = database.tables[ti];
+            for (QC::usize fki = 0; fki < childTable.schema.foreignKeys.size(); ++fki)
+            {
+                const ForeignKey &fk = childTable.schema.foreignKeys[fki];
+                ++outReport.fksChecked;
+
+                FKIntegrityFinding finding{};
+                setFixedName(finding.childTable,  sizeof(finding.childTable),  childTable.name);
+                setFixedName(finding.childColumn, sizeof(finding.childColumn), fk.columnName);
+                setFixedName(finding.parentTable, sizeof(finding.parentTable), fk.referencedTable);
+                setFixedName(finding.parentColumn,sizeof(finding.parentColumn),fk.referencedColumn);
+
+                // 1. Child column must exist in the child table schema.
+                if (findColumnIndex(childTable.schema, fk.columnName) < 0)
+                {
+                    setFixedName(finding.code, sizeof(finding.code), "child_col_missing");
+                    ++outReport.fkErrors;
+                }
+                else
+                {
+                    // 2. Referenced parent table must exist.
+                    const Table *parentTable = findTableByName(database, fk.referencedTable);
+                    if (!parentTable)
+                    {
+                        setFixedName(finding.code, sizeof(finding.code), "parent_table_missing");
+                        ++outReport.fkErrors;
+                    }
+                    else if (findColumnIndex(parentTable->schema, fk.referencedColumn) < 0)
+                    {
+                        // 3. Referenced column must exist in the parent table schema.
+                        setFixedName(finding.code, sizeof(finding.code), "parent_col_missing");
+                        ++outReport.fkErrors;
+                    }
+                    else
+                    {
+                        setFixedName(finding.code, sizeof(finding.code), "ok");
+                    }
+                }
+
+                if (outReport.findingCount < kMaxFKIntegrityFindings)
+                    outReport.findings[outReport.findingCount++] = finding;
+
+                // Record first error as a human-readable string.
+                if (outReport.fkErrors == 1 && outReport.firstError[0] == '\0')
+                {
+                    char *e = outReport.firstError;
+                    const QC::usize cap = sizeof(outReport.firstError);
+                    appendDiag(e, cap, finding.code);
+                    appendDiag(e, cap, " child=");
+                    appendDiag(e, cap, finding.childTable);
+                    appendDiag(e, cap, ".");
+                    appendDiag(e, cap, finding.childColumn);
+                    appendDiag(e, cap, " parent=");
+                    appendDiag(e, cap, finding.parentTable);
+                    appendDiag(e, cap, "(");
+                    appendDiag(e, cap, finding.parentColumn);
+                    appendDiag(e, cap, ")");
+                }
+            }
+        }
+
+        outReport.allRelational = outReport.versionSupported && (outReport.fkErrors == 0);
+        outReport.hasDirtyBarrier = writeBarrierIsDirty(database.header);
+
+        // Set engine diagnostic if there are integrity issues so callers can inspect via lastDiagnostic().
+        if (!outReport.versionSupported)
+            setDiagnostic("schema_integrity: unsupported_version");
+        else if (outReport.fkErrors > 0)
+            setDiagnostic(outReport.firstError[0] ? outReport.firstError : "schema_integrity: fk_error");
+
+        return Status::Success;
     }
 
 } // namespace QCQL

@@ -172,13 +172,14 @@ See: [CITADEL_UI_RUNTIME.md](CITADEL_UI_RUNTIME.md).
 Citadel has a kernel-provided SecureStore used for protected persistence under `/system/sc`.
 
 Current anchor behavior:
-- TPM present: the machine anchor is sealed via TPM policy and stored as `WRAPKEY.TPM`.
-- No TPM: boot prompts for a recovery code; a KDF-derived key unwraps `WRAPKEY.KDF` (legacy plaintext `WRAPKEY.BIN` is migrated away).
+- TPM present and passing the boot-time seal/unseal probe: the machine anchor is sealed via TPM policy and stored as `WRAPKEY.TPM`.
+- TPM present but the probe fails or the TPM cannot complete the round-trip successfully: boot falls back to the non-TPM recovery path rather than blocking startup.
+- No TPM or no usable TPM anchor path: boot can prompt for a recovery code and use a KDF-derived key to unwrap `WRAPKEY.KDF` (legacy plaintext `WRAPKEY.BIN` is migrated away).
 
 Key abstractions that exist in code today:
-- `seal_secret()` / `unseal_secret()` (TPM-backed when available; stubbed fallback)
+- `seal_secret()` / `unseal_secret()` (TPM-backed when the boot-time TPM provider is enabled; otherwise the SecureStore config returns `NotSupported`/`Busy` and the caller uses the non-TPM path)
 - TAS (TPM Anchor Secret): explicitly surfaced as `readTas()` / `getOrCreateTas()` and used as the input to SRK derivation
-- TPM-accelerated sealed blobs: `writeTpmSealedBlob()` / `readTpmSealedBlob()` seal a per-blob content key via TPM and AEAD-wrap the payload (fallback to software sealing when TPM isn’t available)
+- TPM-accelerated sealed blobs: `writeTpmSealedBlob()` / `readTpmSealedBlob()` seal a per-blob content key via TPM and AEAD-wrap the payload; they are enabled only when the TPM provider is available and the round-trip probe succeeds
 
 ---
 
@@ -192,6 +193,7 @@ Status labels used below:
 ### Boot + Core
 - Boot via Limine: **Working** (build produces bootable image)
 - Kernel console: **Working** (basic CLI commands + transcript support)
+- SecureStore TPM anchor path: **Partial/Working** (boot-time TPM2 CRB startup, entropy collection, seal/unseal probing, and TPM-backed SecureStore operations are implemented; boot still falls back to a non-TPM recovery path when the TPM probe is unavailable or fails)
 - Pre-desktop owner/session gate hardening: **Working** (fail-closed terminal fallback on repeated ambiguous enrollment/unlock restart loops)
 - ACPI shutdown fallback diagnostics: **Working** (ACPI grace timeout/unavailable and legacy fallback-halt paths are emitted as structured boot events)
 
@@ -215,11 +217,15 @@ Status labels used below:
 - Dependency note: **Desktop-data integration depends on CQL maturity** (before the desktop can fully move to a database-first runtime, CQL still needs more complete relational/schema support and stable service/runtime integration so desktop metadata can be modeled cleanly and loaded predictably at boot)
 
 ### CQL / Data Runtime
-- QCQL engine core: **Partial** (implemented pieces include database create/open/close, table creation, page allocation/I/O, row serialization, primary-key index rebuild/lookup, and primary-key-based insert/select/update/remove helpers)
-- QCQL system tables: **Partial** (`initializeSystemTables()` currently bootstraps `Themes`, `ThemeTokens`, and `Capabilities`; desktop code additionally creates/seeds document-style tables for layouts and CUI-ML payloads)
-- Desktop/theme integration with QCQL: **Partial** (desktop bring-up creates/opens `/system/CMMS.QDB`, imports built-in themes, validates theme rows, and can load theme state from QCQL during normal desktop startup)
-- QCQL runtime/query layer: **Partial/Design** (the low-level engine exists, but the broader text-query/parser/runtime-service shape described in the design docs is not fully represented in the `QCQL` module itself yet)
-- Relational modeling and foreign-key behavior: **Planned** (current schemas are still simple and PK-centric; relationship metadata, foreign-key enforcement, and normalized desktop object modeling remain future work)
+- QCQL engine core: **Working** (database create/open/close, table creation, page allocation/I/O, row serialization, primary-key index rebuild/lookup, FK constraint enforcement on insert/update/delete, crash-safety write-barrier via generation counters)
+- QCQL system tables: **Partial** (`initializeSystemTables()` bootstraps `Themes`, `ThemeTokens`, and `Capabilities`; desktop code creates/seeds document and relational tables for layouts, chunks, regions, controls, properties, and bindings)
+- Desktop/theme integration with QCQL: **Working** (desktop bring-up creates/opens `/system/CMMS.QDB`, imports built-in themes, validates theme rows, loads theme state from QCQL during normal desktop startup; CMMS tables use normalized FK-declared relational schema)
+- QCQL runtime/query layer: **Working** (canonical handle-based surface `QCQL::Runtime::{openHandle,execute,closeHandle,insertRowByName,getIntegrityReport}` routes all command-layer callers; `execute()` supports CREATE TABLE, INSERT, UPDATE, DELETE, SELECT * FROM, DESCRIBE, SHOW TABLES with FK enforcement; handle process-binding and table capability-map enforcement implemented)
+- Relational modeling and foreign-key behavior: **Working** (FK descriptors serialised in v2 `TableSchemaDisk` on-disk format; `applyBuiltInRelationshipMetadata` re-applies all CMMS FK relationships on open; `enforceForeignKeyConstraints` / `enforceDeleteConstraints` enforce RESTRICT on all write paths; schema integrity validation via `SchemaIntegrityReport`)
+- Write-barrier durability: **Working** (generation-counter pair in `FileHeader.reserved[0..7]`; `writeBarrierDirty`/`writeBarrierClean` bracket every `persistMetadata` call; dirty-barrier detected on `openDatabase` and surfaced in `SchemaIntegrityReport.hasDirtyBarrier` and `csql status`)
+- Schema integrity gate: **Working** (`Engine::validateSchemaIntegrity()` validates all FK column/table/column references and returns a `SchemaIntegrityReport`; called automatically on every `openDatabase`; `QCQL::Runtime::getIntegrityReport()` exposes it to callers)
+- Command diagnostics: **Working** (`csql`, `qcql-desktop`, `migrate-desktop` all emit stable machine-parseable `status=X op=Y detail=Z` lines via shared `writeDiagLine` helper)
+- Regression suite: **Working** (`qcql-regtest` command exercises FK constraints, handle permissions, write-barrier state, and CMMS integrity; reports `PASS`/`FAIL` per case)
 - Separate simple database path: **Working** (`QKSimpleDb` still exists as the generic key/value store used by the `db` command path, separate from QCQL)
 
 ### Networking
@@ -515,3 +521,77 @@ High-level rules:
   - [QJFunctions/Include/QJFunctionRegistry.h](QJFunctions/Include/QJFunctionRegistry.h)
   - [QJFunctions/Src/QJFunctionRegistry.cpp](QJFunctions/Src/QJFunctionRegistry.cpp)
   - Adds `setJitDebugMode(bool)` / `jitDebugMode()` and extra lifecycle logging for validation and invalidation.
+
+## 15. QCQL Runtime Boundary and Relational Integrity (Batch 41–50)
+
+### What was implemented
+
+**Item 41 – Runtime boundary (`QCQL::Runtime` facade)**
+- New files: [QCQL/Include/QCQLRuntime.h](QCQL/Include/QCQLRuntime.h), [QCQL/Src/QCQLRuntime.cpp](QCQL/Src/QCQLRuntime.cpp)
+- All command-layer callers (`csql`, `qcql-desktop`, `migrate-desktop`, `deskdoc`) routed through `openHandle`/`execute`/`closeHandle`/`insertRowByName`.
+- `QCQL/CMakeLists.txt` updated to compile `QCQLRuntime.cpp`.
+
+**Item 42 – DbHandle process binding + capability map**
+- `HandleOpenOptions` struct in `QCQLRuntime.h`: `callerProcessId`, `tablePermissions[]`, `enforceProcessBinding`, `enforceTablePermissions`.
+- `RuntimeSlot` stores `ownerProcessId` and `tablePermissions`; `handleBindingValid()` and `hasPermission()` enforced on all execute/insert/delete paths.
+- `csql` issues handles with caller-PID binding and wildcard capability map.
+
+**Item 43 – FK relationship metadata persistence**
+- `REFERENCES parent(col)` syntax added to runtime `parseCreateTableDefinition`.
+- `DESCRIBE`/`csql show schema` emit inline FK annotation per column and a summary block.
+- FK metadata serialised in v2 `TableSchemaDisk`; `loadMetadata` round-trips it correctly.
+
+**Item 44 – FK integrity enforcement on DML**
+- `execute()` now handles `INSERT INTO ... VALUES (...)`, `DELETE FROM ... WHERE pk=v`, `UPDATE ... SET ... WHERE pk=v`.
+- All three paths route through engine named helpers that call `enforceForeignKeyConstraints` / `enforceDeleteConstraints`.
+- `ConstraintViolation` and engine diagnostic forwarded to `QueryResult.diagnostic`.
+
+**Item 45 – Desktop relational model gap closure**
+- `applyBuiltInRelationshipMetadata()` in `QCQL/Src/QCQLEngine.cpp` expanded to cover all 21 CMMS FK relationships (chunks, regions, controls, properties, bindings, themes, capabilities, assets, materialization, hierarchy).
+- Relationships re-applied in memory on every `openDatabase` call, covering legacy databases and any format predating FK additions.
+
+**Item 46 – Boot/open schema integrity gate**
+- `SchemaIntegrityReport` struct added to `QCQL/Include/QCQLTypes.h`.
+- `Engine::validateSchemaIntegrity()` checks: file version supported, all FK child/parent/column references coherent; populates `allRelational`, `fkErrors`, `findingCount`, `firstError`, `hasDirtyBarrier`.
+- Called automatically at end of `openDatabase`; result stored per `RuntimeSlot`; exposed via `Runtime::getIntegrityReport()`.
+- `csql status` now shows `integrity version=N supported=1 fks_checked=N fk_errors=0 all_relational=1 dirty_barrier=0`.
+
+**Item 47 – Machine-parseable command diagnostics**
+- `writeDiagLine(ctx, cmd, op, status, detail)` helper added to `QKCommandCenter.cpp`.
+- All relationship/permission failure paths in `csql`, `qcql-desktop`, `migrate-desktop` now emit `cmd=X status=Y op=Z detail=D`.
+
+**Item 48 – Phase-0 write-barrier durability**
+- `FileHeader.reserved[0..3]` = `writeGeneration`, `[4..7]` = `checkpointGeneration`.
+- `writeBarrierDirty()` / `writeBarrierClean()` bracket every `persistMetadata` call in the engine.
+- `writeBarrierIsDirty()` checked in `openDatabase` and surfaced in `SchemaIntegrityReport.hasDirtyBarrier`.
+- Backward compatible: legacy databases with `reserved = 0` are treated as clean.
+
+**Item 49 – QCQL regression suite**
+- `qcql-regtest` command registered at `User` access in `QKCommandCenter.cpp`.
+- Four suites: FK constraint enforcement (5 cases), handle permissions (3 cases), write-barrier state (4 cases), CMMS desktop integrity (4 cases).
+- Skips gracefully if `/system` not mounted or `CMMS.QDB` absent.
+- Outputs `PASS`/`FAIL` per case and a final `passed=N failed=0 result=PASS` summary.
+
+### Evidence locations
+
+| File | What changed |
+|---|---|
+| [QCQL/Include/QCQLRuntime.h](QCQL/Include/QCQLRuntime.h) | Handle-based runtime API, `HandleOpenOptions`, `QueryResult`, `getIntegrityReport` |
+| [QCQL/Src/QCQLRuntime.cpp](QCQL/Src/QCQLRuntime.cpp) | Runtime facade implementation, INSERT/UPDATE/DELETE query execution, FK parsing in CREATE TABLE, permission enforcement |
+| [QCQL/Include/QCQLTypes.h](QCQL/Include/QCQLTypes.h) | `SchemaIntegrityReport`, `FKIntegrityFinding`, `hasDirtyBarrier` field |
+| [QCQL/Include/QCQLEngine.h](QCQL/Include/QCQLEngine.h) | `validateSchemaIntegrity()` declaration |
+| [QCQL/Src/QCQLEngine.cpp](QCQL/Src/QCQLEngine.cpp) | Write-barrier helpers, `applyBuiltInRelationshipMetadata` expansion, `validateSchemaIntegrity` implementation, barrier calls around all `persistMetadata` sites |
+| [QCQL/CMakeLists.txt](QCQL/CMakeLists.txt) | `Src/QCQLRuntime.cpp` added to QCQL library target |
+| [QKernel/Src/QKCommandCenter.cpp](QKernel/Src/QKCommandCenter.cpp) | `writeDiagLine`, `csql status` integrity output, `qcql-regtest`, `csql exec` DML, `csql` lowered to User access |
+| [QDesktop/Src/QDCommandProcessor.cpp](QDesktop/Src/QDCommandProcessor.cpp) | `deskdoc` open/close via runtime handle |
+
+### Rollback / recovery runbook
+
+- **Dirty barrier on open**: `csql status` shows `dirty_barrier=1`. The last metadata write was interrupted. The database is readable; run `csql show tables` to verify schema is intact. If tables are missing, restore from a known-good backup or re-run `migrate-desktop provision`.
+- **FK coherence failure on open**: `csql status` shows `fk_errors=N`. This means a FK descriptor references a table/column that no longer exists in the schema. Inspect `csql: integrity first_error=...`. If the parent table was accidentally deleted, recreate it with `csql create table ...` using the canonical schema. For CMMS, run `migrate-desktop provision auto` to re-seed.
+- **ConstraintViolation on insert/delete**: The operation attempted to break a FK relationship. Check the `detail=` field in the error output for `table`, `column`, `parent_table`, `parent_column`. Insert the parent row first, or delete child rows before deleting the parent.
+- **PermissionDenied on exec**: The handle was opened with a restricted capability map (e.g. read-only). Re-open with appropriate permissions via `csql create` or `csql open`.
+
+**Status: Batch 41-50 COMPLETE**
+**Date: 2026-07-19**
+**Branch:** `copilot/fix-nightly-regression-job`

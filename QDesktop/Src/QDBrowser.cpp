@@ -283,8 +283,8 @@ namespace QD
 
         if (!hasSlash(path))
         {
-            // Default to /shared for convenience.
-            QC::String::strncpy(absPath, "/shared/", sizeof(absPath) - 1);
+            // Default to /dump for stability when /shared is not mounted.
+            QC::String::strncpy(absPath, "/dump/", sizeof(absPath) - 1);
             const QC::usize used = QC::String::strlen(absPath);
             QC::String::strncpy(absPath + used, path, sizeof(absPath) - 1 - used);
         }
