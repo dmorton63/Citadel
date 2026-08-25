@@ -79,15 +79,13 @@ jobs:
       - name: Sign artifacts and manifest
         run: |
           mapfile -d '' ARTIFACTS < <(
-            find "$BUILD_DIR" -type f \( \
+            find "$BUILD_DIR/signing-stage" -type f \( \
               -iname "*.efi" -o -iname "bootgate" -o -iname "vmlinuz*" -o -iname "boot.json" -o -name "*.ko" \
             \) -print0 | sort -z
           )
 
           if [[ ${#ARTIFACTS[@]} -eq 0 ]]; then
-            echo "No signable artifacts found under $BUILD_DIR"
-            echo "Top-level build outputs:"
-            find "$BUILD_DIR" -maxdepth 3 -type f | sort | head -n 200
+            echo "No signable artifacts staged — check 'Stage boot artifacts' step above."
             exit 1
           fi
 
