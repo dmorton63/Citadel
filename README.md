@@ -12,11 +12,19 @@ This README is the short entry point for the repository:
 For the full current implementation snapshot, use `CITADEL_CURRENT_STATE.md`.
 For active planning, use `TODO_MAIN.md` and `TODO_INBOX.md`.
 
+## Executable Extension Decision
+
+Citadel native app executable artifacts use `.cap` (Citadel Application Package).
+
+Canonical source: `docs/CITADEL_APP_PLATFORM_V0_1.md`.
+Older brainstorm references to `.cpe` are historical and not current.
+
 Current highlights:
 - Desktop, windowing, and control stack are in active use.
 - Bring-up grade IPv4 networking is working in the current QEMU workflow.
 - QCQL now backs the active CMMS desktop runtime path: desktop documents and theme data are persisted in database tables, runtime rows are used at boot for the active layout, and generated CUI-ML preserves the existing parser/theme pipeline.
 - Security Center, Task_Flow, and data-driven runtime work exist partly in code and partly as forward-looking design/spec material.
+- Citadel is getting an update.  We are adding SMP Support.
 
 ## Desktop runtime status
 
@@ -48,6 +56,8 @@ Useful terminal commands:
 - `tcpconnect <ip|host> <port> [timeout_ms]`
 - `httpget <host> [path] [timeout_ms]`
 - `tcplog`
+- `LOOP <iterations> [TIMES] ... ENDLOOP [post_command]` (repeat a command block in terminal, then optionally run a final command like `saveterm`)
+- `LOOPINC <iterations>` (repeat the most recent routed command N times)
 
 ## A Snapshot of our desktop design as it is at the moment.
 
