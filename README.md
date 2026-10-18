@@ -228,6 +228,44 @@ qemu-system-x86_64 -cdrom build/citadel-limine.iso -serial stdio
 qemu-system-x86_64 -cdrom build/citadel-limine.iso -serial stdio -display gtk,grab-on-hover=on
 ```
 
+### SMP validation runs (QEMU)
+
+For repeatable SMP bring-up testing, prefer `run.sh` over ad-hoc QEMU commands:
+
+```bash
+# Launch with explicit virtual CPU count
+./run.sh --smp 1
+./run.sh --smp 2
+./run.sh --smp 3
+./run.sh --smp 4
+./run.sh --smp 8
+
+# Print the exact QEMU command (without launching) to verify -smp
+./run.sh --smp 4 --print-cmd
+```
+
+In the in-guest terminal:
+
+```text
+smpstat all
+loop 10 times
+smpwork 10000
+smpstat all
+endloop saveterm <name>.txt
+```
+
+Pass criteria:
+- `N=1`: baseline with no AP workers (`smp_target_aps: 0`, `smp_online_aps: 0`).
+- `N>1`: `smp_target_aps: N-1`, `smp_online_aps: N-1`, each iteration reports
+  `smpwork_completed: 10000`, and checksum
+  `13875592363411389448`.
+
+Validated examples are recorded in `shared/`:
+`smp1test.txt`, `smptest2.txt`, `smp3test.txt`, `smp-qemu-1-4.txt`, and
+`smp8text.txt`.
+
+See `tests/smp/README.md` for the full SMP smoke-test and transcript-validation flow.
+
 ### Shared host folder (QEMU)
 
 - Create a directory named `shared/` at the repo root. The build script detects it automatically.
