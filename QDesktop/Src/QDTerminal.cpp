@@ -16,6 +16,7 @@
 #include "QFSVFS.h"
 #include "QFSFile.h"
 #include "QFSDirectory.h"
+#include "QFSVolumeManager.h"
 
 #include "QWWindowManager.h"
 #include "QWWindow.h"
@@ -147,6 +148,32 @@ namespace
         return true;
     }
 
+    static bool parseLoopIterationsArg(const char *p, QC::u32 &iterations)
+    {
+        char countWord[24];
+        QC::String::memset(countWord, 0, sizeof(countWord));
+        const char *rest = readWord(p, countWord, sizeof(countWord));
+        rest = skipSpaces(rest);
+
+        if (countWord[0] == '\0')
+            return false;
+
+        if (!parseU32Word(countWord, iterations) || iterations == 0)
+            return false;
+
+        if (rest && *rest)
+        {
+            char keyword[16];
+            QC::String::memset(keyword, 0, sizeof(keyword));
+            const char *tail = readWord(rest, keyword, sizeof(keyword));
+            tail = skipSpaces(tail);
+            if (!streqIgnoreCase(keyword, "times") || (tail && *tail))
+                return false;
+        }
+
+        return true;
+    }
+
     static void destroyOwnedString(void *p)
     {
         char *s = static_cast<char *>(p);
@@ -223,6 +250,14 @@ namespace QD
 
         if (msg.msgId == QD::CmdMsg::Done)
         {
+            if (self->m_loopRunActive)
+            {
+                const QC::u64 corr = msg.param2;
+                if (self->removePendingLoopCorrelation(corr) && self->m_loopPendingCorrelations.empty())
+                {
+                    self->finishLoopRun();
+                }
+            }
             return true;
         }
 
@@ -268,11 +303,21 @@ namespace QD
                     m_shutdownPermRoot(nullptr),
                     m_shutdownPermOk(nullptr),
           m_savetermLastSavedCount(0),
-          m_savetermHasBaseline(false)
+          m_savetermHasBaseline(false),
+          m_loopCaptureActive(false),
+          m_loopCaptureIterations(0),
+          m_loopBody(),
+          m_loopIncHasCommand(false),
+          m_loopRunActive(false),
+          m_loopPendingCorrelations(),
+          m_loopRunIterations(0),
+          m_loopRunCommandCount(0)
     {
                 QC::String::memset(m_editorPath, 0, sizeof(m_editorPath));
                 QC::String::memset(m_editorBuffer, 0, sizeof(m_editorBuffer));
         QC::String::memset(m_savetermLastPath, 0, sizeof(m_savetermLastPath));
+        QC::String::memset(m_loopIncCommand, 0, sizeof(m_loopIncCommand));
+        QC::String::memset(m_loopPostCommand, 0, sizeof(m_loopPostCommand));
         auto &eventMgr = QK::Event::EventManager::instance();
         if (eventMgr.isInitialized())
         {
@@ -282,6 +327,7 @@ namespace QD
 
     Terminal::~Terminal()
     {
+        clearLoopBody();
         if (m_windowListenerId != QK::Event::InvalidListenerId)
         {
             QK::Event::EventManager::instance().removeListener(m_windowListenerId);
@@ -1560,6 +1606,53 @@ namespace QD
         const char *p = skipSpaces(line);
         if (*p == '\0')
             return;
+        const char *trimmedLine = p;
+
+        if (m_loopCaptureActive)
+        {
+            char loopCmd[32];
+            QC::String::memset(loopCmd, 0, sizeof(loopCmd));
+            const char *loopRest = readWord(p, loopCmd, sizeof(loopCmd));
+            loopRest = skipSpaces(loopRest);
+
+            if (streqIgnoreCase(loopCmd, "endloop"))
+            {
+                const char *postCommand = (loopRest && *loopRest) ? loopRest : nullptr;
+
+                if (m_loopBody.empty())
+                {
+                    appendLine("loop: no commands captured between LOOP and ENDLOOP");
+                    m_loopCaptureActive = false;
+                    m_loopCaptureIterations = 0;
+                    clearLoopBody();
+                    return;
+                }
+
+                const QC::u32 iterations = m_loopCaptureIterations;
+                m_loopCaptureActive = false;
+                m_loopCaptureIterations = 0;
+                QC::String::memset(m_loopPostCommand, 0, sizeof(m_loopPostCommand));
+                if (postCommand)
+                    QC::String::strncpy(m_loopPostCommand, postCommand, sizeof(m_loopPostCommand) - 1);
+                runCapturedLoop(iterations);
+                return;
+            }
+
+            if (streqIgnoreCase(loopCmd, "loop"))
+            {
+                appendLine("loop: nested LOOP blocks are not supported");
+                return;
+            }
+
+            if (m_loopBody.size() >= LOOP_MAX_BODY_LINES)
+            {
+                appendLine("loop: too many body lines (max 64)");
+                return;
+            }
+
+            m_loopBody.push_back(dupString(p));
+            return;
+        }
 
         // Extract command word
         char cmd[32];
@@ -1573,6 +1666,57 @@ namespace QD
         p = skipSpaces(p);
 
         // Local-only commands (UI state): clear/saveterm.
+
+        if (streqIgnoreCase(cmd, "loop"))
+        {
+            QC::u32 iterations = 0;
+            if (!parseLoopIterationsArg(p, iterations))
+            {
+                appendLine("usage: LOOP <iterations> [TIMES]");
+                appendLine("example:");
+                appendLine("  LOOP 10 TIMES");
+                appendLine("    smpwork 10000");
+                appendLine("  ENDLOOP [post_command]");
+                return;
+            }
+
+            if (iterations > LOOP_MAX_ITERATIONS)
+            {
+                appendLine("loop: iterations exceed maximum (1000)");
+                return;
+            }
+
+            m_loopCaptureActive = true;
+            m_loopCaptureIterations = iterations;
+            clearLoopBody();
+            appendLine("loop: capture started (enter commands, then ENDLOOP [post_command])");
+            return;
+        }
+
+        if (streqIgnoreCase(cmd, "endloop"))
+        {
+            appendLine("endloop: no active LOOP block");
+            appendLine("usage: ENDLOOP [post_command]");
+            return;
+        }
+
+        if (streqIgnoreCase(cmd, "loopinc"))
+        {
+            QC::u32 iterations = 0;
+            if (!parseLoopIterationsArg(p, iterations))
+            {
+                appendLine("usage: LOOPINC <iterations>");
+                return;
+            }
+            if (iterations > LOOP_MAX_ITERATIONS)
+            {
+                appendLine("loopinc: iterations exceed maximum (1000)");
+                return;
+            }
+
+            runLoopInc(iterations);
+            return;
+        }
 
         // Role aliases for convenience.
         if (streqIgnoreCase(cmd, "whoami"))
@@ -1791,15 +1935,27 @@ namespace QD
             {
                 QC::String::strncpy(outPath, m_savetermLastPath, sizeof(outPath) - 1);
             }
-            else if (!arg || *arg == '\0')
+            else if (!arg || *arg == '\0' || !hasSlash(arg))
             {
-                QC::String::strncpy(outPath, "/dump/citadel.txt", sizeof(outPath) - 1);
-            }
-            else if (!hasSlash(arg))
-            {
-                QC::String::strncpy(outPath, "/dump/", sizeof(outPath) - 1);
+                const char *persistentRoot = nullptr;
+                auto &volumes = QFS::VolumeManager::instance();
+                if (volumes.isMounted("QFS_SHARED"))
+                    persistentRoot = "/shared";
+                else if (volumes.isMounted("QFS_SYSTEM"))
+                    persistentRoot = "/system";
+
+                if (!persistentRoot)
+                {
+                    appendLine("saveterm: no persistent volume mounted; mount QFS_SHARED or QFS_SYSTEM, or provide an explicit path");
+                    return;
+                }
+
+                QC::String::strncpy(outPath, persistentRoot, sizeof(outPath) - 1);
                 QC::usize used = QC::String::strlen(outPath);
-                QC::String::strncpy(outPath + used, arg, sizeof(outPath) - 1 - used);
+                const char *fileName = (!arg || *arg == '\0') ? "citadel.txt" : arg;
+                QC::String::strncpy(outPath + used, "/", sizeof(outPath) - 1 - used);
+                used = QC::String::strlen(outPath);
+                QC::String::strncpy(outPath + used, fileName, sizeof(outPath) - 1 - used);
             }
             else
             {
@@ -1990,7 +2146,8 @@ namespace QD
             return;
         }
 
-        QK::Msg::Envelope *env = QK::Msg::makeEnvelope(QK::Msg::Topic::SvcMsg, nextCorrelationId());
+        const QC::u64 corrId = nextCorrelationId();
+        QK::Msg::Envelope *env = QK::Msg::makeEnvelope(QK::Msg::Topic::SvcMsg, corrId);
         env->senderId = m_window->windowId();
         env->param1 = QD::CmdMsg::Request;
         env->param2 = m_callerAccess;
@@ -2003,6 +2160,218 @@ namespace QD
         if (!ok)
         {
             appendLine("command processor: send failed");
+        }
+        else
+        {
+            if (m_loopRunActive)
+                m_loopPendingCorrelations.push_back(corrId);
+            QC::String::memset(m_loopIncCommand, 0, sizeof(m_loopIncCommand));
+            QC::String::strncpy(m_loopIncCommand, trimmedLine, sizeof(m_loopIncCommand) - 1);
+            m_loopIncHasCommand = (m_loopIncCommand[0] != '\0');
+        }
+    }
+
+    void Terminal::clearLoopBody()
+    {
+        for (QC::usize i = 0; i < m_loopBody.size(); ++i)
+        {
+            operator delete[](m_loopBody[i]);
+        }
+        m_loopBody.clear();
+    }
+
+    void Terminal::runCapturedLoop(QC::u32 iterations)
+    {
+        if (m_loopBody.empty() || iterations == 0)
+        {
+            clearLoopBody();
+            return;
+        }
+
+        char msg[96];
+        QC::String::memset(msg, 0, sizeof(msg));
+        QC::String::strncpy(msg, "loop: running iterations=", sizeof(msg) - 1);
+        char numBuf[16];
+        QC::String::memset(numBuf, 0, sizeof(numBuf));
+        QC::u32 value = iterations;
+        int idx = 0;
+        if (value == 0)
+        {
+            numBuf[idx++] = '0';
+        }
+        else
+        {
+            char tmp[16];
+            int ti = 0;
+            while (value > 0 && ti < 15)
+            {
+                tmp[ti++] = static_cast<char>('0' + (value % 10u));
+                value /= 10u;
+            }
+            while (ti > 0)
+                numBuf[idx++] = tmp[--ti];
+        }
+        numBuf[idx] = '\0';
+        const QC::usize used = QC::String::strlen(msg);
+        QC::String::strncpy(msg + used, numBuf, sizeof(msg) - 1 - used);
+        appendLine(msg);
+
+        m_loopRunActive = true;
+        m_loopPendingCorrelations.clear();
+        m_loopRunIterations = iterations;
+        m_loopRunCommandCount = static_cast<QC::u32>(m_loopBody.size());
+        for (QC::u32 iter = 0; iter < iterations; ++iter)
+        {
+            for (QC::usize i = 0; i < m_loopBody.size(); ++i)
+            {
+                executeLine(m_loopBody[i]);
+            }
+        }
+
+        clearLoopBody();
+        if (m_loopPendingCorrelations.empty())
+        {
+            finishLoopRun();
+        }
+    }
+
+    void Terminal::runLoopInc(QC::u32 iterations)
+    {
+        if (!m_loopIncHasCommand || m_loopIncCommand[0] == '\0')
+        {
+            appendLine("loopinc: no previous command to repeat");
+            return;
+        }
+
+        char msg[128];
+        QC::String::memset(msg, 0, sizeof(msg));
+        QC::String::strncpy(msg, "loopinc: repeating command ", sizeof(msg) - 1);
+
+        char countBuf[16];
+        QC::String::memset(countBuf, 0, sizeof(countBuf));
+        QC::u32 value = iterations;
+        int idx = 0;
+        if (value == 0)
+        {
+            countBuf[idx++] = '0';
+        }
+        else
+        {
+            char tmp[16];
+            int ti = 0;
+            while (value > 0 && ti < 15)
+            {
+                tmp[ti++] = static_cast<char>('0' + (value % 10u));
+                value /= 10u;
+            }
+            while (ti > 0)
+                countBuf[idx++] = tmp[--ti];
+        }
+        countBuf[idx] = '\0';
+
+        const QC::usize used = QC::String::strlen(msg);
+        QC::String::strncpy(msg + used, countBuf, sizeof(msg) - 1 - used);
+        QC::usize used2 = QC::String::strlen(msg);
+        QC::String::strncpy(msg + used2, " times", sizeof(msg) - 1 - used2);
+        appendLine(msg);
+
+        for (QC::u32 i = 0; i < iterations; ++i)
+        {
+            executeLine(m_loopIncCommand);
+        }
+    }
+
+    bool Terminal::removePendingLoopCorrelation(QC::u64 correlationId)
+    {
+        if (correlationId == 0)
+            return false;
+
+        for (QC::usize i = 0; i < m_loopPendingCorrelations.size(); ++i)
+        {
+            if (m_loopPendingCorrelations[i] != correlationId)
+                continue;
+
+            const QC::usize last = m_loopPendingCorrelations.size() - 1;
+            if (i != last)
+                m_loopPendingCorrelations[i] = m_loopPendingCorrelations[last];
+            m_loopPendingCorrelations.pop_back();
+            return true;
+        }
+
+        return false;
+    }
+
+    void Terminal::finishLoopRun()
+    {
+        m_loopRunActive = false;
+        char summary[128];
+        QC::String::memset(summary, 0, sizeof(summary));
+        QC::String::strncpy(summary, "loop: complete iterations=", sizeof(summary) - 1);
+
+        char iterBuf[16];
+        QC::String::memset(iterBuf, 0, sizeof(iterBuf));
+        QC::u32 value = m_loopRunIterations;
+        int idx = 0;
+        if (value == 0)
+        {
+            iterBuf[idx++] = '0';
+        }
+        else
+        {
+            char tmp[16];
+            int ti = 0;
+            while (value > 0 && ti < 15)
+            {
+                tmp[ti++] = static_cast<char>('0' + (value % 10u));
+                value /= 10u;
+            }
+            while (ti > 0)
+                iterBuf[idx++] = tmp[--ti];
+        }
+        iterBuf[idx] = '\0';
+        QC::usize used = QC::String::strlen(summary);
+        QC::String::strncpy(summary + used, iterBuf, sizeof(summary) - 1 - used);
+
+        used = QC::String::strlen(summary);
+        QC::String::strncpy(summary + used, " commands=", sizeof(summary) - 1 - used);
+
+        char cmdBuf[16];
+        QC::String::memset(cmdBuf, 0, sizeof(cmdBuf));
+        value = m_loopRunCommandCount;
+        idx = 0;
+        if (value == 0)
+        {
+            cmdBuf[idx++] = '0';
+        }
+        else
+        {
+            char tmp[16];
+            int ti = 0;
+            while (value > 0 && ti < 15)
+            {
+                tmp[ti++] = static_cast<char>('0' + (value % 10u));
+                value /= 10u;
+            }
+            while (ti > 0)
+                cmdBuf[idx++] = tmp[--ti];
+        }
+        cmdBuf[idx] = '\0';
+        used = QC::String::strlen(summary);
+        QC::String::strncpy(summary + used, cmdBuf, sizeof(summary) - 1 - used);
+        appendLine(summary);
+
+        m_loopRunIterations = 0;
+        m_loopRunCommandCount = 0;
+
+        if (m_loopPostCommand[0] != '\0')
+        {
+            char postCmd[256];
+            QC::String::memset(postCmd, 0, sizeof(postCmd));
+            QC::String::strncpy(postCmd, m_loopPostCommand, sizeof(postCmd) - 1);
+            QC::String::memset(m_loopPostCommand, 0, sizeof(m_loopPostCommand));
+            appendLine("loop: running post-command:");
+            appendLine(postCmd);
+            executeLine(postCmd);
         }
     }
 

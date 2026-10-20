@@ -12,11 +12,19 @@ This README is the short entry point for the repository:
 For the full current implementation snapshot, use `CITADEL_CURRENT_STATE.md`.
 For active planning, use `TODO_MAIN.md` and `TODO_INBOX.md`.
 
+## Executable Extension Decision
+
+Citadel native app executable artifacts use `.cap` (Citadel Application Package).
+
+Canonical source: `docs/CITADEL_APP_PLATFORM_V0_1.md`.
+Older brainstorm references to `.cpe` are historical and not current.
+
 Current highlights:
 - Desktop, windowing, and control stack are in active use.
 - Bring-up grade IPv4 networking is working in the current QEMU workflow.
 - QCQL now backs the active CMMS desktop runtime path: desktop documents and theme data are persisted in database tables, runtime rows are used at boot for the active layout, and generated CUI-ML preserves the existing parser/theme pipeline.
 - Security Center, Task_Flow, and data-driven runtime work exist partly in code and partly as forward-looking design/spec material.
+- Citadel is getting an update.  We are adding SMP Support.
 
 ## Desktop runtime status
 
@@ -48,6 +56,8 @@ Useful terminal commands:
 - `tcpconnect <ip|host> <port> [timeout_ms]`
 - `httpget <host> [path] [timeout_ms]`
 - `tcplog`
+- `LOOP <iterations> [TIMES] ... ENDLOOP [post_command]` (repeat a command block in terminal, then optionally run a final command like `saveterm`)
+- `LOOPINC <iterations>` (repeat the most recent routed command N times)
 
 ## A Snapshot of our desktop design as it is at the moment.
 
@@ -217,6 +227,44 @@ qemu-system-x86_64 -cdrom build/citadel-limine.iso -serial stdio
 # (Not all QEMU display backends/builds expose this suboption.)
 qemu-system-x86_64 -cdrom build/citadel-limine.iso -serial stdio -display gtk,grab-on-hover=on
 ```
+
+### SMP validation runs (QEMU)
+
+For repeatable SMP bring-up testing, prefer `run.sh` over ad-hoc QEMU commands:
+
+```bash
+# Launch with explicit virtual CPU count
+./run.sh --smp 1
+./run.sh --smp 2
+./run.sh --smp 3
+./run.sh --smp 4
+./run.sh --smp 8
+
+# Print the exact QEMU command (without launching) to verify -smp
+./run.sh --smp 4 --print-cmd
+```
+
+In the in-guest terminal:
+
+```text
+smpstat all
+loop 10 times
+smpwork 10000
+smpstat all
+endloop saveterm <name>.txt
+```
+
+Pass criteria:
+- `N=1`: baseline with no AP workers (`smp_target_aps: 0`, `smp_online_aps: 0`).
+- `N>1`: `smp_target_aps: N-1`, `smp_online_aps: N-1`, each iteration reports
+  `smpwork_completed: 10000`, and checksum
+  `13875592363411389448`.
+
+Validated examples are recorded in `shared/`:
+`smp1test.txt`, `smptest2.txt`, `smp3test.txt`, `smp-qemu-1-4.txt`, and
+`smp8text.txt`.
+
+See `tests/smp/README.md` for the full SMP smoke-test and transcript-validation flow.
 
 ### Shared host folder (QEMU)
 

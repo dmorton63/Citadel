@@ -4,6 +4,7 @@
 // Namespace: QD
 
 #include "QCTypes.h"
+#include "QCVector.h"
 #include "QKEventListener.h"
 
 namespace QW
@@ -78,6 +79,11 @@ namespace QD
 
         void syncScrollUi();
         void scrollToTail();
+        void clearLoopBody();
+        void runCapturedLoop(QC::u32 iterations);
+        void runLoopInc(QC::u32 iterations);
+        bool removePendingLoopCorrelation(QC::u64 correlationId);
+        void finishLoopRun();
 
         static void onOutputScrollChanged(QW::Controls::ScrollBar *scrollBar, void *userData);
         static void onOutputViewScrollChanged(QW::Controls::ListView *listView, void *userData);
@@ -136,8 +142,20 @@ namespace QD
         QC::usize m_savetermLastSavedCount;
         bool m_savetermHasBaseline;
         char m_savetermLastPath[256];
+        bool m_loopCaptureActive;
+        QC::u32 m_loopCaptureIterations;
+        QC::Vector<char *> m_loopBody;
+        char m_loopIncCommand[256];
+        bool m_loopIncHasCommand;
+        bool m_loopRunActive;
+        QC::Vector<QC::u64> m_loopPendingCorrelations;
+        char m_loopPostCommand[256];
+        QC::u32 m_loopRunIterations;
+        QC::u32 m_loopRunCommandCount;
 
         static constexpr QC::usize OUTPUT_MAX_LINES = 2048;
+        static constexpr QC::u32 LOOP_MAX_ITERATIONS = 1000;
+        static constexpr QC::usize LOOP_MAX_BODY_LINES = 64;
     };
 
 } // namespace QD
