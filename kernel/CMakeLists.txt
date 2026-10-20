@@ -6,6 +6,7 @@ add_executable(citadel_kernel
     QKSystemVolumeCommands.cpp
     Boot/QKBoot.cpp
     Boot/Arch/QKBootArchInit.cpp
+    Boot/Arch/QKBootSmp.cpp
     Boot/ACPI/QKBootACPITables.cpp
     Boot/Config/QKBootJson.cpp
     Boot/Config/QKBootSysConfig.cpp

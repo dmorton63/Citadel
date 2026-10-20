@@ -136,6 +136,19 @@ limine_rsdp_request:
     dq 0x27637845accdcf3c
     dq 0                     ; revision
     dq 0                     ; response pointer
+
+; Multiprocessor request. Limine starts APs and parks them until goto_address
+; is atomically set by the kernel.
+align 8
+global limine_mp_request
+limine_mp_request:
+    dq LIMINE_COMMON_MAGIC_0
+    dq LIMINE_COMMON_MAGIC_1
+    dq 0x95a67b819a1b857e
+    dq 0xa0b61b723b6a73e0
+    dq 0                     ; revision
+    dq 0                     ; response pointer
+    dq 0                     ; flags
     
 ; ============================================================================
 ; BSS section
@@ -154,6 +167,7 @@ stack_top:
 section .text
 global _start
 extern kernel_main
+extern citadel_ap_main
 
 ; Entry point - Limine enters here in 64-bit mode
 _start:
@@ -182,6 +196,34 @@ _start:
     cli
     hlt
     jmp .halt
+
+; Limine enters this callback on a parked application processor. Configure the
+; floating-point/SSE state before entering compiled kernel code.
+global citadel_ap_entry
+citadel_ap_entry:
+    cli
+    cld
+
+    mov rax, cr0
+    and rax, ~(1 << 2)       ; Clear EM
+    or  rax, (1 << 1)        ; Set MP
+    and rax, ~(1 << 3)       ; Clear TS
+    mov cr0, rax
+
+    mov rax, cr4
+    or  rax, (1 << 9)        ; OSFXSR
+    or  rax, (1 << 10)       ; OSXMMEXCPT
+    mov cr4, rax
+    fninit
+
+    sub rsp, 8
+    call citadel_ap_main
+    add rsp, 8
+
+.ap_halt:
+    cli
+    hlt
+    jmp .ap_halt
 
 ; Interrupt stubs
 global isr_common_stub
