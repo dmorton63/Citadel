@@ -79,7 +79,7 @@ jobs:
       - name: Sign artifacts and manifest
         run: |
           mapfile -d '' ARTIFACTS < <(
-            find "$BUILD_DIR/signing-stage" -type f \( \
+            find "$BUILD_DIR/secureboot_stage" -type f \( \
               -iname "*.efi" -o -iname "bootgate" -o -iname "vmlinuz*" -o -iname "boot.json" -o -name "*.ko" \
             \) -print0 | sort -z
           )
