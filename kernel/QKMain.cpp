@@ -10,6 +10,7 @@
 #include "Debug/Framebuffer/QKDebugFramebufferText.h"
 #include "Boot/Limine/QKBootLimineRequests.h"
 #include "Boot/Arch/QKBootArchInit.h"
+#include "Boot/Arch/QKBootSmp.h"
 #include "Boot/ACPI/QKBootACPITables.h"
 #include "Boot/TPM/QKBootTPMSecureStore.h"
 #include "Boot/Config/QKBootStartupConfig.h"
@@ -164,6 +165,7 @@ extern "C"
     extern QC::u64 limine_terminal_request[];
     extern QC::u64 limine_firmware_type_request[];
     extern QC::u64 limine_rsdp_request[];
+    extern QC::u64 limine_mp_request[];
 }
 
 // Kernel main entry point
@@ -243,6 +245,7 @@ extern "C" void kernel_main()
     QK::Debug::Serial::Write("BSS (skipped - Limine does it)\r\n");
 
     QKBoot::initializeDrivers();
+    (void)QK::Boot::Smp::Initialize(limine_mp_request, QK::Debug::Serial::Write);
     initializeBootSecurityRuntime();
 
     // Validate boot policy (boot.json) and enforce minimum hardware floors

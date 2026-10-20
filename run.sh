@@ -25,6 +25,7 @@ AUTO_GRAB=true
 PRODUCTION=false
 RUN_FOR_SECONDS=0
 SYSTEM_VOL=false
+SMP_CPUS=1
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -39,6 +40,14 @@ while [[ $# -gt 0 ]]; do
     --no-grab) AUTO_GRAB=false; shift ;;
     --prod) PRODUCTION=true; shift ;;
     --system-vol) SYSTEM_VOL=true; shift ;;
+    --smp)
+      if [[ $# -lt 2 ]]; then
+        echo "--smp requires a positive CPU count" >&2
+        exit 2
+      fi
+      SMP_CPUS="$2"
+      shift 2
+      ;;
     --run-for) RUN_FOR_SECONDS="${2:-0}"; shift 2 ;;
     -h|--help)
       cat <<EOF
@@ -53,6 +62,7 @@ Options:
   --no-grab        Disable grab-on-hover helper
   --prod           Warn if running prod without --tpm
   --system-vol     Attach persistent system volume disk (build/system.qcow2)
+  --smp <count>    Set the number of QEMU virtual CPUs (default: 1)
   --run-for <s>    Auto-stop after <s> seconds (requires timeout)
 EOF
       exit 0
@@ -64,6 +74,11 @@ EOF
       ;;
   esac
 done
+
+if ! [[ "${SMP_CPUS}" =~ ^[1-9][0-9]*$ ]]; then
+  echo "--smp requires a positive CPU count" >&2
+  exit 2
+fi
 
 if [[ ! -f "${ISO_FILE}" ]]; then
   echo "Missing ISO: ${ISO_FILE}" >&2
@@ -167,6 +182,7 @@ QEMU_ARGS=(
   -cdrom "${ISO_FILE}"
   -boot order=d
   -m 3G
+  -smp "${SMP_CPUS}"
   -vga vmware
   -netdev user,id=net0
   -device e1000,netdev=net0
