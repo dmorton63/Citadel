@@ -405,6 +405,7 @@ namespace QW
                 const bool nearBounds = hitTestWithPadding(absoluteBounds(), x, y, kReleasePad);
                 if ((inside || (withinSlop && nearBounds)) && m_clickHandler)
                 {
+                    QC_LOG_INFO("QWInput", "Button click fired text='%s' id=%u", m_text, static_cast<unsigned>(m_id));
                     if (kButtonTrace)
                     {
                         auto &wm = QW::WindowManager::instance();

@@ -1320,6 +1320,17 @@ namespace QW
         // Route to target window
         if (targetWindow)
         {
+            if (mouse.type == Type::MouseButtonDown || mouse.type == Type::MouseButtonUp)
+            {
+                QC_LOG_INFO("QWInput", "MouseButton event=%u button=%u screen=(%d,%d) targetWindow=%u title='%s'",
+                            static_cast<unsigned>(mouse.type),
+                            static_cast<unsigned>(mouse.button),
+                            m_mousePos.x,
+                            m_mousePos.y,
+                            static_cast<unsigned>(targetWindow->windowId()),
+                            targetWindow->title() ? targetWindow->title() : "");
+            }
+
             // For mouse down, focus the window
             if (mouse.type == Type::MouseButtonDown)
             {
@@ -1413,9 +1424,17 @@ namespace QW
             QK::Event::Event event;
             event.data.mouse = localMouse;
             ++m_dispatchDepth;
-            targetWindow->onEvent(event);
+            const bool handled = targetWindow->onEvent(event);
             --m_dispatchDepth;
             processPendingDestroy();
+
+            if (mouse.type == Type::MouseButtonDown || mouse.type == Type::MouseButtonUp)
+            {
+                QC_LOG_INFO("QWInput", "MouseButton dispatch handled=%u local=(%d,%d)",
+                            handled ? 1u : 0u,
+                            localMouse.x,
+                            localMouse.y);
+            }
 
             // End capture when all pressed buttons are released.
             if (mouse.type == Type::MouseButtonUp && m_captureWindow == targetWindow)
@@ -1424,6 +1443,14 @@ namespace QW
                 if (m_captureButtonsMask == 0)
                     m_captureWindow = nullptr;
             }
+        }
+        else if (mouse.type == Type::MouseButtonDown || mouse.type == Type::MouseButtonUp)
+        {
+            QC_LOG_INFO("QWInput", "MouseButton event=%u button=%u screen=(%d,%d) targetWindow=none",
+                        static_cast<unsigned>(mouse.type),
+                        static_cast<unsigned>(mouse.button),
+                        m_mousePos.x,
+                        m_mousePos.y);
         }
 
         // Hardware-only affordance: switch cursor shape on resize-handle hover.

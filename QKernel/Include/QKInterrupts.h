@@ -36,6 +36,7 @@ namespace QK
     constexpr QC::u8 IRQ_COM2 = IRQ_BASE + 3;
     constexpr QC::u8 IRQ_COM1 = IRQ_BASE + 4;
     constexpr QC::u8 IRQ_MOUSE = IRQ_BASE + 12;
+    constexpr QC::u8 IRQ_LOCAL_APIC_TIMER = 48;
 
     struct InterruptFrame
     {
@@ -54,7 +55,9 @@ namespace QK
 
         void initialize();
 
-        void registerHandler(QC::u8 vector, InterruptHandler handler);
+        // Set acknowledgeBeforeHandler when a handler may switch task contexts.
+        void registerHandler(QC::u8 vector, InterruptHandler handler,
+                             bool acknowledgeBeforeHandler = false);
         void unregisterHandler(QC::u8 vector);
 
         void enableInterrupt(QC::u8 irq);
@@ -75,6 +78,7 @@ namespace QK
         void initializeAPIC();
 
         InterruptHandler m_handlers[256];
+        bool m_acknowledgeBeforeHandler[256]{};
     };
 
 } // namespace QK

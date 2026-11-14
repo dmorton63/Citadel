@@ -14,6 +14,7 @@
 #include "Boot/Security/QKBootSha256.h"
 
 #include "QCMemUtil.h"
+#include "QCBuiltins.h"
 
 #include "Boot/ACPI/QKBootACPITables.h"
 #include "Boot/Arch/QKBootArchInit.h"
@@ -27,12 +28,265 @@
 #include "QKBootEventLog.h"
 #include "QKRuntimeRegistries.h"
 
+#include "QArchIDT.h"
+#include "QArchCPU.h"
+#include "QKInterrupts.h"
+#include "QKTaskManager.h"
+#include "QKScheduler.h"
+#include "QKTime.h"
+#include "QDrvTimer.h"
+
 namespace
 {
     QKBoot::FLogFn g_Log = nullptr;
     QKBoot::FLogFn g_LogUpstream = nullptr;
     QKBoot::LimineRequests g_Req{};
     bool g_DesktopPrepared = false;
+
+    struct ApBootSlot
+    {
+        volatile QC::u32 cpuIndex = 0;
+        volatile QC::u32 lapicId = 0;
+        volatile QC::u32 online = 0;
+        volatile QC::u32 state = static_cast<QC::u32>(QKBoot::SmpCpuState::Offline);
+        volatile QC::u64 idleHeartbeats = 0;
+        volatile QC::u64 timerHookTicks = 0;
+        volatile QC::u64 schedulerHookKicks = 0;
+        volatile QC::u64 schedulerTaskTurns[3] = {};
+        volatile QC::u64 schedulerTaskWakeups = 0;
+        volatile QC::u64 selfTestSpins[2] = {};
+        volatile QC::u32 workerIdle = 0;
+        volatile QC::u64 workItemsCompleted = 0;
+        volatile QC::u64 workChecksum = 0;
+    };
+
+    struct SmpSelfTestTaskArgument
+    {
+        ApBootSlot *slot = nullptr;
+        QC::u32 taskIndex = 0;
+    };
+
+    static constexpr QC::usize kMaxApBootSlots = 256;
+    static constexpr QC::u32 kSmpSelfTestTaskCount = 3;
+    static constexpr QC::u64 kSmpSelfTestSpinTimeoutMs = 2000;
+    static ApBootSlot g_ApBootSlots[kMaxApBootSlots]{};
+    static QK::TaskId g_ApWorkerTaskIds[kMaxApBootSlots]{};
+    static SmpSelfTestTaskArgument g_SmpSelfTestArguments[kMaxApBootSlots][kSmpSelfTestTaskCount]{};
+    static volatile QC::u32 g_SmpSelfTestActive = 0;
+    static volatile QC::u32 g_SmpSelfTestExpected = 0;
+    static volatile QC::u32 g_SmpSelfTestFinished = 0;
+    static volatile QC::u32 g_ApSlotCount = 0;
+    static volatile QC::u32 g_ApOnlineCount = 0;
+    static volatile QC::u64 g_SmpTotalCpus = 0;
+    static volatile QC::u64 g_SmpTargetAps = 0;
+    static volatile QC::u64 g_SmpWorkTarget = 0;
+    static volatile QC::u64 g_SmpWorkCompleted = 0;
+    static volatile QC::u64 g_SmpWorkChecksum = 0;
+    static volatile QC::u32 g_SmpWorkBatchActive = 0;
+    static volatile QC::u32 g_SmpTimerReady = 0;
+    static volatile QC::u32 g_SmpTimerInitialCount = 0;
+    static volatile QC::u32 g_SmpTimerQuantumTicks = 0;
+    static volatile QC::u32 g_SmpTimerFrequency = 0;
+    static volatile QC::u32 g_SmpSchedulerReady = 0;
+
+    struct SmpWorkItem
+    {
+        QKBoot::SmpWorkFn work = nullptr;
+        QC::u64 argument = 0;
+        bool batchTracked = false;
+    };
+
+    static constexpr QC::usize kSmpWorkQueueCapacity = 256;
+    static SmpWorkItem g_SmpWorkQueue[kSmpWorkQueueCapacity]{};
+    static volatile QC::u32 g_SmpWorkQueueLock = 0;
+    static QC::u32 g_SmpWorkQueueHead = 0;
+    static QC::u32 g_SmpWorkQueueTail = 0;
+    static QC::u32 g_SmpWorkQueueCount = 0;
+
+    static QC::u64 LockSmpWorkQueue()
+    {
+        QC::u64 flags = 0;
+        asm volatile("pushfq; pop %0; cli" : "=r"(flags) : : "memory");
+        while (__atomic_exchange_n(&g_SmpWorkQueueLock, 1u, __ATOMIC_ACQUIRE) != 0)
+            QC::pause();
+        return flags;
+    }
+
+    static void UnlockSmpWorkQueue(QC::u64 flags)
+    {
+        __atomic_store_n(&g_SmpWorkQueueLock, 0u, __ATOMIC_RELEASE);
+        if (flags & (1ull << 9))
+            asm volatile("sti" ::: "memory");
+    }
+
+    static bool EnqueueSmpWork(QKBoot::SmpWorkFn work, QC::u64 argument, bool batchTracked)
+    {
+        if (!work)
+            return false;
+
+        const QC::u64 flags = LockSmpWorkQueue();
+        if (g_SmpWorkQueueCount >= kSmpWorkQueueCapacity)
+        {
+            UnlockSmpWorkQueue(flags);
+            return false;
+        }
+
+        g_SmpWorkQueue[g_SmpWorkQueueTail] = SmpWorkItem{work, argument, batchTracked};
+        g_SmpWorkQueueTail = (g_SmpWorkQueueTail + 1) % kSmpWorkQueueCapacity;
+        ++g_SmpWorkQueueCount;
+        UnlockSmpWorkQueue(flags);
+
+        // Workers publish workerIdle under the queue lock, so this sees every worker that
+        // blocked before the push; a worker blocking afterwards will see the queued item.
+        const QC::usize slotCount = __atomic_load_n(&g_ApSlotCount, __ATOMIC_ACQUIRE);
+        for (QC::usize i = 0; i < slotCount; ++i)
+        {
+            if (__atomic_exchange_n(&g_ApBootSlots[i].workerIdle, 0u, __ATOMIC_ACQ_REL) != 0)
+                (void)QK::Scheduler::instance().unblockTask(g_ApWorkerTaskIds[i]);
+        }
+        return true;
+    }
+
+    static bool DequeueSmpWork(SmpWorkItem &out)
+    {
+        const QC::u64 flags = LockSmpWorkQueue();
+        if (g_SmpWorkQueueCount == 0)
+        {
+            UnlockSmpWorkQueue(flags);
+            return false;
+        }
+
+        out = g_SmpWorkQueue[g_SmpWorkQueueHead];
+        g_SmpWorkQueue[g_SmpWorkQueueHead] = SmpWorkItem{};
+        g_SmpWorkQueueHead = (g_SmpWorkQueueHead + 1) % kSmpWorkQueueCapacity;
+        --g_SmpWorkQueueCount;
+        UnlockSmpWorkQueue(flags);
+        return true;
+    }
+
+    static void EnableFpuAndSseForCurrentCpu()
+    {
+        // Mirror the minimal CR0/CR4 setup that BSP applies so APs can safely run C++.
+        QC::u64 cr0 = 0;
+        QC::u64 cr4 = 0;
+
+        asm volatile("clts" ::: "memory");
+        asm volatile("mov %%cr0, %0" : "=r"(cr0));
+        cr0 &= ~(1ull << 2); // EM = 0
+        cr0 &= ~(1ull << 3); // TS = 0
+        cr0 |= (1ull << 1);  // MP = 1
+        cr0 |= (1ull << 5);  // NE = 1
+        asm volatile("mov %0, %%cr0" : : "r"(cr0) : "memory");
+
+        asm volatile("mov %%cr4, %0" : "=r"(cr4));
+        cr4 |= (1ull << 9);  // OSFXSR
+        cr4 |= (1ull << 10); // OSXMMEXCPT
+        asm volatile("mov %0, %%cr4" : : "r"(cr4) : "memory");
+        asm volatile("fninit" ::: "memory");
+    }
+
+    static void LocalApicTimerInterrupt(QK::InterruptFrame *)
+    {
+        QC::u32 lapicId = 0;
+        QC::u32 cpuIndex = 0;
+        bool schedulerReady = false;
+        if (QK::Boot::Acpi::ReadCurrentCpuLocalApicId(lapicId))
+        {
+            const QC::usize slotCount = __atomic_load_n(&g_ApSlotCount, __ATOMIC_RELAXED);
+            for (QC::usize i = 0; i < slotCount; ++i)
+            {
+                ApBootSlot &slot = g_ApBootSlots[i];
+                if (__atomic_load_n(&slot.lapicId, __ATOMIC_RELAXED) != lapicId ||
+                    __atomic_load_n(&slot.online, __ATOMIC_RELAXED) == 0)
+                    continue;
+
+                const QC::u64 ticks = __atomic_add_fetch(&slot.timerHookTicks, 1ull, __ATOMIC_RELAXED);
+                cpuIndex = __atomic_load_n(&slot.cpuIndex, __ATOMIC_RELAXED);
+                const QC::u32 quantumTicks = __atomic_load_n(&g_SmpTimerQuantumTicks, __ATOMIC_RELAXED);
+                if (quantumTicks != 0 && ticks % quantumTicks == 0)
+                    __atomic_fetch_add(&slot.schedulerHookKicks, 1ull, __ATOMIC_RELAXED);
+                schedulerReady = __atomic_load_n(&g_SmpSchedulerReady, __ATOMIC_ACQUIRE) != 0;
+                break;
+            }
+        }
+
+        QK::Boot::Acpi::SendCurrentCpuLocalApicEoi();
+        if (schedulerReady)
+            QK::Scheduler::instance().timerTick(cpuIndex);
+    }
+
+    static bool CalibrateLocalApicTimer(QC::u32 frequencyHz, QC::u32 &initialCount)
+    {
+        constexpr QC::u32 kCalibrationPitTicks = 50;
+        constexpr QC::u64 kCalibrationSpinLimit = 100000000ull;
+        QDrv::Timer &pitTimer = QDrv::Timer::instance();
+        const QC::u32 pitFrequency = pitTimer.frequency();
+        if (frequencyHz == 0 || pitFrequency == 0 || !QArch::CPU::instance().interruptsEnabled())
+            return false;
+
+        QK::Boot::Acpi::StopCurrentCpuLocalApicTimer();
+        if (!QK::Boot::Acpi::ConfigureCurrentCpuLocalApicTimer(
+                QK::IRQ_LOCAL_APIC_TIMER, 0xFFFFFFFFu, false))
+            return false;
+
+        const QC::u64 startTicks = pitTimer.ticks();
+        QC::u64 spins = 0;
+        while (pitTimer.ticks() - startTicks < kCalibrationPitTicks)
+        {
+            if (++spins >= kCalibrationSpinLimit)
+            {
+                QK::Boot::Acpi::StopCurrentCpuLocalApicTimer();
+                return false;
+            }
+            QC::pause();
+        }
+
+        QC::u32 remainingCount = 0;
+        const bool counterRead = QK::Boot::Acpi::ReadCurrentCpuLocalApicTimerCount(remainingCount);
+        QK::Boot::Acpi::StopCurrentCpuLocalApicTimer();
+        if (!counterRead || remainingCount >= 0xFFFFFFFFu)
+            return false;
+
+        const QC::u64 elapsedCounts = 0xFFFFFFFFull - remainingCount;
+        const QC::u64 elapsedPitTicks = pitTimer.ticks() - startTicks;
+        if (elapsedPitTicks == 0)
+            return false;
+        const QC::u64 countsPerSecond = (elapsedCounts * pitFrequency) / elapsedPitTicks;
+        const QC::u64 count = countsPerSecond / frequencyHz;
+        if (count == 0 || count > 0xFFFFFFFFull)
+            return false;
+
+        initialCount = static_cast<QC::u32>(count);
+        return true;
+    }
+
+    static bool RunOneSmpWorkItem(ApBootSlot &slot)
+    {
+        SmpWorkItem item{};
+        if (!DequeueSmpWork(item))
+            return false;
+
+        const QC::u64 value = item.work(item.argument);
+
+        __atomic_fetch_add(&slot.workItemsCompleted, 1ull, __ATOMIC_RELAXED);
+        __atomic_fetch_add(&slot.workChecksum, value, __ATOMIC_RELAXED);
+        if (item.batchTracked)
+        {
+            __atomic_fetch_add(&g_SmpWorkChecksum, value, __ATOMIC_RELAXED);
+            const QC::u64 completed = __atomic_add_fetch(&g_SmpWorkCompleted, 1ull, __ATOMIC_RELEASE);
+            if (completed >= __atomic_load_n(&g_SmpWorkTarget, __ATOMIC_ACQUIRE))
+                __atomic_store_n(&g_SmpWorkBatchActive, 0u, __ATOMIC_RELEASE);
+        }
+        return true;
+    }
+
+    static QC::u64 SmpWorkTestCallback(QC::u64 index)
+    {
+        QC::u64 value = index + 1;
+        for (QC::u32 iteration = 0; iteration < 128; ++iteration)
+            value = (value * 6364136223846793005ull) + 1442695040888963407ull;
+        return value;
+    }
 
     static void BootLogFanout(const char *msg)
     {
@@ -130,6 +384,252 @@ namespace
         if (!Log)
             return;
         Log(v ? "true" : "false");
+    }
+
+    // Blocks while the shared queue is empty; EnqueueSmpWork unblocks idle workers and the
+    // AP idle loop reschedules after its next interrupt, so wakeups need no wall-clock time.
+    static void RunApWorkerTask(void *argument)
+    {
+        auto *slot = static_cast<ApBootSlot *>(argument);
+        if (!slot)
+            return;
+
+        QK::TaskManager &taskManager = QK::TaskManager::instance();
+        const QC::u32 cpuIndex = slot->cpuIndex;
+        const QK::TaskId self = taskManager.getCurrentTaskId(cpuIndex);
+        for (;;)
+        {
+            if (RunOneSmpWorkItem(*slot))
+                continue;
+
+            const QC::u64 flags = LockSmpWorkQueue();
+            const bool block = g_SmpWorkQueueCount == 0;
+            if (block)
+            {
+                taskManager.setTaskState(self, QK::TaskState::Blocked);
+                __atomic_store_n(&slot->workerIdle, 1u, __ATOMIC_RELEASE);
+            }
+            UnlockSmpWorkQueue(flags);
+            if (block)
+                QK::Scheduler::instance().schedule(cpuIndex);
+        }
+    }
+
+    // The last finishing task reopens the gate; no task touches its argument afterwards.
+    static void FinishSmpSelfTestTask()
+    {
+        const QC::u32 finished = __atomic_add_fetch(&g_SmpSelfTestFinished, 1u, __ATOMIC_ACQ_REL);
+        if (finished == __atomic_load_n(&g_SmpSelfTestExpected, __ATOMIC_ACQUIRE))
+            __atomic_store_n(&g_SmpSelfTestActive, 0u, __ATOMIC_RELEASE);
+    }
+
+    // Spinners 0 and 1 never yield; each passes only after observing the other advance
+    // while it is still spinning, which requires timer preemption in both directions.
+    static void RunSmpSelfTestTask(void *argument)
+    {
+        auto *task = static_cast<SmpSelfTestTaskArgument *>(argument);
+        if (!task || !task->slot || task->taskIndex >= kSmpSelfTestTaskCount)
+            return;
+
+        ApBootSlot &slot = *task->slot;
+        if (task->taskIndex == 2)
+        {
+            __atomic_store_n(&slot.schedulerTaskTurns[2], 1ull, __ATOMIC_RELAXED);
+            if (QK::TaskManager::instance().sleep(5, slot.cpuIndex))
+                __atomic_fetch_add(&slot.schedulerTaskWakeups, 1ull, __ATOMIC_RELAXED);
+            FinishSmpSelfTestTask();
+            return;
+        }
+
+        const QC::u32 self = task->taskIndex;
+        const QC::u32 peer = 1 - self;
+        const QC::u64 startMs = QK::Time::milliseconds();
+        const QC::u64 peerStart = __atomic_load_n(&slot.selfTestSpins[peer], __ATOMIC_ACQUIRE);
+        bool observed = false;
+        for (;;)
+        {
+            const QC::u64 spins = __atomic_add_fetch(&slot.selfTestSpins[self], 1ull, __ATOMIC_RELEASE);
+            if (!observed && __atomic_load_n(&slot.selfTestSpins[peer], __ATOMIC_ACQUIRE) != peerStart)
+            {
+                observed = true;
+                __atomic_store_n(&slot.schedulerTaskTurns[self], spins, __ATOMIC_RELEASE);
+            }
+            if (observed && __atomic_load_n(&slot.schedulerTaskTurns[peer], __ATOMIC_ACQUIRE) != 0)
+                break;
+            if (QK::Time::milliseconds() - startMs >= kSmpSelfTestSpinTimeoutMs)
+                break;
+            QC::pause();
+        }
+        FinishSmpSelfTestTask();
+    }
+
+    extern "C" void QKBootApEntry(limine_mp_info *cpu)
+    {
+        asm volatile("cli" ::: "memory");
+
+        auto *slot = static_cast<ApBootSlot *>(nullptr);
+        if (cpu)
+        {
+            slot = reinterpret_cast<ApBootSlot *>(static_cast<QC::uptr>(cpu->extra_argument));
+            if (slot)
+            {
+                slot->state = static_cast<QC::u32>(QKBoot::SmpCpuState::Initializing);
+                slot->lapicId = cpu->lapic_id;
+                slot->cpuIndex = cpu->processor_id;
+                slot->idleHeartbeats = 0;
+                slot->timerHookTicks = 0;
+                slot->schedulerHookKicks = 0;
+                for (QC::u32 taskIndex = 0; taskIndex < kSmpSelfTestTaskCount; ++taskIndex)
+                    slot->schedulerTaskTurns[taskIndex] = 0;
+                slot->schedulerTaskWakeups = 0;
+                slot->selfTestSpins[0] = 0;
+                slot->selfTestSpins[1] = 0;
+                slot->workItemsCompleted = 0;
+                slot->workChecksum = 0;
+                slot->online = 1;
+            }
+        }
+
+        // AP-local descriptor state and SIMD state are required before broader kernel work.
+        QArch::IDT::instance().load();
+        EnableFpuAndSseForCurrentCpu();
+
+        if (slot)
+        {
+            slot->state = static_cast<QC::u32>(QKBoot::SmpCpuState::Online);
+        }
+
+        __atomic_fetch_add(&g_ApOnlineCount, 1u, __ATOMIC_SEQ_CST);
+
+        bool localTimerAttempted = false;
+        bool localTimerEnabled = false;
+        for (;;)
+        {
+            if (slot)
+            {
+                __atomic_fetch_add(&slot->idleHeartbeats, 1ull, __ATOMIC_RELAXED);
+                if (!localTimerAttempted && __atomic_load_n(&g_SmpTimerReady, __ATOMIC_ACQUIRE) != 0)
+                {
+                    localTimerAttempted = true;
+                    const QC::u32 initialCount = __atomic_load_n(&g_SmpTimerInitialCount, __ATOMIC_RELAXED);
+                    if (QK::Boot::Acpi::InitializeCurrentCpuLocalApic(nullptr) &&
+                        QK::Boot::Acpi::ConfigureCurrentCpuLocalApicTimer(
+                            QK::IRQ_LOCAL_APIC_TIMER, initialCount, true))
+                    {
+                        localTimerEnabled = true;
+                        asm volatile("sti" ::: "memory");
+                    }
+                }
+                if (__atomic_load_n(&g_SmpSchedulerReady, __ATOMIC_ACQUIRE) != 0)
+                {
+                    QK::Scheduler::instance().schedule(slot->cpuIndex);
+                    // No ready task: sleep until the next local timer tick re-runs the scheduler.
+                    if (localTimerEnabled)
+                        asm volatile("sti; hlt" ::: "memory");
+                    continue;
+                }
+                (void)RunOneSmpWorkItem(*slot);
+            }
+            QC::pause();
+        }
+    }
+
+    static void ConfigureMpStartup(QKBoot::FLogFn Log)
+    {
+        const limine_mp_response *mp = QK::Boot::Limine::GetMpResponse(g_Req.mp);
+        if (!mp || mp->cpu_count == 0 || !mp->cpus)
+        {
+            __atomic_store_n(&g_SmpTotalCpus, 0, __ATOMIC_SEQ_CST);
+            __atomic_store_n(&g_SmpTargetAps, 0, __ATOMIC_SEQ_CST);
+            __atomic_store_n(&g_ApSlotCount, 0, __ATOMIC_SEQ_CST);
+            if (Log)
+                Log("SMP: Limine MP response unavailable\r\n");
+            return;
+        }
+
+        const QC::u64 totalCpus = mp->cpu_count;
+        const QC::u32 bspLapicId = mp->bsp_lapic_id;
+        __atomic_store_n(&g_SmpTotalCpus, totalCpus, __ATOMIC_SEQ_CST);
+        __atomic_store_n(&g_ApOnlineCount, 0u, __ATOMIC_SEQ_CST);
+
+        QC::usize slotCount = 0;
+        QC::u64 targetAps = 0;
+        for (QC::u64 i = 0; i < totalCpus; ++i)
+        {
+            limine_mp_info *cpu = mp->cpus[i];
+            if (!cpu)
+                continue;
+            if (cpu->lapic_id == bspLapicId)
+                continue;
+
+            if (slotCount >= kMaxApBootSlots)
+                continue;
+
+            ApBootSlot &slot = g_ApBootSlots[slotCount++];
+            slot.state = static_cast<QC::u32>(QKBoot::SmpCpuState::Launching);
+            slot.lapicId = cpu->lapic_id;
+            slot.cpuIndex = cpu->processor_id;
+            slot.online = 0;
+            slot.idleHeartbeats = 0;
+            slot.timerHookTicks = 0;
+            slot.schedulerHookKicks = 0;
+            for (QC::u32 taskIndex = 0; taskIndex < kSmpSelfTestTaskCount; ++taskIndex)
+                slot.schedulerTaskTurns[taskIndex] = 0;
+            slot.schedulerTaskWakeups = 0;
+            slot.workItemsCompleted = 0;
+            slot.workChecksum = 0;
+            cpu->extra_argument = static_cast<QC::u64>(reinterpret_cast<QC::uptr>(&slot));
+            cpu->goto_address = &QKBootApEntry;
+            ++targetAps;
+        }
+
+        __atomic_store_n(&g_SmpTargetAps, targetAps, __ATOMIC_SEQ_CST);
+        __atomic_store_n(&g_ApSlotCount, static_cast<QC::u32>(slotCount), __ATOMIC_SEQ_CST);
+
+        if (Log)
+        {
+            Log("SMP: Limine MP total CPUs = ");
+            LogU64(Log, totalCpus);
+            Log("\r\n");
+            Log("SMP: AP startup targets = ");
+            LogU64(Log, targetAps);
+            Log("\r\n");
+        }
+
+        if (targetAps == 0)
+            return;
+
+        constexpr QC::u32 kWaitSpins = 8u * 1000u * 1000u;
+        for (QC::u32 spin = 0; spin < kWaitSpins; ++spin)
+        {
+            const QC::u32 online = __atomic_load_n(&g_ApOnlineCount, __ATOMIC_SEQ_CST);
+            if (online >= targetAps)
+                break;
+            QC::pause();
+        }
+
+        const QC::u32 onlineFinal = __atomic_load_n(&g_ApOnlineCount, __ATOMIC_SEQ_CST);
+        if (Log)
+        {
+            Log("SMP: AP online = ");
+            LogU64(Log, onlineFinal);
+            Log("/");
+            LogU64(Log, targetAps);
+            Log("\r\n");
+
+            QC::u64 onlineStates = 0;
+            for (QC::usize i = 0; i < slotCount; ++i)
+            {
+                if (__atomic_load_n(&g_ApBootSlots[i].state, __ATOMIC_RELAXED) == static_cast<QC::u32>(QKBoot::SmpCpuState::Online))
+                    ++onlineStates;
+            }
+            Log("SMP: AP state online slots = ");
+            LogU64(Log, onlineStates);
+            Log("\r\n");
+
+            if (slotCount >= kMaxApBootSlots && targetAps < (totalCpus - 1))
+                Log("SMP: AP slot capacity reached; extra APs deferred\r\n");
+        }
     }
 
     static const QK::Boot::Config::SysConfigModule *FindSysConfigModuleById(const QK::Boot::Config::SysConfig &cfg, const char *id)
@@ -1889,6 +2389,311 @@ namespace QKBoot
         g_Req = req;
     }
 
+    bool initializeSmpTimers(QC::u32 frequencyHz)
+    {
+        if (frequencyHz == 0)
+            return false;
+        if (__atomic_load_n(&g_SmpTargetAps, __ATOMIC_ACQUIRE) == 0)
+            return true;
+        if (__atomic_load_n(&g_SmpTimerReady, __ATOMIC_ACQUIRE) != 0)
+            return __atomic_load_n(&g_SmpTimerFrequency, __ATOMIC_RELAXED) == frequencyHz &&
+                   __atomic_load_n(&g_SmpSchedulerReady, __ATOMIC_ACQUIRE) != 0;
+        if (!QK::Boot::Acpi::InitializeBspLocalApic(nullptr))
+            return false;
+
+        QK::InterruptManager::instance().registerHandler(
+            QK::IRQ_LOCAL_APIC_TIMER, &LocalApicTimerInterrupt);
+
+        QC::u32 initialCount = 0;
+        if (!CalibrateLocalApicTimer(frequencyHz, initialCount))
+        {
+            if (g_Log)
+                g_Log("SMP: local APIC timer calibration failed\r\n");
+            return false;
+        }
+
+        const QC::u32 pitFrequency = QDrv::Timer::instance().frequency();
+        QC::u32 quantumTicks = frequencyHz / 100;
+        if (quantumTicks == 0)
+            quantumTicks = 1;
+        __atomic_store_n(&g_SmpTimerInitialCount, initialCount, __ATOMIC_RELAXED);
+        __atomic_store_n(&g_SmpTimerQuantumTicks, quantumTicks, __ATOMIC_RELAXED);
+        __atomic_store_n(&g_SmpTimerFrequency, frequencyHz, __ATOMIC_RELAXED);
+        __atomic_store_n(&g_SmpTimerReady, 1u, __ATOMIC_RELEASE);
+
+        const QC::usize slotCount = __atomic_load_n(&g_ApSlotCount, __ATOMIC_ACQUIRE);
+        const QC::u64 startTicks = QDrv::Timer::instance().ticks();
+        QC::u64 spins = 0;
+        QC::usize timerOnline = 0;
+        QC::usize schedulerOnline = 0;
+        do
+        {
+            timerOnline = 0;
+            schedulerOnline = 0;
+            for (QC::usize i = 0; i < slotCount; ++i)
+            {
+                if (__atomic_load_n(&g_ApBootSlots[i].timerHookTicks, __ATOMIC_RELAXED) != 0)
+                    ++timerOnline;
+                if (__atomic_load_n(&g_ApBootSlots[i].schedulerHookKicks, __ATOMIC_RELAXED) != 0)
+                    ++schedulerOnline;
+            }
+            if ((timerOnline == slotCount && schedulerOnline == slotCount) ||
+                QDrv::Timer::instance().ticks() - startTicks >= 25 ||
+                ++spins >= 100000000ull)
+                break;
+            QC::pause();
+        } while (true);
+
+        if (g_Log)
+        {
+            g_Log("SMP: AP-local LAPIC timer enabled at ");
+            LogU64(g_Log, frequencyHz);
+            g_Log(" Hz (");
+            LogU64(g_Log, pitFrequency);
+            g_Log(" Hz PIT calibration), APs ticking ");
+            LogU64(g_Log, timerOnline);
+            g_Log("/");
+            LogU64(g_Log, slotCount);
+            g_Log(", quanta ");
+            LogU64(g_Log, schedulerOnline);
+            g_Log("/");
+            LogU64(g_Log, slotCount);
+            g_Log("\r\n");
+        }
+        if (timerOnline != slotCount || schedulerOnline != slotCount)
+            return false;
+
+        QK::TaskManager &taskManager = QK::TaskManager::instance();
+        for (QC::usize i = 0; i < slotCount; ++i)
+        {
+            ApBootSlot &slot = g_ApBootSlots[i];
+            const QK::TaskId id = taskManager.createTask(
+                "ap-worker", &RunApWorkerTask, &slot, QK::TaskPriority::Normal, slot.cpuIndex);
+            if (id == 0)
+            {
+                for (QC::usize cleanupSlot = 0; cleanupSlot < i; ++cleanupSlot)
+                {
+                    taskManager.destroyTask(g_ApWorkerTaskIds[cleanupSlot]);
+                    g_ApWorkerTaskIds[cleanupSlot] = 0;
+                }
+                if (g_Log)
+                    g_Log("SMP: failed to create AP worker tasks\r\n");
+                return false;
+            }
+            g_ApWorkerTaskIds[i] = id;
+        }
+
+        QK::Scheduler::instance().initialize();
+        for (QC::usize i = 0; i < slotCount; ++i)
+            QK::Scheduler::instance().addTask(g_ApWorkerTaskIds[i]);
+        QK::Scheduler::instance().start();
+        __atomic_store_n(&g_SmpSchedulerReady, 1u, __ATOMIC_RELEASE);
+        if (g_Log)
+            g_Log("SMP: timer-preemptive AP task scheduler started\r\n");
+        return true;
+    }
+
+    bool getSmpStatusSnapshot(SmpStatusSnapshot &out)
+    {
+        out = SmpStatusSnapshot{};
+
+        out.totalCpus = __atomic_load_n(&g_SmpTotalCpus, __ATOMIC_SEQ_CST);
+        out.targetAps = __atomic_load_n(&g_SmpTargetAps, __ATOMIC_SEQ_CST);
+        out.onlineAps = static_cast<QC::u64>(__atomic_load_n(&g_ApOnlineCount, __ATOMIC_SEQ_CST));
+
+        QC::usize slotCount = static_cast<QC::usize>(__atomic_load_n(&g_ApSlotCount, __ATOMIC_SEQ_CST));
+        if (slotCount > kSmpStatusMaxEntries)
+            slotCount = kSmpStatusMaxEntries;
+        out.slotCount = slotCount;
+
+        for (QC::usize i = 0; i < slotCount; ++i)
+        {
+            const ApBootSlot &src = g_ApBootSlots[i];
+            SmpCpuStatusEntry &dst = out.entries[i];
+            dst.cpuIndex = __atomic_load_n(&src.cpuIndex, __ATOMIC_RELAXED);
+            dst.lapicId = __atomic_load_n(&src.lapicId, __ATOMIC_RELAXED);
+            dst.online = __atomic_load_n(&src.online, __ATOMIC_RELAXED) != 0;
+            dst.state = static_cast<SmpCpuState>(__atomic_load_n(&src.state, __ATOMIC_RELAXED));
+            dst.idleHeartbeats = __atomic_load_n(&src.idleHeartbeats, __ATOMIC_RELAXED);
+            dst.timerHookTicks = __atomic_load_n(&src.timerHookTicks, __ATOMIC_RELAXED);
+            dst.schedulerHookKicks = __atomic_load_n(&src.schedulerHookKicks, __ATOMIC_RELAXED);
+            for (QC::u32 taskIndex = 0; taskIndex < kSmpSelfTestTaskCount; ++taskIndex)
+                dst.schedulerTaskTurns[taskIndex] =
+                    __atomic_load_n(&src.schedulerTaskTurns[taskIndex], __ATOMIC_RELAXED);
+            dst.schedulerTaskWakeups =
+                __atomic_load_n(&src.schedulerTaskWakeups, __ATOMIC_RELAXED);
+            dst.schedulerTasksReaped =
+                QK::TaskManager::instance().reapedTaskCount(dst.cpuIndex);
+            dst.workItemsCompleted = __atomic_load_n(&src.workItemsCompleted, __ATOMIC_RELAXED);
+            dst.workChecksum = __atomic_load_n(&src.workChecksum, __ATOMIC_RELAXED);
+        }
+
+        return out.totalCpus != 0 || out.slotCount != 0 || out.onlineAps != 0;
+    }
+
+    bool submitSmpWork(SmpWorkFn work, QC::u64 argument)
+    {
+        if (__atomic_load_n(&g_ApOnlineCount, __ATOMIC_ACQUIRE) == 0)
+            return false;
+        return EnqueueSmpWork(work, argument, false);
+    }
+
+    bool startSmpSelfTest()
+    {
+        if (__atomic_load_n(&g_SmpSchedulerReady, __ATOMIC_ACQUIRE) == 0 || !QK::Time::available())
+            return false;
+
+        const QC::usize slotCount = __atomic_load_n(&g_ApSlotCount, __ATOMIC_ACQUIRE);
+        if (slotCount == 0)
+            return false;
+
+        QC::u32 expectedInactive = 0;
+        if (!__atomic_compare_exchange_n(&g_SmpSelfTestActive, &expectedInactive, 1u, false,
+                                         __ATOMIC_ACQUIRE, __ATOMIC_RELAXED))
+            return false;
+
+        __atomic_store_n(&g_SmpSelfTestExpected, 0u, __ATOMIC_RELEASE);
+        __atomic_store_n(&g_SmpSelfTestFinished, 0u, __ATOMIC_RELEASE);
+        for (QC::usize i = 0; i < slotCount; ++i)
+        {
+            ApBootSlot &slot = g_ApBootSlots[i];
+            for (QC::u32 taskIndex = 0; taskIndex < kSmpSelfTestTaskCount; ++taskIndex)
+                __atomic_store_n(&slot.schedulerTaskTurns[taskIndex], 0ull, __ATOMIC_RELAXED);
+            __atomic_store_n(&slot.schedulerTaskWakeups, 0ull, __ATOMIC_RELAXED);
+            __atomic_store_n(&slot.selfTestSpins[0], 0ull, __ATOMIC_RELAXED);
+            __atomic_store_n(&slot.selfTestSpins[1], 0ull, __ATOMIC_RELEASE);
+        }
+
+        // Create every task before scheduling any, so a creation failure can be undone safely.
+        static QK::TaskId taskIds[kMaxApBootSlots][kSmpSelfTestTaskCount]{};
+        QK::TaskManager &taskManager = QK::TaskManager::instance();
+        for (QC::usize i = 0; i < slotCount; ++i)
+        {
+            for (QC::u32 taskIndex = 0; taskIndex < kSmpSelfTestTaskCount; ++taskIndex)
+            {
+                SmpSelfTestTaskArgument &argument = g_SmpSelfTestArguments[i][taskIndex];
+                argument.slot = &g_ApBootSlots[i];
+                argument.taskIndex = taskIndex;
+                taskIds[i][taskIndex] = taskManager.createTask(
+                    taskIndex == 2 ? "smp-selftest-sleep" : "smp-selftest-spin",
+                    &RunSmpSelfTestTask, &argument, QK::TaskPriority::Normal,
+                    g_ApBootSlots[i].cpuIndex);
+                if (taskIds[i][taskIndex] != 0)
+                    continue;
+
+                for (QC::usize cleanupSlot = 0; cleanupSlot <= i; ++cleanupSlot)
+                {
+                    for (QC::u32 cleanupTask = 0; cleanupTask < kSmpSelfTestTaskCount; ++cleanupTask)
+                    {
+                        if (taskIds[cleanupSlot][cleanupTask] != 0)
+                            taskManager.destroyTask(taskIds[cleanupSlot][cleanupTask]);
+                        taskIds[cleanupSlot][cleanupTask] = 0;
+                    }
+                }
+                __atomic_store_n(&g_SmpSelfTestActive, 0u, __ATOMIC_RELEASE);
+                return false;
+            }
+        }
+
+        const QC::u32 expectedFinished = static_cast<QC::u32>(slotCount) * kSmpSelfTestTaskCount;
+        __atomic_store_n(&g_SmpSelfTestExpected, expectedFinished, __ATOMIC_RELEASE);
+        for (QC::usize i = 0; i < slotCount; ++i)
+        {
+            for (QC::u32 taskIndex = 0; taskIndex < kSmpSelfTestTaskCount; ++taskIndex)
+            {
+                QK::Scheduler::instance().addTask(taskIds[i][taskIndex]);
+                taskIds[i][taskIndex] = 0;
+            }
+        }
+        return true;
+    }
+
+    bool getSmpSelfTestStatus(SmpSelfTestStatus &out)
+    {
+        out = SmpSelfTestStatus{};
+        out.expectedTasks = __atomic_load_n(&g_SmpSelfTestExpected, __ATOMIC_ACQUIRE);
+        out.finishedTasks = __atomic_load_n(&g_SmpSelfTestFinished, __ATOMIC_ACQUIRE);
+        out.running = __atomic_load_n(&g_SmpSelfTestActive, __ATOMIC_ACQUIRE) != 0;
+        if (out.expectedTasks == 0)
+            return false;
+
+        const QC::usize slotCount = __atomic_load_n(&g_ApSlotCount, __ATOMIC_ACQUIRE);
+        out.totalAps = static_cast<QC::u32>(slotCount);
+        for (QC::usize i = 0; i < slotCount; ++i)
+        {
+            const ApBootSlot &slot = g_ApBootSlots[i];
+            if (__atomic_load_n(&slot.schedulerTaskTurns[0], __ATOMIC_ACQUIRE) != 0 &&
+                __atomic_load_n(&slot.schedulerTaskTurns[1], __ATOMIC_ACQUIRE) != 0 &&
+                __atomic_load_n(&slot.schedulerTaskTurns[2], __ATOMIC_ACQUIRE) != 0 &&
+                __atomic_load_n(&slot.schedulerTaskWakeups, __ATOMIC_ACQUIRE) != 0)
+                ++out.passedAps;
+        }
+        return true;
+    }
+
+    bool runSmpWork(QC::u32 workItems, QC::u64 &completed, QC::u64 &checksum)
+    {
+        completed = 0;
+        checksum = 0;
+
+        if (workItems == 0 || __atomic_load_n(&g_ApOnlineCount, __ATOMIC_ACQUIRE) == 0)
+            return false;
+
+        QC::u32 expectedInactive = 0;
+        if (!__atomic_compare_exchange_n(&g_SmpWorkBatchActive, &expectedInactive, 1u, false,
+                                         __ATOMIC_ACQUIRE, __ATOMIC_RELAXED))
+            return false;
+
+        const QC::usize slotCount = __atomic_load_n(&g_ApSlotCount, __ATOMIC_ACQUIRE);
+        for (QC::usize i = 0; i < slotCount && i < kSmpStatusMaxEntries; ++i)
+        {
+            __atomic_store_n(&g_ApBootSlots[i].workItemsCompleted, 0ull, __ATOMIC_RELAXED);
+            __atomic_store_n(&g_ApBootSlots[i].workChecksum, 0ull, __ATOMIC_RELAXED);
+        }
+
+        __atomic_store_n(&g_SmpWorkCompleted, 0ull, __ATOMIC_RELAXED);
+        __atomic_store_n(&g_SmpWorkChecksum, 0ull, __ATOMIC_RELAXED);
+        __atomic_store_n(&g_SmpWorkTarget, static_cast<QC::u64>(workItems), __ATOMIC_RELEASE);
+
+        QC::u32 submitted = 0;
+        QC::u64 enqueueSpins = 0;
+        while (submitted < workItems)
+        {
+            if (EnqueueSmpWork(&SmpWorkTestCallback, submitted, true))
+            {
+                ++submitted;
+                enqueueSpins = 0;
+                continue;
+            }
+
+            if (++enqueueSpins >= 100000000ull)
+                break;
+            QC::pause();
+        }
+
+        __atomic_store_n(&g_SmpWorkTarget, static_cast<QC::u64>(submitted), __ATOMIC_RELEASE);
+        if (submitted == 0)
+        {
+            __atomic_store_n(&g_SmpWorkBatchActive, 0u, __ATOMIC_RELEASE);
+            return false;
+        }
+
+        constexpr QC::u64 kWaitSpins = 100000000ull;
+        for (QC::u64 spin = 0; spin < kWaitSpins; ++spin)
+        {
+            if (__atomic_load_n(&g_SmpWorkCompleted, __ATOMIC_ACQUIRE) >= submitted)
+                break;
+            QC::pause();
+        }
+
+        completed = __atomic_load_n(&g_SmpWorkCompleted, __ATOMIC_ACQUIRE);
+        checksum = __atomic_load_n(&g_SmpWorkChecksum, __ATOMIC_RELAXED);
+        if (completed >= submitted)
+            __atomic_store_n(&g_SmpWorkBatchActive, 0u, __ATOMIC_RELEASE);
+
+        return completed >= workItems && submitted == workItems;
+    }
+
     void initializeMemory()
     {
         QK::Boot::Memory::InitFromLimineRequests(g_Req.hhdm, g_Req.kernelAddress, g_Log);
@@ -1914,7 +2719,21 @@ namespace QKBoot
             if (RsdpResp && RsdpResp->address)
             {
                 const QC::PhysAddr rsdpPhys = static_cast<QC::PhysAddr>(reinterpret_cast<QC::uptr>(RsdpResp->address));
-                QK::Boot::Acpi::EnumerateTables(rsdpPhys, g_Log, &QK::Boot::Tpm::TryTpm2CrbStartup);
+                QK::Boot::Acpi::EnumerateTables(rsdpPhys, g_Log, &QK::Boot::Tpm::TryTpm2Startup);
+
+                QK::Boot::Acpi::CpuTopologySnapshot topo{};
+                if (QK::Boot::Acpi::GetCpuTopologySnapshot(topo))
+                {
+                    g_Log("SMP: ACPI MADT CPUs enabled/total = ");
+                    LogU64(g_Log, static_cast<QC::u64>(topo.enabledEntries));
+                    g_Log("/");
+                    LogU64(g_Log, static_cast<QC::u64>(topo.totalEntries));
+                    g_Log("\r\n");
+                }
+                else
+                {
+                    g_Log("SMP: ACPI MADT topology unavailable\r\n");
+                }
             }
             else
             {
@@ -1927,11 +2746,26 @@ namespace QKBoot
             if (RsdpResp && RsdpResp->address)
             {
                 const QC::PhysAddr rsdpPhys = static_cast<QC::PhysAddr>(reinterpret_cast<QC::uptr>(RsdpResp->address));
-                QK::Boot::Acpi::EnumerateTables(rsdpPhys, nullptr, &QK::Boot::Tpm::TryTpm2CrbStartup);
+                QK::Boot::Acpi::EnumerateTables(rsdpPhys, nullptr, &QK::Boot::Tpm::TryTpm2Startup);
             }
         }
 
         QK::Boot::Arch::InitCpuGdtIdtAndInterrupts(g_Log);
+
+        if (g_Log)
+        {
+            if (QK::Boot::Acpi::InitializeBspLocalApic(g_Log))
+                g_Log("SMP: BSP local APIC initialized\r\n");
+            else
+                g_Log("SMP: BSP local APIC initialization deferred\r\n");
+
+            ConfigureMpStartup(g_Log);
+        }
+        else
+        {
+            (void)QK::Boot::Acpi::InitializeBspLocalApic(nullptr);
+            ConfigureMpStartup(nullptr);
+        }
     }
 
     [[noreturn]] static void RefusalHaltWithScreen(const char *title, const char *detailsLine1 = nullptr, const char *detailsLine2 = nullptr);

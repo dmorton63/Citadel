@@ -35,6 +35,7 @@ namespace QK
             void print(const char *msg);
             bool appendString(char *dest, QC::usize destSize, const char *src);
             bool resolvePath(const char *input, char *out, QC::usize outSize);
+            static bool pathHasPrefix(const char *path, const char *prefix);
 
             static inline char lowerAscii(char c)
             {
@@ -51,10 +52,10 @@ namespace QK
                 QC::String::memset(path, 0, pathCap);
 
                 const char *preferredRoot = nullptr;
-                if (QFS::VolumeManager::instance().isMounted("QFS_SYSTEM"))
-                    preferredRoot = "/system";
-                else if (QFS::VolumeManager::instance().isMounted("QFS_SHARED"))
+                if (QFS::VolumeManager::instance().isMounted("QFS_SHARED"))
                     preferredRoot = "/shared";
+                else if (QFS::VolumeManager::instance().isMounted("QFS_SYSTEM"))
+                    preferredRoot = "/system";
 
                 if (!arg || !*arg)
                 {
@@ -98,6 +99,36 @@ namespace QK
                 }
 
                 return resolvePath(arg, path, pathCap);
+            }
+
+            static bool remapDumpPathToPersistent(char *path, QC::usize pathCap)
+            {
+                if (!path || pathCap == 0)
+                    return false;
+                if (!pathHasPrefix(path, "/dump"))
+                    return false;
+
+                const char *persistentRoot = nullptr;
+                if (QFS::VolumeManager::instance().isMounted("QFS_SHARED"))
+                    persistentRoot = "/shared/dump";
+                else if (QFS::VolumeManager::instance().isMounted("QFS_SYSTEM"))
+                    persistentRoot = "/system/dump";
+
+                if (!persistentRoot)
+                    return false;
+
+                const char *suffix = path + 5; // skip "/dump"
+                char remapped[256];
+                QC::String::memset(remapped, 0, sizeof(remapped));
+                QC::String::strncpy(remapped, persistentRoot, sizeof(remapped) - 1);
+                if (suffix[0] != '\0')
+                    appendString(remapped, sizeof(remapped), suffix);
+
+                (void)QFS::VFS::instance().createDir(persistentRoot);
+
+                QC::String::memset(path, 0, pathCap);
+                QC::String::strncpy(path, remapped, pathCap - 1);
+                return true;
             }
 
             static void printByteCount(QC::isize wrote)
@@ -866,6 +897,11 @@ namespace QK
                     }
                 }
 
+                if (remapDumpPathToPersistent(path, sizeof(path)))
+                {
+                    print("saveterm: redirected /dump path to mounted persistent storage\r\n");
+                }
+
                 QFS::OpenMode mode = QFS::OpenMode::Write | QFS::OpenMode::Create;
                 if (!appendMode)
                     mode = mode | QFS::OpenMode::Truncate;
@@ -933,6 +969,11 @@ namespace QK
                 {
                     print("saveserial: invalid path\r\n");
                     return;
+                }
+
+                if (remapDumpPathToPersistent(path, sizeof(path)))
+                {
+                    print("saveserial: redirected /dump path to mounted persistent storage\r\n");
                 }
 
                 QFS::File *file = QFS::VFS::instance().open(path,

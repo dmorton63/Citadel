@@ -12,6 +12,7 @@
 #include "QCBuiltins.h"
 #include "QFSVFS.h"
 #include "QFSFile.h"
+#include "QFSVolumeManager.h"
 #include "QWStyleSystem.h"
 #include "QWStyleTypes.h"
 #include "QDShutdownDialog.h"
@@ -36,6 +37,21 @@
 #include "QCMSApp.h"
 #include "QDDesktopDocumentIO.h"
 #include "QDThemeImporter.h"
+
+namespace QK::Boot::Config
+{
+    enum class StartupMode : QC::u8
+    {
+        Desktop,
+        Terminal,
+        Safe,
+        Recovery,
+        Installer,
+        Network
+    };
+
+    StartupMode GetStartupMode();
+}
 
 namespace QD
 {
@@ -1195,12 +1211,40 @@ namespace QD
         // In ENFORCE mode, pre-desktop gates usually handle enroll/unlock already;
         // only prompt here if the owner session is still locked.
         const bool bypass = QK::SecurityCenter::instance().bypassEnabled();
-        if (!bypass && !QK::SecurityCenter::instance().ownerUnlocked())
+        const bool ownerUnlocked = QK::SecurityCenter::instance().ownerUnlocked();
+        const bool ownerEnrolled = isOwnerEnrolled();
+        const bool hasSystemVolume = QFS::VolumeManager::instance().isMounted("QFS_SYSTEM");
+        const auto startupMode = QK::Boot::Config::GetStartupMode();
+
+        QC_LOG_INFO(LOG_MODULE,
+                    "Owner gate state: bypass=%d unlocked=%d enrolled=%d startupMode=%u hasSystemVolume=%d\n",
+                    bypass ? 1 : 0,
+                    ownerUnlocked ? 1 : 0,
+                    ownerEnrolled ? 1 : 0,
+                    static_cast<unsigned>(startupMode),
+                    hasSystemVolume ? 1 : 0);
+
+        if (!bypass && !ownerUnlocked)
         {
-            if (!isOwnerEnrolled())
-                showSetupWizard();
+            if (startupMode == QK::Boot::Config::StartupMode::Recovery)
+            {
+                // Recovery mode must not dead-end at a graphical owner gate.
+                // Keep the owner session locked, but allow the recovery desktop to load.
+                QC_LOG_WARN(LOG_MODULE, "Recovery mode: skipping graphical owner login gate\n");
+            }
+            else if (!hasSystemVolume)
+            {
+                // With no /system volume, owner credential records are usually unavailable.
+                // Avoid forcing a graphical lock gate that cannot be satisfied.
+                QC_LOG_WARN(LOG_MODULE, "No /system volume: skipping graphical owner login gate\n");
+            }
             else
-                showLoginDialog();
+            {
+                if (!ownerEnrolled)
+                    showSetupWizard();
+                else
+                    showLoginDialog();
+            }
         }
 
         if (m_desktopWindow)
@@ -1369,6 +1413,7 @@ namespace QD
 
     void Desktop::showSetupWizard()
     {
+        QC_LOG_INFO(LOG_MODULE, "Opening setup wizard\n");
         if (!m_setupWizard)
         {
             m_setupWizard = new SetupWizard(this);
@@ -1382,6 +1427,7 @@ namespace QD
 
     void Desktop::showLoginDialog()
     {
+        QC_LOG_INFO(LOG_MODULE, "Opening login dialog\n");
         if (!m_loginDialog)
         {
             m_loginDialog = new LoginDialog(this);

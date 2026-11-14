@@ -16,7 +16,7 @@ namespace QK::Memory
     }
 
     Heap::Heap()
-        : m_base(0), m_totalSize(0), m_usedSize(0), m_allocationCount(0), m_firstBlock(nullptr)
+        : m_lock(0), m_base(0), m_totalSize(0), m_usedSize(0), m_allocationCount(0), m_firstBlock(nullptr)
     {
     }
 
@@ -66,6 +66,7 @@ namespace QK::Memory
         if (size == 0)
             return nullptr;
 
+        const QC::u64 flags = acquireLock();
         // Align size to 16 bytes
         size = (size + 15) & ~15ULL;
 
@@ -76,6 +77,8 @@ namespace QK::Memory
             block = findFreeBlock(size);
             if (!block)
             {
+                releaseLock(flags);
+                QC_LOG_WARN("QKMemHeap", "Heap expansion not implemented");
                 QC_LOG_ERROR("QKMemHeap", "Failed to allocate %lu bytes", size);
                 return nullptr;
             }
@@ -90,7 +93,9 @@ namespace QK::Memory
         m_usedSize += block->size + sizeof(BlockHeader);
         ++m_allocationCount;
 
-        return reinterpret_cast<void *>(reinterpret_cast<QC::VirtAddr>(block) + sizeof(BlockHeader));
+        void *result = reinterpret_cast<void *>(reinterpret_cast<QC::VirtAddr>(block) + sizeof(BlockHeader));
+        releaseLock(flags);
+        return result;
     }
 
     void *Heap::allocateAligned(QC::usize size, QC::usize alignment)
@@ -132,11 +137,13 @@ namespace QK::Memory
         if (!ptr)
             return;
 
+        const QC::u64 flags = acquireLock();
         BlockHeader *block = reinterpret_cast<BlockHeader *>(
             reinterpret_cast<QC::VirtAddr>(ptr) - sizeof(BlockHeader));
 
         if (!block->used)
         {
+            releaseLock(flags);
             QC_LOG_WARN("QKMemHeap", "Double free detected at %p", ptr);
             return;
         }
@@ -146,6 +153,7 @@ namespace QK::Memory
         --m_allocationCount;
 
         mergeBlocks();
+        releaseLock(flags);
     }
 
     Heap::BlockHeader *Heap::findFreeBlock(QC::usize size)
@@ -207,7 +215,23 @@ namespace QK::Memory
     void Heap::expandHeap(QC::usize minSize)
     {
         // TODO: Allocate more pages from VMM
-        QC_LOG_WARN("QKMemHeap", "Heap expansion not implemented");
+        (void)minSize;
+    }
+
+    QC::u64 Heap::acquireLock()
+    {
+        QC::u64 flags = 0;
+        asm volatile("pushfq; pop %0; cli" : "=r"(flags) : : "memory");
+        while (__atomic_exchange_n(&m_lock, 1u, __ATOMIC_ACQUIRE) != 0)
+            asm volatile("pause");
+        return flags;
+    }
+
+    void Heap::releaseLock(QC::u64 flags)
+    {
+        __atomic_store_n(&m_lock, 0u, __ATOMIC_RELEASE);
+        if (flags & (1ull << 9))
+            asm volatile("sti" ::: "memory");
     }
 
 } // namespace QK::Memory

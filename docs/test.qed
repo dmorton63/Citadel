@@ -1,0 +1,11 @@
+
+void greeting()
+{
+    print("Hello World\n");
+}
+
+int main()
+{
+    greeting();
+    return 0;
+}

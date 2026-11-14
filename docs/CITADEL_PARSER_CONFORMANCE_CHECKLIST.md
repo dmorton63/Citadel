@@ -13,6 +13,7 @@ CSV companion: docs/CITADEL_PARSER_CONFORMANCE_CHECKLIST.csv
 - For automated runs, update the CSV status and notes fields per row (E01-E24).
 - Validate CSV integrity with: python3 tools/validate_parser_conformance_csv.py
 - CI enforcement: .github/workflows/parser-conformance-csv.yml
+- Temporary note: rows marked Pass via tools/ide/probe_qed_eq_cases.py are provisional shape checks and should be revalidated with the future parser/AST conformance runner.
 
 ## Status Legend
 

@@ -17,6 +17,7 @@
 #include "Boot/Memory/QKBootAddressMapping.h"
 #include "Boot/Memory/QKBootEarlyMemory.h"
 #include "Boot/QKBoot.h"
+#include "QDrvTimer.h"
 
 #include "QKMemHeap.h"
 #include "QCLogger.h"
@@ -164,6 +165,7 @@ extern "C"
     extern QC::u64 limine_terminal_request[];
     extern QC::u64 limine_firmware_type_request[];
     extern QC::u64 limine_rsdp_request[];
+    extern QC::u64 limine_mp_request[];
 }
 
 // Kernel main entry point
@@ -229,6 +231,7 @@ extern "C" void kernel_main()
         req.modules = limine_module_request;
         req.firmwareType = limine_firmware_type_request;
         req.rsdp = limine_rsdp_request;
+        req.mp = limine_mp_request;
         QKBoot::setLimineRequests(req);
     }
     QKBoot::initializeMemory();
@@ -252,6 +255,10 @@ extern "C" void kernel_main()
     // Desktop/driver bring-up expects interrupts to be enabled (as before, when
     // DesktopSession ran after sti). Enable them right after IDT/interrupt init.
     asm volatile("sti");
+    QK::Debug::Serial::Write("Initializing kernel timer...\r\n");
+    QDrv::Timer::instance().initialize(1000);
+    if (!QKBoot::initializeSmpTimers(1000))
+        QK::Debug::Serial::Write("SMP: per-CPU timer or scheduler setup failed; APs remain on polling loop\r\n");
     QKBoot::initializeGraphics();
 
     // --- Input Pipeline (QER / QM / QES) ---

@@ -11,7 +11,7 @@ namespace QK
     namespace Event
     {
 
-        /// Circular buffer event queue with priority support
+        /// Circular buffer event queue with priority support and synchronized access.
         class EventQueue
         {
         public:
@@ -44,13 +44,13 @@ namespace QK
             bool peek(Event &outEvent) const;
 
             /// Check if the queue is empty
-            bool isEmpty() const { return m_count == 0; }
+            bool isEmpty() const;
 
             /// Check if the queue is full
-            bool isFull() const { return m_count >= MaxEvents; }
+            bool isFull() const;
 
             /// Get the number of events in the queue
-            QC::usize count() const { return m_count; }
+            QC::usize count() const;
 
             /// Clear all events from the queue
             void clear();
@@ -70,9 +70,10 @@ namespace QK
             QC::usize m_tail = 0;  // Write position
             QC::usize m_count = 0; // Current count
             bool m_initialized = false;
+            mutable volatile QC::u32 m_lock = 0;
         };
 
-        /// High-priority immediate event queue
+        /// High-priority immediate event queue with synchronized access.
         /// Events here are processed before the main queue
         class ImmediateQueue
         {
@@ -84,7 +85,7 @@ namespace QK
             void initialize();
             bool push(const Event &event);
             bool pop(Event &outEvent);
-            bool isEmpty() const { return m_count == 0; }
+            bool isEmpty() const;
             void clear();
 
         private:
@@ -93,6 +94,7 @@ namespace QK
             QC::usize m_tail = 0;
             QC::usize m_count = 0;
             bool m_initialized = false;
+            mutable volatile QC::u32 m_lock = 0;
         };
 
     } // namespace Event

@@ -248,19 +248,26 @@ In the in-guest terminal:
 
 ```text
 smpstat all
+smpselftest
 loop 10 times
 smpwork 10000
 smpstat all
-endloop saveterm <name>.txt
+endloop smpselftest status
+saveterm <name>.txt
 ```
 
 Pass criteria:
 - `N=1`: baseline with no AP workers (`smp_target_aps: 0`, `smp_online_aps: 0`).
 - `N>1`: `smp_target_aps: N-1`, `smp_online_aps: N-1`, each iteration reports
-  `smpwork_completed: 10000`, and checksum
-  `13875592363411389448`.
+  `smpwork_completed: 10000`, checksum `13875592363411389448`, and
+  `smpselftest status` reports `smpselftest: pass`. The on-demand self-test's
+  non-yielding tasks (`t0` and `t1`) verify local-timer preemption on every AP;
+  `t2`/`w2`/`reaped` verify task sleep, timer wakeup, exit, and stack
+  reclamation. Normal boots run only one queue-draining `ap-worker` per AP,
+  which blocks when idle while the AP halts.
 
-Validated examples are recorded in `shared/`:
+Legacy pre-scheduler captures are recorded in `shared/`; use the smoke runner
+to generate current captures with task-switch counters:
 `smp1test.txt`, `smptest2.txt`, `smp3test.txt`, `smp-qemu-1-4.txt`, and
 `smp8text.txt`.
 
@@ -278,6 +285,12 @@ See `tests/smp/README.md` for the full SMP smoke-test and transcript-validation 
 - Use `./build.sh -r --system-vol` to attach the persistent FAT32 system disk image at `build/system.qcow2`.
 - In that mode the guest mounts `/system` from the virtual disk instead of relying only on the ramdisk copy, so desktop/runtime data written under `/system` persists across boots.
 - A common development run is `./build.sh -r --tpm --system-vol --relmouse --prod`.
+
+### TPM 2.0
+
+- `--tpm` attaches an emulated TPM over CRB (requires `swtpm`); `./run.sh --tpm-tis` uses the TIS/FIFO interface instead.
+- The kernel detects CRB vs TIS/FIFO from the ACPI TPM2 table (start methods 2/6/7/8), and serializes all TPM commands with an SMP-safe lock.
+- Terminal diagnostics: `tpm status`, `tpm pcrs [0-23]`, `tpm selftest`, and `tpm eventlog` (kernel PCR measurements; the firmware log location is reported but not parsed).
 
 ## Bootable USB (real hardware)
 

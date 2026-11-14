@@ -25,6 +25,8 @@ AUTO_GRAB=true
 PRODUCTION=false
 RUN_FOR_SECONDS=0
 SYSTEM_VOL=false
+QEMU_CPUS=4
+PRINT_QEMU_CMD_ONLY=false
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -32,6 +34,7 @@ while [[ $# -gt 0 ]]; do
     -v|--verbose) shift ;; # build.sh compatibility
     -j*) shift ;; # build.sh compatibility
     --tpm) TPM=true; shift ;;
+    --tpm-tis) TPM=true; TPM_DEVICE=tpm-tis; shift ;;
     --tablet) USE_TABLET=true; shift ;;
     --relmouse) USE_TABLET=false; shift ;;
     --headless) HEADLESS=true; shift ;;
@@ -39,6 +42,18 @@ while [[ $# -gt 0 ]]; do
     --no-grab) AUTO_GRAB=false; shift ;;
     --prod) PRODUCTION=true; shift ;;
     --system-vol) SYSTEM_VOL=true; shift ;;
+    --smp)
+      if [[ $# -lt 2 ]] || ! [[ "${2:-}" =~ ^[1-9][0-9]*$ ]] || (( ${2} > 256 )); then
+        echo "--smp requires a CPU count from 1 to 256." >&2
+        exit 2
+      fi
+      QEMU_CPUS="${2}"
+      shift 2
+      ;;
+    --print-cmd)
+      PRINT_QEMU_CMD_ONLY=true
+      shift
+      ;;
     --run-for) RUN_FOR_SECONDS="${2:-0}"; shift 2 ;;
     -h|--help)
       cat <<EOF
@@ -46,6 +61,7 @@ usage: ./run.sh [options]
 
 Options:
   --tpm            Enable TPM2 emulation (requires swtpm)
+  --tpm-tis        Enable TPM2 emulation using the TIS/FIFO interface instead of CRB
   --tablet         Use absolute USB tablet (default)
   --relmouse       Use relative USB mouse + keyboard
   --headless       Run QEMU without a GUI (serial still logs)
@@ -53,7 +69,17 @@ Options:
   --no-grab        Disable grab-on-hover helper
   --prod           Warn if running prod without --tpm
   --system-vol     Attach persistent system volume disk (build/system.qcow2)
+  --smp <count>    QEMU virtual CPUs (default: ${QEMU_CPUS}, max: 256)
+  --print-cmd      Print the exact QEMU command and exit without running
   --run-for <s>    Auto-stop after <s> seconds (requires timeout)
+
+Examples:
+  ./run.sh --smp 1
+  ./run.sh --smp 2
+  ./run.sh --smp 3
+  ./run.sh --smp 4
+  ./run.sh --smp 8 --tpm --system-vol --relmouse
+  ./run.sh --smp 4 --print-cmd
 EOF
       exit 0
       ;;
@@ -132,7 +158,7 @@ if [[ "${TPM}" == true ]]; then
     -device piix4-ide
     -chardev "socket,id=chrtpm,path=${SWTPM_SOCK}"
     -tpmdev "emulator,id=tpm0,chardev=chrtpm"
-    -device "tpm-crb,tpmdev=tpm0"
+    -device "${TPM_DEVICE:-tpm-crb},tpmdev=tpm0"
   )
 fi
 
@@ -167,6 +193,7 @@ QEMU_ARGS=(
   -cdrom "${ISO_FILE}"
   -boot order=d
   -m 3G
+  -smp "${QEMU_CPUS}"
   -vga vmware
   -netdev user,id=net0
   -device e1000,netdev=net0
@@ -206,6 +233,10 @@ if [[ "${HEADLESS}" == false && "${AUTO_GRAB}" == true ]]; then
 fi
 
 echo "${QEMU_BIN} ${QEMU_ARGS[*]} ${TPM_ARGS[*]} ${SHARED_ARGS[*]}"
+
+if [[ "${PRINT_QEMU_CMD_ONLY}" == true ]]; then
+  exit 0
+fi
 
 if [[ "${RUN_FOR_SECONDS}" -gt 0 ]]; then
   if command -v timeout >/dev/null 2>&1; then

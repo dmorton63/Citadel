@@ -467,7 +467,9 @@ Execution of non-Citadel application ecosystems is explicitly deferred until the
 
 ## Executable format note
 
-Planned Citadel native executable file extension: `.cpe` (Citadel Program Executable). Format details TBD.
+Historical note: this earlier brainstorm proposed `.cpe` (Citadel Program Executable).
+
+Status: superseded. The canonical executable artifact for Citadel apps is now `.cap` as defined in `docs/CITADEL_APP_PLATFORM_V0_1.md`.
 
 ---
 

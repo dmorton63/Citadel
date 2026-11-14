@@ -41,6 +41,11 @@ namespace QK::Boot::Limine
         return GetResponse<limine_rsdp_response>(RsdpRequest);
     }
 
+    const limine_mp_response *GetMpResponse(QC::u64 MpRequest[])
+    {
+        return GetResponse<limine_mp_response>(MpRequest);
+    }
+
     bool GetAvailableMemoryBytes(QC::u64 MemmapRequest[], QC::u64 &OutBytes)
     {
         OutBytes = 0;

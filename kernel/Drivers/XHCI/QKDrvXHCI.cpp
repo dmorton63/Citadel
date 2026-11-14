@@ -1654,14 +1654,6 @@ namespace QKDrv
                                                              logicalMaxY);
                                 }
 
-                                // Some real USB pointer devices classified as tablet-like HID report
-                                // absolute coordinates with the opposite screen origin from the desktop.
-                                // Invert both axes here so physical motion matches on-screen motion.
-                                if (widthRange)
-                                    x = static_cast<QC::i32>(widthRange) - x;
-                                if (heightRange)
-                                    y = static_cast<QC::i32>(heightRange) - y;
-
                                 m_tabletDriver->updatePosition(x, y, wheel, buttons);
                             }
                         }

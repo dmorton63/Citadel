@@ -1,25 +1,25 @@
 id,status,input,expected_result,notes
-E01,Not Run,"a + b * c;","a + (b * c) valid",
-E02,Not Run,"a * b + c;","(a * b) + c valid",
-E03,Not Run,"a * b / c;","(a * b) / c valid",
-E04,Not Run,"a + b - c;","(a + b) - c valid",
-E05,Not Run,"-a * b;","(-a) * b valid",
-E06,Not Run,"a + -b;","a + (-b) valid",
-E07,Not Run,"a < b == c;","(a < b) == c valid",
-E08,Not Run,"a == b < c;","a == (b < c) valid",
-E09,Not Run,"a <= b + c;","a <= (b + c) valid",
-E10,Not Run,"a + b >= c * d;","(a + b) >= (c * d) valid",
-E11,Not Run,"a = b;","a = b valid",
-E12,Not Run,"a = b = c;","a = (b = c) valid",
-E13,Not Run,"a += b * 2;","a += (b * 2) valid",
-E14,Not Run,"a *= b + c;","a *= (b + c) valid",
-E15,Not Run,"a = b + c * d;","a = (b + (c * d)) valid",
-E16,Not Run,"a + b = c;","invalid (lhs not assignable)",
-E17,Not Run,"a < b < c;","invalid in v0",
-E18,Not Run,"a == b == c;","invalid in v0",
-E19,Not Run,"eq(a, b);","invalid as function unless defined",
-E20,Not Run,"a eq b;","a == b valid if eq alias enabled",
-E21,Not Run,"a => b;","invalid token (use >=)",
-E22,Not Run,"a /= b + c / d;","a /= (b + (c / d)) valid",
-E23,Not Run,"a = -b * -c;","a = ((-b) * (-c)) valid",
-E24,Not Run,"a = (b + c) * d;","a = ((b + c) * d) valid",
+E01,Pass,"a + b * c;","a + (b * c) valid","Pass via provisional probe tools/ide/probe_qed_eq_cases.py (add/mul precedence shape matched)"
+E02,Pass,"a * b + c;","(a * b) + c valid","Pass via provisional probe tools/ide/probe_qed_eq_cases.py (mul/add precedence shape matched)"
+E03,Pass,"a * b / c;","(a * b) / c valid","Pass via provisional probe tools/ide/probe_qed_eq_cases.py (mul/div left-associative shape matched)"
+E04,Pass,"a + b - c;","(a + b) - c valid","Pass via provisional probe tools/ide/probe_qed_eq_cases.py (add/sub left-associative shape matched)"
+E05,Pass,"-a * b;","(-a) * b valid","Pass via provisional probe tools/ide/probe_qed_eq_cases.py (unary/mul precedence shape matched)"
+E06,Pass,"a + -b;","a + (-b) valid","Pass via provisional probe tools/ide/probe_qed_eq_cases.py (add/unary precedence shape matched)"
+E07,Pass,"a < b == c;","(a < b) == c valid","Pass via provisional probe tools/ide/probe_qed_eq_cases.py (relational/equality precedence shape matched)"
+E08,Pass,"a == b < c;","a == (b < c) valid","Pass via provisional probe tools/ide/probe_qed_eq_cases.py (equality/relational precedence shape matched)"
+E09,Pass,"a <= b + c;","a <= (b + c) valid","Pass via provisional probe tools/ide/probe_qed_eq_cases.py (relational/additive precedence shape matched)"
+E10,Pass,"a + b >= c * d;","(a + b) >= (c * d) valid","Pass via provisional probe tools/ide/probe_qed_eq_cases.py (additive/relational/multiplicative shape matched)"
+E11,Pass,"a = b;","a = b valid","Pass via provisional probe tools/ide/probe_qed_eq_cases.py (simple assignment shape matched)"
+E12,Pass,"a = b = c;","a = (b = c) valid","Pass via provisional probe tools/ide/probe_qed_eq_cases.py (right-associative assignment chain shape matched)"
+E13,Pass,"a += b * 2;","a += (b * 2) valid","Pass via provisional probe tools/ide/probe_qed_eq_cases.py (augmented assignment multiplicative rhs shape matched)"
+E14,Pass,"a *= b + c;","a *= (b + c) valid","Pass via provisional probe tools/ide/probe_qed_eq_cases.py (augmented assignment additive rhs shape matched)"
+E15,Pass,"a = b + c * d;","a = (b + (c * d)) valid","Pass via provisional probe tools/ide/probe_qed_eq_cases.py (assignment/add/mul precedence shape matched)"
+E16,Pass,"a + b = c;","invalid (lhs not assignable)","Pass via provisional probe tools/ide/probe_qed_eq_cases.py (non-assignable lhs rejected)"
+E17,Pass,"a < b < c;","invalid in v0","Pass via provisional probe tools/ide/probe_qed_eq_cases.py (chained relational rejected)"
+E18,Pass,"a == b == c;","invalid in v0","Pass via provisional probe tools/ide/probe_qed_eq_cases.py (chained equality rejected)"
+E19,Pass,"eq(a, b);","invalid as function unless defined","Pass via provisional probe tools/ide/probe_qed_eq_cases.py using docs/test.qed (eq undefined)"
+E20,Pass,"a eq b;","a == b valid if eq alias enabled","Pass via provisional probe tools/ide/probe_qed_eq_cases.py with eq alias enabled"
+E21,Pass,"a => b;","invalid token (use >=)","Pass via provisional probe tools/ide/probe_qed_eq_cases.py (=> rejected)"
+E22,Pass,"a /= b + c / d;","a /= (b + (c / d)) valid","Pass via provisional probe tools/ide/probe_qed_eq_cases.py (rhs precedence shape matched)"
+E23,Pass,"a = -b * -c;","a = ((-b) * (-c)) valid","Pass via provisional probe tools/ide/probe_qed_eq_cases.py (unary-minus multiplicative shape matched)"
+E24,Pass,"a = (b + c) * d;","a = ((b + c) * d) valid","Pass via provisional probe tools/ide/probe_qed_eq_cases.py (parenthesized additive shape matched)"
