@@ -308,7 +308,7 @@ namespace QK::Boot::Security
             if (!Digest)
                 return;
 
-            if (!QK::Boot::Tpm::ExtendPcrSha256Digest(Pcr, Digest, Log))
+            if (!QK::Boot::Tpm::ExtendPcrSha256Digest(Pcr, Digest, Log, Label))
                 return;
 
             if (Log && Label)
