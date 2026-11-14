@@ -191,7 +191,8 @@ Status labels used below:
 - **Design/Stub**: concept present, scaffolding exists, not fully implemented
 
 ### Boot + Core
-- Boot via Limine: **Working** (build produces bootable image)
+- Boot via Limine: **Working** (build produces bootable image; boots under SeaBIOS and OVMF UEFI)
+- UEFI Secure Boot (lab keys, QEMU): **Working** (`./build.sh --secure-boot` signs Limine and pins kernel/ramdisk BLAKE2B; `./run.sh --secure-boot` boots it; `tools/secureboot/negative_tests.sh` checks that unsigned/tampered images are refused; `tpm status` and Tasks report the state). Real-hardware enrollment not yet tested.
 - Kernel console: **Working** (basic CLI commands + transcript support)
 - SecureStore TPM anchor path: **Partial/Working** (boot-time TPM2 CRB startup, entropy collection, seal/unseal probing, and TPM-backed SecureStore operations are implemented; boot still falls back to a non-TPM recovery path when the TPM probe is unavailable or fails)
 - Pre-desktop owner/session gate hardening: **Working** (fail-closed terminal fallback on repeated ambiguous enrollment/unlock restart loops)
@@ -338,6 +339,7 @@ Citadel is used primarily under QEMU for bring-up; these are the common devices 
   - SecureStore anchor wrap key (`WRAPKEY.TPM`)
   - Generic secret sealing (`seal_secret()` / `unseal_secret()`)
   - TPM-accelerated sealed blobs (`writeTpmSealedBlob()` / `readTpmSealedBlob()`)
+- Secure Boot state (`tpm status` → `secure_boot:`) comes from the UEFI runtime `SecureBoot`/`SetupMode`/`PK` variables. When the firmware TPM event log (ACPI TPM2 LASA) is crypto-agile, the kernel also replays PCR 7 and reports `verified`; QEMU/OVMF leaves that log empty, so QEMU reports `(firmware)`.
 
 ---
 

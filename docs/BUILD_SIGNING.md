@@ -62,6 +62,21 @@ If OpenSSL or the private key is not available, production builds require you to
 
 If you want HTML (`.html`) or browser CSS (`.css`) to be part of the trusted boot-time UI surface, the build script will need an additional explicit signing + enforcement step for those file patterns.
 
+## UEFI Secure Boot (Lab Keys)
+
+The boot chain is firmware → signed Limine `BOOTX64.EFI` → kernel and ramdisk pinned by BLAKE2B.
+
+1. `tools/secureboot/make_lab_keys.sh` creates `build/secureboot/keys/{PK,KEK,db}.{key,crt}` and `build/secureboot/OVMF_VARS_citadel.fd` (OVMF variables with the lab keys enrolled and Secure Boot on). These keys are for QEMU only and are never committed.
+2. `./build.sh --secure-boot` runs `tools/secureboot/stage_signed_iso.sh`, which stages `iso/` into `build/secureboot/iso` and then:
+   - appends `#<blake2b>` to every `kernel_path`/`module_path` in `limine.conf`;
+   - runs `limine enroll-config` with the config's BLAKE2B on a copy of `BOOTX64.EFI` (the host tool is compiled to `build/limine-host`);
+   - signs it with `sbsign` using the lab db key and places it in the ISO tree and the El Torito EFI image.
+   The ISO is still written to `build/citadel-limine.iso` and also boots under BIOS.
+3. `./run.sh --secure-boot [--tpm]` or `python3 tools/smp_qemu_smoke.py --firmware secureboot ...` boots it with `OVMF_CODE_4M.secboot.fd`. `tpm status` should show `secure_boot: on (firmware) pk=enrolled`.
+4. `tools/secureboot/negative_tests.sh` verifies that the signed image boots, that the firmware refuses an unsigned Limine (Access Denied), and that Limine refuses a modified kernel or `limine.conf`.
+
+Requirements: `sudo apt install ovmf sbsigntool efitools python3-virt-firmware mtools xorriso`.
+
 ## Deferred Enhancement: PCR Attestation
 
 PCR-based measured boot attestation is intentionally deferred for a later milestone. The current v1 trust gate uses TAS/SST-backed checks and SC integrity validation, but does not require PCR policy matching for TAS unseal yet.

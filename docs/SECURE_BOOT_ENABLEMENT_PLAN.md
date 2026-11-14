@@ -2,6 +2,10 @@
 
 Date: 2026-06-13
 
+## Status (2026-11-14)
+
+Phase 1 (lab bring-up) is done in QEMU: Limine is signed with lab db keys, kernel/ramdisk/config are BLAKE2B-pinned, OVMF enforces Secure Boot, and the kernel reports the state. See "UEFI Secure Boot (Lab Keys)" in `BUILD_SIGNING.md`. Remaining: real-hardware enrollment, production key custody, and moving CI from detached OpenSSL signatures to `sbsign`.
+
 ## Current Baseline
 
 - Test machine: Secure Boot off, TPM on.

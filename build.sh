@@ -52,6 +52,7 @@ HEADLESS=false
 AUTO_GRAB=true
 SYSTEM_VOL=false
 RESET_SYSTEM_VOL=false
+SECURE_BOOT=false
 QEMU_CPUS=4
 SHARED_SOURCE_MODE=auto
 
@@ -128,6 +129,10 @@ while [[ $# -gt 0 ]]; do
             RESET_SYSTEM_VOL=true
             shift
             ;;
+        --secure-boot)
+            SECURE_BOOT=true
+            shift
+            ;;
         -j*)
             JOBS="${1#-j}"
             shift
@@ -150,6 +155,8 @@ while [[ $# -gt 0 ]]; do
             echo "  --reset-system-vol Delete build/system.qcow2 before build/run"
             echo "  --smp <count>   QEMU virtual CPUs (default: ${QEMU_CPUS}, max: 256)"
             echo "  --shared-source <auto|qemu|usb> Shared mount source (auto: QEMU host share for -r, USB for ISO builds)"
+            echo "  --secure-boot   Pin kernel/ramdisk BLAKE2B in limine.conf and sign Limine with the lab db key"
+            echo "                  (run tools/secureboot/make_lab_keys.sh first; boot with ./run.sh --secure-boot)"
             echo "  --prod          Build production mode (fail-closed boot signature enforcement; use --tpm when running)"
             echo "  -j<N>           Use N parallel jobs (default: $(nproc))"
             echo "  -h, --help      Show this help"
@@ -875,6 +882,18 @@ if ! command -v xorriso &> /dev/null; then
     exit 1
 fi
 
+ISO_SOURCE_DIR="${ISO_DIR}"
+if [ "$SECURE_BOOT" = true ]; then
+    ISO_SOURCE_DIR="${BUILD_DIR}/secureboot/iso"
+    echo -e "${YELLOW}      Staging signed Secure Boot tree...${NC}"
+    mkdir -p "${BUILD_DIR}/secureboot"
+    if ! "${PROJECT_DIR}/tools/secureboot/stage_signed_iso.sh" "${ISO_DIR}" "${ISO_SOURCE_DIR}" \
+        > "${BUILD_DIR}/secureboot/stage.log" 2>&1; then
+        cat "${BUILD_DIR}/secureboot/stage.log" >&2
+        exit 1
+    fi
+fi
+
 xorriso -as mkisofs \
     -b boot/limine/limine-bios-cd.bin \
     -no-emul-boot \
@@ -885,7 +904,7 @@ xorriso -as mkisofs \
     -no-emul-boot \
     --protective-msdos-label \
     -isohybrid-gpt-basdat \
-    "${ISO_DIR}" \
+    "${ISO_SOURCE_DIR}" \
     -o "${ISO_FILE}" \
     2>&1 | grep -v "^xorriso" || true
 
@@ -915,6 +934,9 @@ echo -e "  Size:   $(du -h "${ISO_FILE}" | cut -f1)"
 echo ""
 
 # Run QEMU if requested
+if [ "$RUN_QEMU" = true ] && [ "$SECURE_BOOT" = true ]; then
+    echo -e "${YELLOW}Note: -r boots with SeaBIOS; use ./run.sh --secure-boot to test Secure Boot.${NC}"
+fi
 if [ "$RUN_QEMU" = true ]; then
     echo -e "${YELLOW}Launching QEMU...${NC}"
     echo -e "${CYAN}(Click inside QEMU window for keyboard focus)${NC}"
