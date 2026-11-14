@@ -1504,6 +1504,10 @@ namespace QD
             onWindowDestroyed(m_windowId);
             return;
         }
+        // Restore a minimized terminal before focusing it.
+        m_window->setVisible(true);
+        if (m_desktop)
+            m_desktop->setActiveTaskbarWindow(m_windowId);
         QW::WindowManager::instance().bringToFront(m_window);
         QW::WindowManager::instance().setFocus(m_window);
 

@@ -36,6 +36,13 @@ namespace QK
             Cancel
         };
 
+        /// What happens once a shutdown request is confirmed
+        enum class Action : QC::u8
+        {
+            PowerOff = 0,
+            Restart
+        };
+
         using UIRequestHandler = bool (*)(Reason reason, void *userData);
         using SubsystemCallback = bool (*)(Reason reason, void *userData);
         using SubsystemHandle = QC::u32;
@@ -48,6 +55,8 @@ namespace QK
             static Controller &instance();
 
             void requestShutdown(Reason reason);
+            /// Same flow as requestShutdown(), but a confirmed request resets the machine.
+            void requestRestart(Reason reason);
             void confirm(UserChoice choice);
             void registerUIHandler(UIRequestHandler handler, void *userData);
             SubsystemHandle registerSubsystem(SubsystemCallback callback, void *userData, const char *name);
@@ -55,12 +64,15 @@ namespace QK
 
             Phase phase() const { return m_phase; }
             Reason reason() const { return m_reason; }
+            Action action() const { return m_action; }
 
         private:
             Controller();
 
+            void beginRequest(Reason reason, Action action);
             bool notifySubsystems();
             void powerOffHardware();
+            void restartHardware();
             void reset();
 
             struct SubsystemEntry
@@ -73,6 +85,7 @@ namespace QK
 
             Phase m_phase;
             Reason m_reason;
+            Action m_action;
             UIRequestHandler m_uiHandler;
             void *m_uiUserData;
             QC::Vector<SubsystemEntry> m_subsystems;

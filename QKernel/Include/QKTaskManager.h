@@ -63,6 +63,14 @@ namespace QK
         QC::u64 sleepUntil;
     };
 
+    struct TaskInfo
+    {
+        TaskId id;
+        char name[64];
+        TaskState state;
+        QC::u32 cpuIndex;
+    };
+
     class TaskManager
     {
     public:
@@ -89,6 +97,9 @@ namespace QK
         void wakeSleepingTasks(QC::u32 cpuIndex, QC::u64 nowMs);
         QC::u32 reapTerminatedTasks(QC::u32 cpuIndex, TaskId activeTaskId);
         QC::u64 reapedTaskCount(QC::u32 cpuIndex) const;
+
+        // Copies a point-in-time view of the task table; returns the number of entries written.
+        QC::u32 copyTaskInfo(TaskInfo *out, QC::u32 capacity) const;
 
     private:
         TaskManager();

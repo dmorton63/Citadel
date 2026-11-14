@@ -17,6 +17,11 @@ namespace QD
     {
         constexpr QC::i32 DIALOG_WIDTH = 520;
         constexpr QC::i32 DIALOG_HEIGHT = 220;
+
+        bool restartPending()
+        {
+            return QK::Shutdown::Controller::instance().action() == QK::Shutdown::Action::Restart;
+        }
     }
 
     ShutdownDialog::ShutdownDialog(Desktop *desktop)
@@ -73,7 +78,8 @@ namespace QD
         QC::i32 y = work.y + static_cast<QC::i32>((work.height - DIALOG_HEIGHT) / 2);
         QW::Rect bounds = {x, y, static_cast<QC::u32>(DIALOG_WIDTH), static_cast<QC::u32>(DIALOG_HEIGHT)};
 
-        m_window = QW::WindowManager::instance().createWindow("Shut Down", bounds);
+        const bool restart = restartPending();
+        m_window = QW::WindowManager::instance().createWindow(restart ? "Restart" : "Shut Down", bounds);
         if (!m_window)
             return;
 
@@ -99,7 +105,7 @@ namespace QD
         QC::i32 startX = (DIALOG_WIDTH - totalWidth) / 2;
 
         QW::Rect confirmBounds = {startX, baseY, static_cast<QC::u32>(buttonWidth), static_cast<QC::u32>(buttonHeight)};
-        m_confirmButton = new QW::Controls::Button(m_window, "Shut Down", confirmBounds);
+        m_confirmButton = new QW::Controls::Button(m_window, restart ? "Restart" : "Shut Down", confirmBounds);
         m_confirmButton->setContentMode(QW::ButtonContentMode::Text);
         m_confirmButton->setClickHandler(onConfirm, this);
         m_confirmButton->setRole(QW::ButtonRole::Destructive);
@@ -118,7 +124,7 @@ namespace QD
         if (!m_message)
             return;
 
-        const char *reasonText = "User requested shutdown.";
+        const char *reasonText = "User request.";
         switch (m_reason)
         {
         case QK::Shutdown::Reason::ShellCommand:
@@ -128,7 +134,7 @@ namespace QD
             reasonText = "Ctrl+Q shortcut requested shutdown.";
             break;
         case QK::Shutdown::Reason::SidebarPowerButton:
-            reasonText = "Power sidebar button pressed.";
+            reasonText = "Power button pressed.";
             break;
         case QK::Shutdown::Reason::SystemPolicy:
             reasonText = "System requested shutdown.";
@@ -140,9 +146,11 @@ namespace QD
         static char buffer[256];
         buffer[0] = '\0';
 
-        const char *part1 = "Shutdown requested.\nReason: ";
+        const bool restart = restartPending();
+        const char *part1 = restart ? "Restart requested.\nReason: " : "Shutdown requested.\nReason: ";
         const char *part2 = "\nAll registered subsystems have been asked to finish their work.";
-        const char *part3 = "\nSelect 'Shut Down' to power off now or 'Cancel' to stay in the system.";
+        const char *part3 = restart ? "\nSelect 'Restart' to reboot now or 'Cancel' to stay in the system."
+                                    : "\nSelect 'Shut Down' to power off now or 'Cancel' to stay in the system.";
 
         QC::usize offset = 0;
         auto append = [&](const char *text)

@@ -297,6 +297,27 @@ namespace QK
         return __atomic_load_n(&m_reapedTaskCounts[cpuIndex], __ATOMIC_RELAXED);
     }
 
+    QC::u32 TaskManager::copyTaskInfo(TaskInfo *out, QC::u32 capacity) const
+    {
+        if (!out || capacity == 0)
+            return 0;
+
+        // Task slots are append-only, so entries below the published count stay valid.
+        const QC::u32 count = __atomic_load_n(&m_taskCount, __ATOMIC_ACQUIRE);
+        QC::u32 written = 0;
+        for (QC::u32 i = 0; i < count && written < capacity; ++i)
+        {
+            const Task &task = m_tasks[i];
+            TaskInfo &info = out[written++];
+            info.id = task.id;
+            QC::String::strncpy(info.name, task.name, sizeof(info.name) - 1);
+            info.name[sizeof(info.name) - 1] = '\0';
+            info.state = __atomic_load_n(&task.state, __ATOMIC_ACQUIRE);
+            info.cpuIndex = task.cpuIndex;
+        }
+        return written;
+    }
+
     void TaskManager::yield(QC::u32 cpuIndex)
     {
         const TaskId id = getCurrentTaskId(cpuIndex);

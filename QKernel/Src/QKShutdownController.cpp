@@ -125,6 +125,7 @@ namespace QK
         Controller::Controller()
             : m_phase(Phase::Idle),
               m_reason(Reason::UserRequest),
+              m_action(Action::PowerOff),
               m_uiHandler(nullptr),
               m_uiUserData(nullptr),
               m_nextSubsystemHandle(1)
@@ -198,6 +199,16 @@ namespace QK
 
         void Controller::requestShutdown(Reason reason)
         {
+            beginRequest(reason, Action::PowerOff);
+        }
+
+        void Controller::requestRestart(Reason reason)
+        {
+            beginRequest(reason, Action::Restart);
+        }
+
+        void Controller::beginRequest(Reason reason, Action action)
+        {
             if (m_phase != Phase::Idle)
             {
                 QC_LOG_WARN(LOG_MODULE, "Shutdown already in progress (phase=%u)", static_cast<QC::u32>(m_phase));
@@ -205,7 +216,10 @@ namespace QK
             }
 
             m_reason = reason;
-            QC_LOG_INFO(LOG_MODULE, "Shutdown requested (reason=%u)", static_cast<QC::u32>(reason));
+            m_action = action;
+            QC_LOG_INFO(LOG_MODULE, "%s requested (reason=%u)",
+                        action == Action::Restart ? "Restart" : "Shutdown",
+                        static_cast<QC::u32>(reason));
 
             m_phase = Phase::NotifyingSubsystems;
             postShutdownPhaseEvent(QK::Event::Type::ShutdownPrepare, reason);
@@ -253,6 +267,8 @@ namespace QK
 
             m_phase = Phase::PoweringOff;
             postShutdownPhaseEvent(QK::Event::Type::ShutdownNow, m_reason);
+            if (m_action == Action::Restart)
+                restartHardware();
             powerOffHardware();
         }
 
@@ -322,9 +338,38 @@ namespace QK
             }
         }
 
+        void Controller::restartHardware()
+        {
+            QC_LOG_INFO(LOG_MODULE, "Issuing platform reset");
+            QK::Boot::Events::Emit("shutdown", "restart", shutdownReasonToken(m_reason));
+
+            // PCI reset control register (0xCF9): request a full reset.
+            QC::outb(0xCF9, 0x02);
+            tinyPause(kLegacyWritePauseCount);
+            QC::outb(0xCF9, 0x06);
+            tinyPause(kAcpiGraceSpinCount);
+
+            // 8042 keyboard controller pulse-reset fallback.
+            for (QC::u32 i = 0; i < 100000; ++i)
+            {
+                if ((QC::inb(0x64) & 0x02) == 0)
+                    break;
+            }
+            QC::outb(0x64, 0xFE);
+            tinyPause(kAcpiGraceSpinCount);
+
+            // Fast reset via System Control Port A (0x92).
+            const QC::u8 p92 = QC::inb(0x92);
+            QC::outb(0x92, static_cast<QC::u8>(p92 | 0x01));
+            tinyPause(kAcpiGraceSpinCount);
+
+            QC_LOG_WARN(LOG_MODULE, "Platform reset did not take effect; falling back to power-off");
+        }
+
         void Controller::reset()
         {
             m_phase = Phase::Idle;
+            m_action = Action::PowerOff;
         }
 
     } // namespace Shutdown
