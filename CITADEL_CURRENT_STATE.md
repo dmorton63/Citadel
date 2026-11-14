@@ -209,17 +209,13 @@ Status labels used below:
 
 ### Desktop / UI
 - Windowing + controls + desktop shell: **Working/Partial** (actively used; still evolving)
-- Current desktop/theme source path: **Hybrid/Partial** (external `.json` and `.cml` assets still exist as source/import material, but built-in themes and seeded desktop documents are already materialized into QCQL tables during desktop bring-up)
-- Database-backed theme loading: **Partial** (`ThemeService::loadThemeFromDatabase(...)` is real, and desktop boot validates/imports built-in theme rows into QCQL `Themes` and `ThemeTokens` tables before applying them)
-- Database-backed desktop document storage: **Partial** (desktop layout and CUI-ML payloads are seeded into QCQL document/chunk tables such as `DesktopLayouts`, `DesktopLayoutChunks`, `DesktopCuiml`, and `DesktopCuimlChunks`, but they are not yet modeled as a normalized relational desktop schema)
-- Target desktop/theme source path: **CQL-backed/Planned** (Citadel is moving toward storing desktop design specifications, control layout, theme tokens, and related UI metadata in CQL/QCQL tables rather than treating external files as the long-term runtime format)
-- Parser/import path: **Required/Planned** (the existing parser work still matters, but primarily as the ingest/bootstrap path that reads initial theme/layout assets and materializes them into database tables; subsequent boots should read from the CQL data model first, with file import/fallback reserved for provisioning, repair, or migration scenarios)
-- Dependency note: **Desktop-data integration depends on CQL maturity** (before the desktop can fully move to a database-first runtime, CQL still needs more complete relational/schema support and stable service/runtime integration so desktop metadata can be modeled cleanly and loaded predictably at boot)
+- Desktop shell: **Working** (static Citadel desktop per `CitadelDesktopRedesign.md`: fixed dark-slate surface, charcoal bottom taskbar with `Terminal | Explorer | Tasks | Clock | System`; one built-in Citadel Theme, no runtime theme/layout customization)
+- Built-in apps: **Working/Partial** (Explorer lists mounted volumes and folders and opens `.html`/`.cuiml` files; Tasks shows processors, memory, TPM/Secure Boot status, running applications and per-CPU scheduler tasks; the System menu offers Lock, Restart and Shutdown, with Update and Hibernate shown disabled)
+- Desktop signature gate: **Working** (`DESKTOP.CML` signature verification and PCR 7 measurement remain part of boot; the desktop layout itself is no longer loaded from JSON/CUI-ML/QCQL documents)
 
 ### CQL / Data Runtime
 - QCQL engine core: **Working** (database create/open/close, table creation, page allocation/I/O, row serialization, primary-key index rebuild/lookup, FK constraint enforcement on insert/update/delete, crash-safety write-barrier via generation counters)
 - QCQL system tables: **Partial** (`initializeSystemTables()` bootstraps `Themes`, `ThemeTokens`, and `Capabilities`; desktop code creates/seeds document and relational tables for layouts, chunks, regions, controls, properties, and bindings)
-- Desktop/theme integration with QCQL: **Working** (desktop bring-up creates/opens `/system/CMMS.QDB`, imports built-in themes, validates theme rows, loads theme state from QCQL during normal desktop startup; CMMS tables use normalized FK-declared relational schema)
 - QCQL runtime/query layer: **Working** (canonical handle-based surface `QCQL::Runtime::{openHandle,execute,closeHandle,insertRowByName,getIntegrityReport}` routes all command-layer callers; `execute()` supports CREATE TABLE, INSERT, UPDATE, DELETE, SELECT * FROM, DESCRIBE, SHOW TABLES with FK enforcement; handle process-binding and table capability-map enforcement implemented)
 - Relational modeling and foreign-key behavior: **Working** (FK descriptors serialised in v2 `TableSchemaDisk` on-disk format; `applyBuiltInRelationshipMetadata` re-applies all CMMS FK relationships on open; `enforceForeignKeyConstraints` / `enforceDeleteConstraints` enforce RESTRICT on all write paths; schema integrity validation via `SchemaIntegrityReport`)
 - Write-barrier durability: **Working** (generation-counter pair in `FileHeader.reserved[0..7]`; `writeBarrierDirty`/`writeBarrierClean` bracket every `persistMetadata` call; dirty-barrier detected on `openDatabase` and surfaced in `SchemaIntegrityReport.hasDirtyBarrier` and `csql status`)
@@ -528,7 +524,7 @@ High-level rules:
 
 **Item 41 – Runtime boundary (`QCQL::Runtime` facade)**
 - New files: [QCQL/Include/QCQLRuntime.h](QCQL/Include/QCQLRuntime.h), [QCQL/Src/QCQLRuntime.cpp](QCQL/Src/QCQLRuntime.cpp)
-- All command-layer callers (`csql`, `qcql-desktop`, `migrate-desktop`, `deskdoc`) routed through `openHandle`/`execute`/`closeHandle`/`insertRowByName`.
+- All command-layer callers (`csql`, `qcql-desktop`, `migrate-desktop`) routed through `openHandle`/`execute`/`closeHandle`/`insertRowByName`.
 - `QCQL/CMakeLists.txt` updated to compile `QCQLRuntime.cpp`.
 
 **Item 42 – DbHandle process binding + capability map**
@@ -583,7 +579,6 @@ High-level rules:
 | [QCQL/Src/QCQLEngine.cpp](QCQL/Src/QCQLEngine.cpp) | Write-barrier helpers, `applyBuiltInRelationshipMetadata` expansion, `validateSchemaIntegrity` implementation, barrier calls around all `persistMetadata` sites |
 | [QCQL/CMakeLists.txt](QCQL/CMakeLists.txt) | `Src/QCQLRuntime.cpp` added to QCQL library target |
 | [QKernel/Src/QKCommandCenter.cpp](QKernel/Src/QKCommandCenter.cpp) | `writeDiagLine`, `csql status` integrity output, `qcql-regtest`, `csql exec` DML, `csql` lowered to User access |
-| [QDesktop/Src/QDCommandProcessor.cpp](QDesktop/Src/QDCommandProcessor.cpp) | `deskdoc` open/close via runtime handle |
 
 ### Rollback / recovery runbook
 

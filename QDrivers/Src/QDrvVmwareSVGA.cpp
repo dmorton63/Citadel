@@ -308,6 +308,9 @@ namespace QDrv
         m_fifo = reinterpret_cast<volatile QC::u32 *>(m_fifoVirt);
         m_fifoSizeBytes = fifoSize;
 
+        // Stop the device from consuming the FIFO while the header is (re)initialized.
+        writeReg(SVGA_REG_CONFIG_DONE, 0);
+
         // FIFO header handling:
         // - Some implementations leave FIFO memory zeroed until the guest initializes it.
         // - Others pre-fill MIN/MAX.
@@ -340,14 +343,10 @@ namespace QDrv
                 return false;
             }
 
-            // Reset producer pointer to a known-good empty state.
-            // STOP is device-owned; only touch it if it's clearly invalid.
-            const QC::u32 stop = m_fifo[SVGA_FIFO_STOP];
-            if (stop < min || stop >= max)
-            {
-                m_fifo[SVGA_FIFO_STOP] = min;
-            }
+            // FIFO memory survives a warm reset, so a stale STOP would make the device
+            // replay the previous session's commands. Start with an empty ring.
             m_fifo[SVGA_FIFO_NEXT_CMD] = min;
+            m_fifo[SVGA_FIFO_STOP] = min;
             QC::write_barrier();
         }
 

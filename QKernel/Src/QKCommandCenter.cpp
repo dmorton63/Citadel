@@ -62,6 +62,65 @@
 #include "QNetDNS.h"
 #include "QNetTCP.h"
 
+namespace QKBoot
+{
+    static constexpr QC::usize kSmpStatusMaxEntries = 256;
+
+    enum class SmpCpuState : QC::u32
+    {
+        Offline = 0,
+        Launching = 1,
+        Initializing = 2,
+        Online = 3,
+    };
+
+    struct SmpCpuStatusEntry
+    {
+        QC::u32 cpuIndex = 0;
+        QC::u32 lapicId = 0;
+        bool online = false;
+        SmpCpuState state = SmpCpuState::Offline;
+        QC::u64 idleHeartbeats = 0;
+        QC::u64 timerHookTicks = 0;
+        QC::u64 schedulerHookKicks = 0;
+        QC::u64 schedulerTaskTurns[3] = {};
+        QC::u64 schedulerTaskWakeups = 0;
+        QC::u64 schedulerTasksReaped = 0;
+        QC::u64 workItemsCompleted = 0;
+        QC::u64 workChecksum = 0;
+    };
+
+    struct SmpStatusSnapshot
+    {
+        QC::u64 totalCpus = 0;
+        QC::u64 targetAps = 0;
+        QC::u64 onlineAps = 0;
+        QC::usize slotCount = 0;
+        SmpCpuStatusEntry entries[kSmpStatusMaxEntries]{};
+    };
+
+    bool getSmpStatusSnapshot(SmpStatusSnapshot &out);
+    bool runSmpWork(QC::u32 workItems, QC::u64 &completed, QC::u64 &checksum);
+
+    struct SmpSelfTestStatus
+    {
+        bool running = false;
+        QC::u32 expectedTasks = 0;
+        QC::u32 finishedTasks = 0;
+        QC::u32 totalAps = 0;
+        QC::u32 passedAps = 0;
+    };
+
+    bool startSmpSelfTest();
+    bool getSmpSelfTestStatus(SmpSelfTestStatus &out);
+}
+
+namespace QK::Boot::Tpm
+{
+    using FLineFn = void (*)(void *User, const char *Line);
+    bool RunDiagnosticCommand(const char *Args, FLineFn Out, void *User);
+}
+
 namespace QK::Boot::Config
 {
     enum class StartupMode : QC::u8
@@ -156,6 +215,22 @@ namespace QK::CmdCenter
                 return "Busy";
             case QC::Status::NotSupported:
                 return "NotSupported";
+            }
+            return "?";
+        }
+
+        static const char *smpCpuStateName(QKBoot::SmpCpuState s)
+        {
+            switch (s)
+            {
+            case QKBoot::SmpCpuState::Offline:
+                return "offline";
+            case QKBoot::SmpCpuState::Launching:
+                return "launching";
+            case QKBoot::SmpCpuState::Initializing:
+                return "initializing";
+            case QKBoot::SmpCpuState::Online:
+                return "online";
             }
             return "?";
         }
@@ -2379,6 +2454,163 @@ namespace QK::CmdCenter
             writeKeyValueU32(ctx, "qgfx_scanout_upload_fallbacks", accel.qgfxScanoutUploadFallbacks);
             writeKeyValueU32(ctx, "qgfx_rect_copy_batches", accel.qgfxRectCopyBatches);
             writeKeyValueU32(ctx, "qgfx_rect_copy_ops", accel.qgfxRectCopyOps);
+            return true;
+        }
+
+        static bool cmdSmpStat(const char *args, const QC::Cmd::Context &ctx, void *)
+        {
+            bool includeSlots = true;
+
+            char mode[16];
+            QC::String::memset(mode, 0, sizeof(mode));
+            const char *p = args ? skipSpaces(args) : nullptr;
+            if (p && *p)
+            {
+                (void)readToken(p, mode, sizeof(mode));
+                if (streqIgnoreCase(mode, "summary"))
+                    includeSlots = false;
+                else if (!(streqIgnoreCase(mode, "slots") || streqIgnoreCase(mode, "all")))
+                {
+                    ctx.writeLine("usage: smpstat [summary|slots|all]");
+                    return true;
+                }
+            }
+
+            QKBoot::SmpStatusSnapshot snap{};
+            if (!QKBoot::getSmpStatusSnapshot(snap))
+            {
+                ctx.writeLine("smpstat: SMP snapshot unavailable");
+                return true;
+            }
+
+            writeKeyValueU64(ctx, "smp_total_cpus", snap.totalCpus);
+            writeKeyValueU64(ctx, "smp_target_aps", snap.targetAps);
+            writeKeyValueU64(ctx, "smp_online_aps", snap.onlineAps);
+            writeKeyValueU64(ctx, "smp_slot_count", static_cast<QC::u64>(snap.slotCount));
+
+            if (!includeSlots)
+                return true;
+
+            ctx.writeLine("smp_slots:");
+            for (QC::usize i = 0; i < snap.slotCount; ++i)
+            {
+                const auto &e = snap.entries[i];
+                char line[384];
+                QC::String::memset(line, 0, sizeof(line));
+
+                (void)appendString(line, sizeof(line), "  [");
+                (void)appendU64Dec(line, sizeof(line), static_cast<QC::u64>(i));
+                (void)appendString(line, sizeof(line), "] cpu=");
+                (void)appendU64Dec(line, sizeof(line), static_cast<QC::u64>(e.cpuIndex));
+                (void)appendString(line, sizeof(line), " lapic=");
+                (void)appendU64Dec(line, sizeof(line), static_cast<QC::u64>(e.lapicId));
+                (void)appendString(line, sizeof(line), " state=");
+                (void)appendString(line, sizeof(line), smpCpuStateName(e.state));
+                (void)appendString(line, sizeof(line), " online=");
+                (void)appendString(line, sizeof(line), e.online ? "1" : "0");
+                (void)appendString(line, sizeof(line), " hb=");
+                (void)appendU64Dec(line, sizeof(line), e.idleHeartbeats);
+                (void)appendString(line, sizeof(line), " th=");
+                (void)appendU64Dec(line, sizeof(line), e.timerHookTicks);
+                (void)appendString(line, sizeof(line), " sh=");
+                (void)appendU64Dec(line, sizeof(line), e.schedulerHookKicks);
+                (void)appendString(line, sizeof(line), " work=");
+                (void)appendU64Dec(line, sizeof(line), e.workItemsCompleted);
+                (void)appendString(line, sizeof(line), " t0=");
+                (void)appendU64Dec(line, sizeof(line), e.schedulerTaskTurns[0]);
+                (void)appendString(line, sizeof(line), " t1=");
+                (void)appendU64Dec(line, sizeof(line), e.schedulerTaskTurns[1]);
+                (void)appendString(line, sizeof(line), " t2=");
+                (void)appendU64Dec(line, sizeof(line), e.schedulerTaskTurns[2]);
+                (void)appendString(line, sizeof(line), " w2=");
+                (void)appendU64Dec(line, sizeof(line), e.schedulerTaskWakeups);
+                (void)appendString(line, sizeof(line), " reaped=");
+                (void)appendU64Dec(line, sizeof(line), e.schedulerTasksReaped);
+                ctx.writeLine(line);
+            }
+
+            return true;
+        }
+
+        static bool cmdSmpWork(const char *args, const QC::Cmd::Context &ctx, void *)
+        {
+            const char *p = args ? skipSpaces(args) : nullptr;
+            char token[24];
+            QC::String::memset(token, 0, sizeof(token));
+            if (!p || !readToken(p, token, sizeof(token)))
+            {
+                ctx.writeLine("usage: smpwork <1-10000>");
+                return true;
+            }
+
+            QC::u32 requested = 0;
+            p = skipSpaces(p);
+            if (!parseU32(token, requested) || requested == 0 || requested > 10000 || (p && *p))
+            {
+                ctx.writeLine("usage: smpwork <1-10000>");
+                return true;
+            }
+
+            QC::u64 completed = 0;
+            QC::u64 checksum = 0;
+            const bool success = QKBoot::runSmpWork(requested, completed, checksum);
+            writeKeyValueU64(ctx, "smpwork_requested", requested);
+            writeKeyValueU64(ctx, "smpwork_completed", completed);
+            writeKeyValueU64(ctx, "smpwork_checksum", checksum);
+            ctx.writeLine(success ? "smpwork: complete" : "smpwork: incomplete or AP workers unavailable");
+            return true;
+        }
+
+        static bool cmdSmpSelfTest(const char *args, const QC::Cmd::Context &ctx, void *)
+        {
+            char mode[16];
+            QC::String::memset(mode, 0, sizeof(mode));
+            const char *p = args ? skipSpaces(args) : nullptr;
+            if (p && *p)
+            {
+                (void)readToken(p, mode, sizeof(mode));
+                p = skipSpaces(p);
+                if (!streqIgnoreCase(mode, "status") || (p && *p))
+                {
+                    ctx.writeLine("usage: smpselftest [status]");
+                    return true;
+                }
+            }
+
+            if (mode[0] == '\0')
+            {
+                ctx.writeLine(QKBoot::startSmpSelfTest()
+                                  ? "smpselftest: started (check with 'smpselftest status')"
+                                  : "smpselftest: already running or AP scheduler unavailable");
+                return true;
+            }
+
+            QKBoot::SmpSelfTestStatus status{};
+            if (!QKBoot::getSmpSelfTestStatus(status))
+            {
+                ctx.writeLine("smpselftest: not started");
+                return true;
+            }
+
+            writeKeyValueU64(ctx, "smpselftest_aps", status.totalAps);
+            writeKeyValueU64(ctx, "smpselftest_passed", status.passedAps);
+            writeKeyValueU64(ctx, "smpselftest_tasks_finished", status.finishedTasks);
+            writeKeyValueU64(ctx, "smpselftest_tasks_expected", status.expectedTasks);
+            if (status.running)
+                ctx.writeLine("smpselftest: running");
+            else
+                ctx.writeLine(status.passedAps == status.totalAps ? "smpselftest: pass" : "smpselftest: fail");
+            return true;
+        }
+
+        static void writeTpmDiagLine(void *user, const char *line)
+        {
+            static_cast<const QC::Cmd::Context *>(user)->writeLine(line);
+        }
+
+        static bool cmdTpm(const char *args, const QC::Cmd::Context &ctx, void *)
+        {
+            (void)QK::Boot::Tpm::RunDiagnosticCommand(args, &writeTpmDiagLine, const_cast<QC::Cmd::Context *>(&ctx));
             return true;
         }
 
@@ -10570,6 +10802,10 @@ namespace QK::CmdCenter
         auto &reg = QC::Cmd::Registry::instance();
         (void)reg.registerCommandExAccess("help", QC::Cmd::AccessLevel::Everyone, &cmdHelp, nullptr, "Show available commands (help [cmd])");
         (void)reg.registerCommandExAccess("video", QC::Cmd::AccessLevel::User, &cmdVideo, nullptr, "Show or reset video/compositor stats (video <stats|reset>)");
+        (void)reg.registerCommandExAccess("smpstat", QC::Cmd::AccessLevel::User, &cmdSmpStat, nullptr, "Show SMP/AP runtime status and per-CPU counters (smpstat [summary|slots|all])");
+        (void)reg.registerCommandExAccess("smpwork", QC::Cmd::AccessLevel::User, &cmdSmpWork, nullptr, "Dispatch cooperative CPU-bound jobs to online AP workers (smpwork <1-10000>)");
+        (void)reg.registerCommandExAccess("tpm", QC::Cmd::AccessLevel::User, &cmdTpm, nullptr, "TPM diagnostics (tpm [status|pcrs [0-23]|selftest|eventlog])");
+        (void)reg.registerCommandExAccess("smpselftest", QC::Cmd::AccessLevel::User, &cmdSmpSelfTest, nullptr, "Start or check AP scheduler preemption, sleep/wakeup, and task-exit self-tests (smpselftest [status])");
         (void)reg.registerCommandExAccess("whoami", QC::Cmd::AccessLevel::Everyone, &cmdWhoami, nullptr, "Show current access role");
         (void)reg.registerCommandExAccess("echo", QC::Cmd::AccessLevel::User, &cmdEcho, nullptr, "Echo text (redirection requires admin)");
         (void)reg.registerCommandExAccess("clear", QC::Cmd::AccessLevel::User, &cmdClear, nullptr, "Clear terminal output");
@@ -10674,6 +10910,7 @@ namespace QK::CmdCenter
         (void)reg.setCommandMetadata("db", "db <status|list|get|set|del|save|reload> ...", "op:string key?:string value?:string", 1, 16, true);
         (void)reg.setCommandMetadata("csql", "csql <status|open|create|close|show|exec> ...", "op:string arg1?:string arg2?:string arg3?:string", 1, 16, true);
         (void)reg.setCommandMetadata("video", "video <stats|reset>", "op:string", 1, 1, true);
+        (void)reg.setCommandMetadata("smpstat", "smpstat [summary|slots|all]", "mode?:string", 0, 1, true);
         (void)reg.setCommandMetadata("ports", "ports <list|audit|ratelimit|close-unused>", "op:string", 1, 1, true);
         (void)reg.setCommandMetadata("sync", "sync", "none", 0, 0, true);
         (void)reg.setCommandMetadata("clear", "clear", "none", 0, 0, true);

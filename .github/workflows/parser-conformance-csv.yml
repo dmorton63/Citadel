@@ -1,0 +1,24 @@
+name: Parser Conformance CSV
+
+on:
+  pull_request:
+    paths:
+      - docs/CITADEL_PARSER_CONFORMANCE_CHECKLIST.csv
+      - tools/validate_parser_conformance_csv.py
+      - .github/workflows/parser-conformance-csv.yml
+  push:
+    paths:
+      - docs/CITADEL_PARSER_CONFORMANCE_CHECKLIST.csv
+      - tools/validate_parser_conformance_csv.py
+      - .github/workflows/parser-conformance-csv.yml
+  workflow_dispatch:
+
+jobs:
+  validate-parser-conformance-csv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate parser conformance CSV
+        run: |
+          python3 tools/validate_parser_conformance_csv.py

@@ -30,6 +30,7 @@ namespace QK::Boot::Limine
     const limine_memmap_response *GetMemmapResponse(QC::u64 MemmapRequest[]);
     const limine_firmware_type_response *GetFirmwareTypeResponse(QC::u64 FirmwareTypeRequest[]);
     const limine_rsdp_response *GetRsdpResponse(QC::u64 RsdpRequest[]);
+    const limine_mp_response *GetMpResponse(QC::u64 MpRequest[]);
 
     // Returns the sum of "available after reclaim" ranges in bytes.
     // Counts: USABLE + BOOTLOADER_RECLAIMABLE + ACPI_RECLAIMABLE.

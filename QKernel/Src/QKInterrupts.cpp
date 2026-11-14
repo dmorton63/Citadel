@@ -26,6 +26,7 @@ namespace QK
         for (int i = 0; i < 256; ++i)
         {
             m_handlers[i] = nullptr;
+            m_acknowledgeBeforeHandler[i] = false;
         }
     }
 
@@ -70,15 +71,20 @@ namespace QK
         // TODO: Implement APIC initialization for SMP support
     }
 
-    void InterruptManager::registerHandler(QC::u8 vector, InterruptHandler handler)
+    void InterruptManager::registerHandler(
+        QC::u8 vector,
+        InterruptHandler handler,
+        bool acknowledgeBeforeHandler)
     {
         m_handlers[vector] = handler;
+        m_acknowledgeBeforeHandler[vector] = acknowledgeBeforeHandler;
         QC_LOG_DEBUG("QKInt", "Registered handler for vector %u", vector);
     }
 
     void InterruptManager::unregisterHandler(QC::u8 vector)
     {
         m_handlers[vector] = nullptr;
+        m_acknowledgeBeforeHandler[vector] = false;
     }
 
     void InterruptManager::enableInterrupt(QC::u8 irq)
@@ -135,6 +141,13 @@ namespace QK
     {
         InterruptManager &mgr = instance();
         QC::u8 vector = static_cast<QC::u8>(frame->vector);
+        const bool isHardwareInterrupt =
+            vector >= IRQ_BASE && vector < IRQ_BASE + 16;
+        const bool acknowledgeBeforeHandler =
+            isHardwareInterrupt && mgr.m_acknowledgeBeforeHandler[vector];
+
+        if (acknowledgeBeforeHandler)
+            mgr.sendEOI(vector - IRQ_BASE);
 
         if (mgr.m_handlers[vector])
         {
@@ -165,7 +178,7 @@ namespace QK
         }
 
         // Send EOI for hardware interrupts
-        if (vector >= IRQ_BASE && vector < IRQ_BASE + 16)
+        if (isHardwareInterrupt && !acknowledgeBeforeHandler)
         {
             mgr.sendEOI(vector - IRQ_BASE);
         }

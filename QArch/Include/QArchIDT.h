@@ -86,6 +86,7 @@ namespace QArch
 
         void irq_stub_0();
         void irq_stub_1();
+        void irq48();
         // ... etc
     }
 

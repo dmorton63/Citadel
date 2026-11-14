@@ -157,7 +157,14 @@ namespace QK
             event.data.mouse.button = button;
             event.data.mouse.modifiers = mods;
 
-            postEvent(event);
+            if (!postEvent(event))
+            {
+                QC_LOG_WARN("QKEvent", "Dropped mouse button event type=%u button=%u x=%d y=%d",
+                            static_cast<unsigned>(type),
+                            static_cast<unsigned>(button),
+                            x,
+                            y);
+            }
         }
 
         void EventManager::postMouseScroll(QC::i32 delta, QC::i32 x, QC::i32 y)

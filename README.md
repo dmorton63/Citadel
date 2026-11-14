@@ -12,11 +12,19 @@ This README is the short entry point for the repository:
 For the full current implementation snapshot, use `CITADEL_CURRENT_STATE.md`.
 For active planning, use `TODO_MAIN.md` and `TODO_INBOX.md`.
 
+## Executable Extension Decision
+
+Citadel native app executable artifacts use `.cap` (Citadel Application Package).
+
+Canonical source: `docs/CITADEL_APP_PLATFORM_V0_1.md`.
+Older brainstorm references to `.cpe` are historical and not current.
+
 Current highlights:
 - Desktop, windowing, and control stack are in active use.
 - Bring-up grade IPv4 networking is working in the current QEMU workflow.
 - QCQL now backs the active CMMS desktop runtime path: desktop documents and theme data are persisted in database tables, runtime rows are used at boot for the active layout, and generated CUI-ML preserves the existing parser/theme pipeline.
 - Security Center, Task_Flow, and data-driven runtime work exist partly in code and partly as forward-looking design/spec material.
+- Citadel is getting an update.  We are adding SMP Support.
 
 ## Desktop runtime status
 
@@ -48,6 +56,8 @@ Useful terminal commands:
 - `tcpconnect <ip|host> <port> [timeout_ms]`
 - `httpget <host> [path] [timeout_ms]`
 - `tcplog`
+- `LOOP <iterations> [TIMES] ... ENDLOOP [post_command]` (repeat a command block in terminal, then optionally run a final command like `saveterm`)
+- `LOOPINC <iterations>` (repeat the most recent routed command N times)
 
 ## A Snapshot of our desktop design as it is at the moment.
 
@@ -218,6 +228,51 @@ qemu-system-x86_64 -cdrom build/citadel-limine.iso -serial stdio
 qemu-system-x86_64 -cdrom build/citadel-limine.iso -serial stdio -display gtk,grab-on-hover=on
 ```
 
+### SMP validation runs (QEMU)
+
+For repeatable SMP bring-up testing, prefer `run.sh` over ad-hoc QEMU commands:
+
+```bash
+# Launch with explicit virtual CPU count
+./run.sh --smp 1
+./run.sh --smp 2
+./run.sh --smp 3
+./run.sh --smp 4
+./run.sh --smp 8
+
+# Print the exact QEMU command (without launching) to verify -smp
+./run.sh --smp 4 --print-cmd
+```
+
+In the in-guest terminal:
+
+```text
+smpstat all
+smpselftest
+loop 10 times
+smpwork 10000
+smpstat all
+endloop smpselftest status
+saveterm <name>.txt
+```
+
+Pass criteria:
+- `N=1`: baseline with no AP workers (`smp_target_aps: 0`, `smp_online_aps: 0`).
+- `N>1`: `smp_target_aps: N-1`, `smp_online_aps: N-1`, each iteration reports
+  `smpwork_completed: 10000`, checksum `13875592363411389448`, and
+  `smpselftest status` reports `smpselftest: pass`. The on-demand self-test's
+  non-yielding tasks (`t0` and `t1`) verify local-timer preemption on every AP;
+  `t2`/`w2`/`reaped` verify task sleep, timer wakeup, exit, and stack
+  reclamation. Normal boots run only one queue-draining `ap-worker` per AP,
+  which blocks when idle while the AP halts.
+
+Legacy pre-scheduler captures are recorded in `shared/`; use the smoke runner
+to generate current captures with task-switch counters:
+`smp1test.txt`, `smptest2.txt`, `smp3test.txt`, `smp-qemu-1-4.txt`, and
+`smp8text.txt`.
+
+See `tests/smp/README.md` for the full SMP smoke-test and transcript-validation flow.
+
 ### Shared host folder (QEMU)
 
 - Create a directory named `shared/` at the repo root. The build script detects it automatically.
@@ -230,6 +285,12 @@ qemu-system-x86_64 -cdrom build/citadel-limine.iso -serial stdio -display gtk,gr
 - Use `./build.sh -r --system-vol` to attach the persistent FAT32 system disk image at `build/system.qcow2`.
 - In that mode the guest mounts `/system` from the virtual disk instead of relying only on the ramdisk copy, so desktop/runtime data written under `/system` persists across boots.
 - A common development run is `./build.sh -r --tpm --system-vol --relmouse --prod`.
+
+### TPM 2.0
+
+- `--tpm` attaches an emulated TPM over CRB (requires `swtpm`); `./run.sh --tpm-tis` uses the TIS/FIFO interface instead.
+- The kernel detects CRB vs TIS/FIFO from the ACPI TPM2 table (start methods 2/6/7/8), and serializes all TPM commands with an SMP-safe lock.
+- Terminal diagnostics: `tpm status`, `tpm pcrs [0-23]`, `tpm selftest`, and `tpm eventlog` (kernel PCR measurements; the firmware log location is reported but not parsed).
 
 ## Bootable USB (real hardware)
 

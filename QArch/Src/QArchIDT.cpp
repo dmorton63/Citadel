@@ -59,6 +59,7 @@ extern "C"
     void irq13();
     void irq14();
     void irq15();
+    void irq48();
 }
 
 namespace QArch
@@ -173,6 +174,7 @@ namespace QArch
         setEntry(45, reinterpret_cast<QC::u64>(irq13), 0x28, IDT_INTERRUPT_GATE);
         setEntry(46, reinterpret_cast<QC::u64>(irq14), 0x28, IDT_INTERRUPT_GATE);
         setEntry(47, reinterpret_cast<QC::u64>(irq15), 0x28, IDT_INTERRUPT_GATE);
+        setEntry(48, reinterpret_cast<QC::u64>(irq48), 0x28, IDT_INTERRUPT_GATE);
     }
 
 } // namespace QArch

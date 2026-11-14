@@ -22,6 +22,12 @@ add_executable(citadel_kernel
     Boot/Desktop/QKBootDesktopSession.cpp
     Boot/Memory/QKBootAddressMapping.cpp
     Boot/Memory/QKBootEarlyMemory.cpp
+    Boot/TPM/QKBootTPMInternal.cpp
+    Boot/TPM/QKBootTPMTransport.cpp
+    Boot/TPM/QKBootTPMLock.cpp
+    Boot/TPM/QKBootTPMCommands.cpp
+    Boot/TPM/QKBootTPMMeasure.cpp
+    Boot/TPM/QKBootTPMDiag.cpp
     Boot/TPM/QKBootTPMSecureStore.cpp
     Boot/Limine/QKBootLimineRequests.cpp
     Boot/Limine/QKBootLimineModules.cpp

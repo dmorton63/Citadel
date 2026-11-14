@@ -1,28 +1,20 @@
 add_library(QDesktop STATIC
-    Src/QDAccent.cpp
     Src/QDBrowser.cpp
     Src/QDCuiMLViewer.cpp
     Src/QDDesktop.cpp
-    Src/QDDesktopDocument.cpp
-    Src/QDDesktopDocumentIO.cpp
-    Src/QDDesktopDocumentValidation.cpp
+    Src/QDExplorer.cpp
     Src/QDHtml.cpp
-    Src/QDTheme.cpp
-    Src/QDThemeAssets.cpp
-    Src/QDThemeService.cpp
+    Src/QDTasks.cpp
     Src/QDTerminal.cpp
     Src/QDShutdownDialog.cpp
     Src/QDSetupWizard.cpp
     Src/QDLoginDialog.cpp
     Src/QDCommandProcessor.cpp
-    Src/QDThemeImporter.cpp
-    Src/QDView3D.cpp
 
 )
 
 target_include_directories(QDesktop PUBLIC
     Include
-    ${CMAKE_SOURCE_DIR}/QCMS/Include
     ${CMAKE_SOURCE_DIR}/QKernel/Include)
-target_link_libraries(QDesktop PUBLIC QCommon QKernel QGraphics QWindowing QWControls QFileSystem QNetwork QCQL QCMS QC3D)
+target_link_libraries(QDesktop PUBLIC QCommon QKernel QGraphics QWindowing QWControls QFileSystem QNetwork QCQL)
 target_compile_options(QDesktop PRIVATE ${KERNEL_COMPILE_FLAGS})

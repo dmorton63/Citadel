@@ -19,7 +19,7 @@ namespace QDrv
 
         void setCallback(TimerCallback callback);
 
-        QC::u64 ticks() const { return m_ticks; }
+        QC::u64 ticks() const { return __atomic_load_n(&m_ticks, __ATOMIC_RELAXED); }
         QC::u64 milliseconds() const;
         QC::u64 microseconds() const;
 

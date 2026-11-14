@@ -52,6 +52,8 @@ HEADLESS=false
 AUTO_GRAB=true
 SYSTEM_VOL=false
 RESET_SYSTEM_VOL=false
+QEMU_CPUS=4
+SHARED_SOURCE_MODE=auto
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -106,6 +108,22 @@ while [[ $# -gt 0 ]]; do
             SYSTEM_VOL=true
             shift
             ;;
+        --smp)
+            if [[ $# -lt 2 ]] || ! [[ "$2" =~ ^[1-9][0-9]*$ ]] || (( $2 > 256 )); then
+                echo -e "${RED}--smp requires a CPU count from 1 to 256.${NC}" >&2
+                exit 1
+            fi
+            QEMU_CPUS="$2"
+            shift 2
+            ;;
+        --shared-source)
+            if [[ $# -lt 2 ]] || ! [[ "$2" =~ ^(auto|qemu|usb)$ ]]; then
+                echo -e "${RED}--shared-source requires auto, qemu, or usb.${NC}" >&2
+                exit 1
+            fi
+            SHARED_SOURCE_MODE="$2"
+            shift 2
+            ;;
         --reset-system-vol)
             RESET_SYSTEM_VOL=true
             shift
@@ -130,6 +148,8 @@ while [[ $# -gt 0 ]]; do
             echo "  --relmouse      Use relative USB mouse in QEMU"
             echo "  --system-vol    Attach persistent system volume disk (build/system.qcow2)"
             echo "  --reset-system-vol Delete build/system.qcow2 before build/run"
+            echo "  --smp <count>   QEMU virtual CPUs (default: ${QEMU_CPUS}, max: 256)"
+            echo "  --shared-source <auto|qemu|usb> Shared mount source (auto: QEMU host share for -r, USB for ISO builds)"
             echo "  --prod          Build production mode (fail-closed boot signature enforcement; use --tpm when running)"
             echo "  -j<N>           Use N parallel jobs (default: $(nproc))"
             echo "  -h, --help      Show this help"
@@ -141,6 +161,21 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+PACKAGED_SHARED_SOURCE=""
+case "${SHARED_SOURCE_MODE}" in
+    qemu)
+        PACKAGED_SHARED_SOURCE="RAMDISK"
+        ;;
+    usb)
+        PACKAGED_SHARED_SOURCE="USB"
+        ;;
+    auto)
+        if [ "${RUN_QEMU}" = true ]; then
+            PACKAGED_SHARED_SOURCE="RAMDISK"
+        fi
+        ;;
+esac
 
 if [ "$RESET_SYSTEM_VOL" = true ]; then
     if [ -f "${BUILD_DIR}/system.qcow2" ]; then
@@ -276,6 +311,9 @@ if [ -d "${RAMDISK_DIR}" ]; then
             exit 1
         fi
     fi
+
+    # Ensure runtime scratch dirs exist in the packaged ramdisk even when absent from source.
+    mdir -i "${RAMDISK_TEMP}" ::/dump >/dev/null 2>&1 || mmd -i "${RAMDISK_TEMP}" ::/dump >/dev/null 2>&1 || true
 
     # Keep a non-shadowed copy of desktop assets at the ramdisk root.
     # When a persistent /system volume is mounted, it hides the bundled /system tree,
@@ -641,7 +679,24 @@ if [ -d "${RAMDISK_DIR}" ]; then
 
     # Include startup.cfg so kernel startup-mode parsing can work from the ramdisk
     if [ -f "${PROJECT_DIR}/startup.cfg" ]; then
-        mcopy -i "${RAMDISK_TEMP}" "${PROJECT_DIR}/startup.cfg" ::/STARTUP.CFG >/dev/null 2>&1
+        STARTUP_CFG_SOURCE="${PROJECT_DIR}/startup.cfg"
+        if [ -n "${PACKAGED_SHARED_SOURCE}" ]; then
+            STARTUP_CFG_SOURCE="${BUILD_DIR}/startup.cfg"
+            awk -v source="${PACKAGED_SHARED_SOURCE}" '
+                BEGIN { updated = 0 }
+                /^[[:space:]]*SHARED_SOURCE[[:space:]]*=/ {
+                    print "SHARED_SOURCE=" source
+                    updated = 1
+                    next
+                }
+                { print }
+                END {
+                    if (!updated)
+                        print "SHARED_SOURCE=" source
+                }
+            ' "${PROJECT_DIR}/startup.cfg" > "${STARTUP_CFG_SOURCE}"
+        fi
+        mcopy -o -i "${RAMDISK_TEMP}" "${STARTUP_CFG_SOURCE}" ::/STARTUP.CFG >/dev/null 2>&1
     fi
 
     # Include boot.json (boot policy / min spec gate) as an 8.3 name.
@@ -988,6 +1043,7 @@ if [ "$RUN_QEMU" = true ]; then
         -cdrom "${ISO_FILE}"
         -boot order=d
         -m 3G
+        -smp "${QEMU_CPUS}"
         -vga vmware
         -netdev user,id=net0
         -device e1000,netdev=net0

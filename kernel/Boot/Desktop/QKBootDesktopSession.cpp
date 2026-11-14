@@ -4,6 +4,8 @@
 #include "QCString.h"
 
 #include "QKMemHeap.h"
+#include "QKScheduler.h"
+#include "QKTaskManager.h"
 #include "QArchPCI.h"
 #include "QDrvTimer.h"
 #include "QDrvVmwareSVGA.h"
@@ -1300,8 +1302,10 @@ namespace
                 g_lastPrimaryMouseReportMs = QDrv::Timer::instance().milliseconds();
         }
 
+        const bool pointerMoved = (dx != 0 || dy != 0);
+
         bool postedMove = false;
-        if (report.isAbsolute || dx != 0 || dy != 0 || buttonsChanged)
+        if (pointerMoved || buttonsChanged)
         {
             wm.noteMouseEventPosted(reportMs);
             eventMgr.postMouseMove(curX, curY, dx, dy);
@@ -1651,11 +1655,6 @@ namespace QK::Boot::Desktop
         QK::Shutdown::Controller::instance();
         g_Log("Shutdown controller ready\r\n");
         RegisterShutdownSerialSaveHook();
-
-        // Initialize timer (higher tick reduces input polling latency).
-        g_Log("Initializing timer...\r\n");
-        QDrv::Timer::instance().initialize(1000);
-        g_Log("Timer initialized\r\n");
 
         // Initialize PCI bus and enumerate devices.
         g_Log("Initializing PCI...\r\n");
@@ -2025,6 +2024,80 @@ namespace QK::Boot::Desktop
         logBootMetric("window_system_init", windowSystemStartMs);
     }
 
+    [[noreturn]] static void DesktopRuntimeTask(void *)
+    {
+        g_Log("Entering main loop...\r\n");
+        bool firstDriverPoll = true;
+        bool firstTimerWake = true;
+
+        while (true)
+        {
+            if (g_stopDesktopRequested)
+            {
+                g_Log("stopx: tearing down desktop\r\n");
+                g_Desktop.shutdown();
+                QW::WindowManager::instance().shutdown();
+                g_State.DesktopInitialized = false;
+                g_State.WindowSystemInitialized = false;
+                QK::Console::setInputEnabled(true);
+                QK::Debug::FramebufferText::SetEnabled(true);
+                g_stopDesktopRequested = false;
+                g_Log("stopx: returning to terminal-only mode\r\n");
+                enterTerminalOnlyLoop();
+            }
+
+            QKDrv::Manager::instance().poll();
+            if (firstDriverPoll)
+            {
+                g_Log("Desktop runtime: first driver poll completed\r\n");
+                firstDriverPoll = false;
+            }
+
+            auto &eventMgr = QK::Event::EventManager::instance();
+            auto &wm = QW::WindowManager::instance();
+
+            maybePostBackspaceRepeat();
+
+            for (;;)
+            {
+                const QC::usize processed = eventMgr.processEvents(16);
+
+                if (wm.needsRender())
+                    wm.render();
+
+                if (processed == 0 && !wm.needsRender())
+                    break;
+            }
+
+            static constexpr QC::u64 kFrameIntervalMs = 16;
+            const QC::u64 nowMs = QDrv::Timer::instance().milliseconds();
+            static QC::u64 s_nextFrameMs = 0;
+            if (s_nextFrameMs == 0)
+                s_nextFrameMs = nowMs;
+
+            if (nowMs >= s_nextFrameMs)
+            {
+                g_Desktop.tickAnimations();
+                wm.render();
+                s_nextFrameMs = nowMs + kFrameIntervalMs;
+            }
+            else
+            {
+                const QC::u64 remainingMs = s_nextFrameMs - nowMs;
+                const QC::u64 sleepMs = (remainingMs > 2) ? 2 : remainingMs;
+                if (sleepMs > 0)
+                {
+                    QDrv::Timer::instance().sleep(static_cast<QC::u32>(sleepMs));
+                    if (firstTimerWake)
+                    {
+                        g_Log("Desktop runtime: timer wait resumed\r\n");
+                        firstTimerWake = false;
+                    }
+                }
+            }
+        }
+    }
+
     [[noreturn]] void InitializeDesktopAndRunLoop()
     {
         if (!g_State.Prepared)
@@ -2134,87 +2207,39 @@ namespace QK::Boot::Desktop
             g_State.DesktopInitialized = true;
         }
 
-        // Main loop - process events and render.
-        g_Log("Entering main loop...\r\n");
-
-        while (true)
+        if (!QK::Scheduler::instance().isRunning())
         {
-            if (g_stopDesktopRequested)
-            {
-                g_Log("stopx: tearing down desktop\r\n");
-                g_Desktop.shutdown();
-                QW::WindowManager::instance().shutdown();
-                g_State.DesktopInitialized = false;
-                g_State.WindowSystemInitialized = false;
-                QK::Console::setInputEnabled(true);
-                QK::Debug::FramebufferText::SetEnabled(true);
-                g_stopDesktopRequested = false;
-                g_Log("stopx: returning to terminal-only mode\r\n");
-                enterTerminalOnlyLoop();
-            }
-
-            // Poll all active drivers.
-            QKDrv::Manager::instance().poll();
-
-            auto &eventMgr = QK::Event::EventManager::instance();
-            auto &wm = QW::WindowManager::instance();
-
-            maybePostBackspaceRepeat();
-
-            // Process a bounded batch, then give rendering a chance.
-            // This keeps pointer hover/press visuals responsive even under
-            // high-frequency mouse reports.
-            for (;;)
-            {
-                const QC::usize processed = eventMgr.processEvents(16);
-
-                if (wm.needsRender())
-                {
-                    wm.render();
-                }
-
-                // No more immediate work to do; exit the inner loop and let the
-                // idle pacing logic decide how long to wait.
-                if (processed == 0 && !wm.needsRender())
-                {
-                    break;
-                }
-            }
-
-            // Idle pacing:
-            // Previously this loop used `hlt` to wait for the next interrupt.
-            // In practice, when the next interrupt is delayed (e.g., sparse input,
-            // timer issues, or interrupt masking in drivers), this can stall UI
-            // presentation for multi-second intervals.
-            //
-            // Instead, run a small periodic tick that:
-            // - keeps driver polling/network alive,
-            // - processes events,
-            // - forces a render at a predictable cadence when idle.
-            //
-            // Minimal UX: target ~60Hz, but keep CPU usage bounded with short sleeps.
-            static constexpr QC::u64 kFrameIntervalMs = 16;
-            const QC::u64 nowMs = QDrv::Timer::instance().milliseconds();
-            static QC::u64 s_nextFrameMs = 0;
-            if (s_nextFrameMs == 0)
-                s_nextFrameMs = nowMs;
-
-            if (nowMs >= s_nextFrameMs)
-            {
-                g_Desktop.tickAnimations();
-                // Force a compositor tick so hover/cursor/pointer feedback stays snappy.
-                wm.render();
-                s_nextFrameMs = nowMs + kFrameIntervalMs;
-            }
-            else
-            {
-                // Sleep in short slices so input interrupts can still wake us quickly.
-                const QC::u64 remainingMs = s_nextFrameMs - nowMs;
-                const QC::u64 sleepMs = (remainingMs > 2) ? 2 : remainingMs;
-                if (sleepMs > 0)
-                    QDrv::Timer::instance().sleep(static_cast<QC::u32>(sleepMs));
-            }
+            g_Log("Scheduler unavailable; keeping desktop loop on boot stack\r\n");
+            DesktopRuntimeTask(nullptr);
         }
+
+        constexpr QC::usize kDesktopTaskStackSize = 64 * 1024;
+        QK::TaskManager &taskManager = QK::TaskManager::instance();
+        const QK::TaskId taskId = taskManager.createTask(
+            "desktop-runtime",
+            &DesktopRuntimeTask,
+            nullptr,
+            QK::TaskPriority::Normal,
+            0,
+            kDesktopTaskStackSize);
+        if (taskId == 0)
+        {
+            g_Log("Failed to create desktop runtime task; keeping loop on boot stack\r\n");
+            DesktopRuntimeTask(nullptr);
+        }
+
+        QK::Scheduler::instance().addTask(taskId);
+        QK::Task *task = taskManager.getTask(taskId);
+        if (!task || __atomic_load_n(&task->state, __ATOMIC_ACQUIRE) != QK::TaskState::Ready)
+        {
+            taskManager.destroyTask(taskId);
+            g_Log("Failed to enqueue desktop runtime task; keeping loop on boot stack\r\n");
+            DesktopRuntimeTask(nullptr);
+        }
+
+        g_Log("Desktop runtime scheduled on CPU 0 with a 64 KiB stack\r\n");
+        for (;;)
+            asm volatile("hlt");
     }
 
     bool RunFromLimineRequests(QC::u64 FramebufferRequest[], QC::u64 ModuleRequest[], const EarlyHeap &Heap, FLogFn Log)

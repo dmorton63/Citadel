@@ -136,6 +136,18 @@ limine_rsdp_request:
     dq 0x27637845accdcf3c
     dq 0                     ; revision
     dq 0                     ; response pointer
+
+; MP request (SMP startup)
+align 8
+global limine_mp_request
+limine_mp_request:
+    dq LIMINE_COMMON_MAGIC_0
+    dq LIMINE_COMMON_MAGIC_1
+    dq 0x95a67b819a1b857e
+    dq 0xa0b61b723b6a73e0
+    dq 0                     ; revision
+    dq 0                     ; response pointer
+    dq 0                     ; flags
     
 ; ============================================================================
 ; BSS section
@@ -205,10 +217,19 @@ isr_common_stub:
     push r14
     push r15
 
+    ; Preserve SIMD/FPU state while C dispatch and scheduling run.
+    mov rdi, rsp
+    sub rsp, 528
+    and rsp, -16
+    fxsave64 [rsp]
+    mov [rsp + 512], rdi
+
     ; Call C handler
-    mov rdi, rsp        ; Pass stack pointer as argument
     extern isr_handler
     call isr_handler
+
+    fxrstor64 [rsp]
+    mov rsp, [rsp + 512]
 
     ; Restore registers
     pop r15
@@ -250,10 +271,19 @@ irq_common_stub:
     push r14
     push r15
 
+    ; Preserve SIMD/FPU state while C dispatch and scheduling run.
+    mov rdi, rsp
+    sub rsp, 528
+    and rsp, -16
+    fxsave64 [rsp]
+    mov [rsp + 512], rdi
+
     ; Call C handler
-    mov rdi, rsp        ; Pass stack pointer as argument
     extern irq_handler
     call irq_handler
+
+    fxrstor64 [rsp]
+    mov rsp, [rsp + 512]
 
     ; Restore registers
     pop r15
@@ -354,6 +384,7 @@ IRQ 12, 44          ; PS/2 Mouse
 IRQ 13, 45          ; FPU
 IRQ 14, 46          ; Primary ATA
 IRQ 15, 47          ; Secondary ATA
+IRQ 48, 48          ; Local APIC timer
 
 ; Mark stack as non-executable (silences ld executable-stack warning)
 section .note.GNU-stack noalloc noexec nowrite

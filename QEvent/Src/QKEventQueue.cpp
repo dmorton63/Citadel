@@ -8,11 +8,36 @@ namespace QK
 {
     namespace Event
     {
+        namespace
+        {
+            class QueueLockGuard
+            {
+            public:
+                explicit QueueLockGuard(volatile QC::u32 &lock) : m_lock(lock)
+                {
+                    asm volatile("pushfq; pop %0; cli" : "=r"(m_flags) : : "memory");
+                    while (__atomic_exchange_n(&m_lock, 1u, __ATOMIC_ACQUIRE) != 0)
+                        QC::pause();
+                }
+
+                ~QueueLockGuard()
+                {
+                    __atomic_store_n(&m_lock, 0u, __ATOMIC_RELEASE);
+                    if (m_flags & (1ull << 9))
+                        asm volatile("sti" ::: "memory");
+                }
+
+            private:
+                volatile QC::u32 &m_lock;
+                QC::u64 m_flags = 0;
+            };
+        }
 
         // ==================== EventQueue Implementation ====================
 
         void EventQueue::initialize()
         {
+            QueueLockGuard lock(m_lock);
             m_head = 0;
             m_tail = 0;
             m_count = 0;
@@ -21,7 +46,8 @@ namespace QK
 
         bool EventQueue::push(const Event &event)
         {
-            if (!m_initialized || isFull())
+            QueueLockGuard lock(m_lock);
+            if (!m_initialized || m_count >= MaxEvents)
             {
                 return false;
             }
@@ -76,7 +102,8 @@ namespace QK
 
         bool EventQueue::pop(Event &outEvent)
         {
-            if (!m_initialized || isEmpty())
+            QueueLockGuard lock(m_lock);
+            if (!m_initialized || m_count == 0)
             {
                 return false;
             }
@@ -90,7 +117,8 @@ namespace QK
 
         bool EventQueue::peek(Event &outEvent) const
         {
-            if (!m_initialized || isEmpty())
+            QueueLockGuard lock(m_lock);
+            if (!m_initialized || m_count == 0)
             {
                 return false;
             }
@@ -99,8 +127,27 @@ namespace QK
             return true;
         }
 
+        bool EventQueue::isEmpty() const
+        {
+            QueueLockGuard lock(m_lock);
+            return m_count == 0;
+        }
+
+        bool EventQueue::isFull() const
+        {
+            QueueLockGuard lock(m_lock);
+            return m_count >= MaxEvents;
+        }
+
+        QC::usize EventQueue::count() const
+        {
+            QueueLockGuard lock(m_lock);
+            return m_count;
+        }
+
         void EventQueue::clear()
         {
+            QueueLockGuard lock(m_lock);
             m_head = 0;
             m_tail = 0;
             m_count = 0;
@@ -108,7 +155,8 @@ namespace QK
 
         void EventQueue::clearType(Type type)
         {
-            if (!m_initialized || isEmpty())
+            QueueLockGuard lock(m_lock);
+            if (!m_initialized || m_count == 0)
             {
                 return;
             }
@@ -139,7 +187,8 @@ namespace QK
 
         void EventQueue::clearCategory(Category category)
         {
-            if (!m_initialized || isEmpty())
+            QueueLockGuard lock(m_lock);
+            if (!m_initialized || m_count == 0)
             {
                 return;
             }
@@ -185,6 +234,7 @@ namespace QK
 
         void ImmediateQueue::initialize()
         {
+            QueueLockGuard lock(m_lock);
             m_head = 0;
             m_tail = 0;
             m_count = 0;
@@ -193,6 +243,7 @@ namespace QK
 
         bool ImmediateQueue::push(const Event &event)
         {
+            QueueLockGuard lock(m_lock);
             if (!m_initialized || m_count >= MaxEvents)
             {
                 return false;
@@ -206,6 +257,7 @@ namespace QK
 
         bool ImmediateQueue::pop(Event &outEvent)
         {
+            QueueLockGuard lock(m_lock);
             if (!m_initialized || m_count == 0)
             {
                 return false;
@@ -217,8 +269,15 @@ namespace QK
             return true;
         }
 
+        bool ImmediateQueue::isEmpty() const
+        {
+            QueueLockGuard lock(m_lock);
+            return m_count == 0;
+        }
+
         void ImmediateQueue::clear()
         {
+            QueueLockGuard lock(m_lock);
             m_head = 0;
             m_tail = 0;
             m_count = 0;

@@ -47,7 +47,10 @@ namespace QK::Memory
         void splitBlock(BlockHeader *block, QC::usize size);
         void mergeBlocks();
         void expandHeap(QC::usize minSize);
+        QC::u64 acquireLock();
+        void releaseLock(QC::u64 flags);
 
+        volatile QC::u32 m_lock;
         QC::VirtAddr m_base;
         QC::usize m_totalSize;
         QC::usize m_usedSize;

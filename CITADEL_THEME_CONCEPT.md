@@ -1,3 +1,4 @@
+> **Superseded:** the static desktop redesign (`CitadelDesktopRedesign.md`) removed the themeable/document-driven desktop. This document is kept for historical reference.
 
 # **Citadel OS — Theme System Concept (Development Summary)**
 

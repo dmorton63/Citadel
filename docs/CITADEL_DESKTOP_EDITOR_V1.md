@@ -1,5 +1,7 @@
 # Citadel Desktop Editor V1
 
+> **Superseded:** the static desktop redesign (`CitadelDesktopRedesign.md`) removed the themeable/document-driven desktop. This document is kept for historical reference.
+
 ## Purpose
 
 Define a practical first version of a desktop editor for Citadel that can:

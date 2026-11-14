@@ -2,7 +2,11 @@
 // Namespace: QK
 
 #include "QKScheduler.h"
+#include "QKTime.h"
 #include "QCLogger.h"
+
+extern "C" void QArchSwitchTaskContext(
+    QK::TaskContext *from, const QK::TaskContext *to, QC::u64 savedFlags);
 
 namespace QK
 {
@@ -15,8 +19,7 @@ namespace QK
 
     Scheduler::Scheduler()
         : m_policy(SchedulerPolicy::RoundRobin), m_timeSlice(10) // 10ms default time slice
-          ,
-          m_tickCount(0), m_running(false)
+          , m_running(false)
     {
     }
 
@@ -27,7 +30,8 @@ namespace QK
     void Scheduler::initialize()
     {
         QC_LOG_INFO("QKSched", "Initializing scheduler");
-        m_tickCount = 0;
+        for (QC::u32 i = 0; i < kTaskManagerMaxCpus; ++i)
+            m_tickCounts[i] = 0;
     }
 
     void Scheduler::start()
@@ -35,13 +39,13 @@ namespace QK
         QC_LOG_INFO("QKSched", "Starting scheduler with %s policy",
                     m_policy == SchedulerPolicy::RoundRobin ? "RoundRobin" : m_policy == SchedulerPolicy::Priority ? "Priority"
                                                                                                                    : "Multilevel");
-        m_running = true;
+        __atomic_store_n(&m_running, true, __ATOMIC_RELEASE);
     }
 
     void Scheduler::stop()
     {
         QC_LOG_INFO("QKSched", "Stopping scheduler");
-        m_running = false;
+        __atomic_store_n(&m_running, false, __ATOMIC_RELEASE);
     }
 
     void Scheduler::setPolicy(SchedulerPolicy policy)
@@ -51,42 +55,87 @@ namespace QK
 
     void Scheduler::setTimeSlice(QC::u32 milliseconds)
     {
-        m_timeSlice = milliseconds;
+        if (milliseconds != 0)
+            m_timeSlice = milliseconds;
     }
 
-    void Scheduler::schedule()
+    void Scheduler::schedule(QC::u32 cpuIndex)
     {
-        if (!m_running)
+        if (cpuIndex >= kTaskManagerMaxCpus)
             return;
 
-        TaskId nextTask = selectNextTask();
-        if (nextTask == 0)
-            return;
-
-        Task *current = TaskManager::instance().getCurrentTask();
-        Task *next = TaskManager::instance().getTask(nextTask);
-
-        if (current && next && current->id != next->id)
+        QC::u64 savedFlags = 0;
+        asm volatile("pushfq; pop %0; cli" : "=r"(savedFlags) : : "memory");
+        if (!__atomic_load_n(&m_running, __ATOMIC_ACQUIRE))
         {
-            contextSwitch(current, next);
+            asm volatile("push %0; popfq" : : "r"(savedFlags) : "memory", "cc");
+            return;
         }
+
+        TaskManager &manager = TaskManager::instance();
+        const TaskId currentId = manager.getCurrentTaskId(cpuIndex);
+        (void)manager.reapTerminatedTasks(cpuIndex, currentId);
+        Task *current = manager.getTask(currentId);
+        if (current && __atomic_load_n(&current->state, __ATOMIC_ACQUIRE) == TaskState::Running)
+            manager.setTaskState(currentId, TaskState::Ready);
+
+        const TaskId nextId = selectNextTask(cpuIndex, currentId);
+        if (nextId == 0)
+        {
+            if (current)
+            {
+                manager.setCurrentTaskId(cpuIndex, 0);
+                contextSwitch(&current->context, &m_idleContexts[cpuIndex], savedFlags);
+                return;
+            }
+            asm volatile("push %0; popfq" : : "r"(savedFlags) : "memory", "cc");
+            return;
+        }
+
+        Task *next = manager.getTask(nextId);
+        if (!next)
+        {
+            asm volatile("push %0; popfq" : : "r"(savedFlags) : "memory", "cc");
+            return;
+        }
+
+        manager.setTaskState(nextId, TaskState::Running);
+        manager.setCurrentTaskId(cpuIndex, nextId);
+        if (nextId != currentId)
+        {
+            TaskContext *from = current ? &current->context : &m_idleContexts[cpuIndex];
+            next->context.cs = from->cs;
+            next->context.ss = from->ss;
+            contextSwitch(from, &next->context, savedFlags);
+            return;
+        }
+        asm volatile("push %0; popfq" : : "r"(savedFlags) : "memory", "cc");
     }
 
-    void Scheduler::timerTick()
+    void Scheduler::timerTick(QC::u32 cpuIndex)
     {
-        ++m_tickCount;
+        if (cpuIndex >= kTaskManagerMaxCpus ||
+            !__atomic_load_n(&m_running, __ATOMIC_ACQUIRE))
+            return;
 
-        // Check if current task's time slice has expired
-        if (m_tickCount >= m_timeSlice)
+        const QC::u32 ticks = __atomic_add_fetch(&m_tickCounts[cpuIndex], 1u, __ATOMIC_RELAXED);
+        if (ticks >= m_timeSlice)
         {
-            m_tickCount = 0;
-            schedule();
+            __atomic_store_n(&m_tickCounts[cpuIndex], 0u, __ATOMIC_RELAXED);
+            TaskManager::instance().wakeSleepingTasks(cpuIndex, QK::Time::milliseconds());
+            schedule(cpuIndex);
         }
     }
 
     void Scheduler::addTask(TaskId id)
     {
-        TaskManager::instance().setTaskState(id, TaskState::Ready);
+        if (Task *task = TaskManager::instance().getTask(id))
+        {
+            TaskState expected = TaskState::Created;
+            (void)__atomic_compare_exchange_n(
+                &task->state, &expected, TaskState::Ready, false,
+                __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
+        }
     }
 
     void Scheduler::removeTask(TaskId id)
@@ -100,31 +149,26 @@ namespace QK
         TaskManager::instance().setTaskState(id, TaskState::Blocked);
     }
 
-    void Scheduler::unblockTask(TaskId id)
+    bool Scheduler::unblockTask(TaskId id)
     {
-        TaskManager::instance().setTaskState(id, TaskState::Ready);
+        Task *task = TaskManager::instance().getTask(id);
+        if (!task)
+            return false;
+        TaskState expected = TaskState::Blocked;
+        return __atomic_compare_exchange_n(
+            &task->state, &expected, TaskState::Ready, false,
+            __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
     }
 
-    TaskId Scheduler::selectNextTask()
+    TaskId Scheduler::selectNextTask(QC::u32 cpuIndex, TaskId afterId)
     {
-        // Simple round-robin implementation
-        // TODO: Implement proper scheduling algorithms
-        return 0;
+        return TaskManager::instance().findNextReadyTask(cpuIndex, afterId);
     }
 
-    void Scheduler::contextSwitch(Task *from, Task *to)
+    void Scheduler::contextSwitch(TaskContext *from, TaskContext *to, QC::u64 savedFlags)
     {
-        if (!from || !to)
-            return;
-
-        // Save current task context
-        from->state = TaskState::Ready;
-
-        // Switch to new task
-        to->state = TaskState::Running;
-
-        // TODO: Actually switch contexts (assembly required)
-        // switch_context(&from->context, &to->context);
+        if (to)
+            QArchSwitchTaskContext(from, to, savedFlags);
     }
 
 } // namespace QK

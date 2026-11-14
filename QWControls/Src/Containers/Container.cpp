@@ -4,6 +4,7 @@
 #include "QWControls/Containers/Container.h"
 #include "QWControls/Containers/Panel.h"
 #include "QWWindow.h"
+#include "QCLogger.h"
 
 namespace QW
 {
@@ -236,19 +237,36 @@ namespace QW
 
         bool Container::onMouseDown(QC::i32 x, QC::i32 y, QK::Event::MouseButton button)
         {
-            // Mouse down must always be delivered to the topmost visible+enabled control
-            // under the cursor. Do not "click-through" to underlying controls.
-            IControl *child = childAtPoint(x, y);
-            if (!child)
-                return false;
-
-            const bool handled = child->onMouseDown(x, y, button);
-            if (handled)
+            // Deliver down events from topmost to bottommost child and stop at
+            // the first control that actually handles the click. This avoids
+            // non-interactive overlays blocking controls underneath.
+            for (QC::isize i = static_cast<QC::isize>(m_children.size()) - 1; i >= 0; --i)
             {
-                m_capturedChild = child;
-                setFocusedChild(child);
+                IControl *child = m_children[static_cast<QC::usize>(i)];
+                if (!child || !child->isVisible() || !child->isEnabled() || !child->hitTest(x, y))
+                    continue;
+
+                QC_LOG_INFO("QWInput", "Container hit: button=%u at (%d,%d) childId=%u",
+                            static_cast<unsigned>(button),
+                            x,
+                            y,
+                            static_cast<unsigned>(child->id()));
+
+                const bool handled = child->onMouseDown(x, y, button);
+                if (handled)
+                {
+                    m_capturedChild = child;
+                    setFocusedChild(child);
+                    return true;
+                }
             }
-            return handled;
+
+            QC_LOG_INFO("QWInput", "Container miss: button=%u at (%d,%d) children=%llu",
+                        static_cast<unsigned>(button),
+                        x,
+                        y,
+                        static_cast<unsigned long long>(m_children.size()));
+            return false;
         }
 
         bool Container::onMouseUp(QC::i32 x, QC::i32 y, QK::Event::MouseButton button)

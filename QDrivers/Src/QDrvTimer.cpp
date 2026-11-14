@@ -4,6 +4,7 @@
 #include "QDrvTimer.h"
 #include "QArchPort.h"
 #include "QKInterrupts.h"
+#include "QKScheduler.h"
 #include "QKTime.h"
 #include "QCLogger.h"
 
@@ -43,7 +44,8 @@ namespace QDrv
             [](QK::InterruptFrame *)
             {
                 Timer::instance().handleInterrupt();
-            });
+            },
+            true);
         QK::InterruptManager::instance().enableInterrupt(0);
 
         // Expose a kernel-level time API without forcing QKernel to include driver headers.
@@ -81,18 +83,18 @@ namespace QDrv
 
     QC::u64 Timer::milliseconds() const
     {
-        return (m_ticks * 1000) / m_frequency;
+        return (ticks() * 1000) / m_frequency;
     }
 
     QC::u64 Timer::microseconds() const
     {
-        return (m_ticks * 1000000) / m_frequency;
+        return (ticks() * 1000000) / m_frequency;
     }
 
     void Timer::sleep(QC::u64 ms)
     {
-        QC::u64 target = m_ticks + (ms * m_frequency) / 1000;
-        while (m_ticks < target)
+        const QC::u64 target = ticks() + (ms * m_frequency) / 1000;
+        while (ticks() < target)
         {
             asm volatile("hlt");
         }
@@ -100,8 +102,8 @@ namespace QDrv
 
     void Timer::usleep(QC::u64 us)
     {
-        QC::u64 target = m_ticks + (us * m_frequency) / 1000000;
-        while (m_ticks < target)
+        const QC::u64 target = ticks() + (us * m_frequency) / 1000000;
+        while (ticks() < target)
         {
             asm volatile("pause");
         }
@@ -109,15 +111,14 @@ namespace QDrv
 
     void Timer::handleInterrupt()
     {
-        ++m_ticks;
+        const QC::u64 currentTicks = __atomic_add_fetch(&m_ticks, 1ull, __ATOMIC_RELAXED);
 
         if (m_callback)
         {
-            m_callback(m_ticks);
+            m_callback(currentTicks);
         }
 
-        // Notify scheduler
-        // QK::Scheduler::instance().timerTick();
+        QK::Scheduler::instance().timerTick(0);
     }
 
     // HighResTimer implementation

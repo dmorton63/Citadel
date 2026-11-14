@@ -10,6 +10,25 @@ namespace QK::Boot::Acpi
 {
     namespace
     {
+#if defined(__x86_64__) || defined(_M_X64)
+    static constexpr QC::u32 kIa32ApicBaseMsr = 0x1B;
+    static constexpr QC::u64 kIa32ApicBaseBsp = (1ull << 8);
+    static constexpr QC::u64 kIa32ApicBaseEnable = (1ull << 11);
+    static constexpr QC::u64 kIa32ApicBaseAddrMask = 0x000FFFFF'FFFFF000ull;
+#endif
+
+    static constexpr QC::u32 kLapicRegTaskPriority = 0x80;
+    static constexpr QC::u32 kLapicRegId = 0x20;
+    static constexpr QC::u32 kLapicRegEoi = 0xB0;
+    static constexpr QC::u32 kLapicRegSpurious = 0xF0;
+    static constexpr QC::u32 kLapicRegTimer = 0x320;
+    static constexpr QC::u32 kLapicRegTimerDivide = 0x3E0;
+    static constexpr QC::u32 kLapicRegTimerInitialCount = 0x380;
+    static constexpr QC::u32 kLapicRegTimerCurrentCount = 0x390;
+    static constexpr QC::u32 kLapicTimerPeriodic = (1u << 17);
+    static constexpr QC::u32 kLapicTimerMasked = (1u << 16);
+    static constexpr QC::u32 kLapicSpuriousEnable = (1u << 8);
+
 #pragma pack(push, 1)
         struct AcpiRsdp
         {
@@ -112,6 +131,36 @@ namespace QK::Boot::Acpi
             AcpiGenericAddress xGpe0Block;
             AcpiGenericAddress xGpe1Block;
         };
+
+        struct AcpiMadtTable
+        {
+            AcpiSdtHeader header;
+            QC::u32 localApicAddress;
+            QC::u32 flags;
+        };
+
+        struct AcpiMadtEntryHeader
+        {
+            QC::u8 type;
+            QC::u8 length;
+        };
+
+        struct AcpiMadtLocalApic
+        {
+            AcpiMadtEntryHeader header;
+            QC::u8 acpiProcessorId;
+            QC::u8 apicId;
+            QC::u32 flags;
+        };
+
+        struct AcpiMadtLocalX2Apic
+        {
+            AcpiMadtEntryHeader header;
+            QC::u16 reserved;
+            QC::u32 x2ApicId;
+            QC::u32 flags;
+            QC::u32 acpiProcessorUid;
+        };
 #pragma pack(pop)
 
         struct ShutdownRegister
@@ -133,6 +182,7 @@ namespace QK::Boot::Acpi
         };
 
         static ShutdownProfile g_ShutdownProfile;
+        static CpuTopologySnapshot g_CpuTopology;
 
         static void LogStr(FLogFn Log, const char *Msg)
         {
@@ -618,11 +668,102 @@ namespace QK::Boot::Acpi
             LogStr(Log, "\r\n");
             return true;
         }
+
+        static void ResetCpuTopology()
+        {
+            g_CpuTopology = CpuTopologySnapshot{};
+        }
+
+        static void RecordCpuTopologyEntry(QC::u32 AcpiUid, QC::u32 ApicId, QC::u32 Flags, bool X2Apic)
+        {
+            ++g_CpuTopology.totalEntries;
+
+            const bool Enabled = (Flags & 0x1u) != 0;
+            const bool OnlineCapable = (Flags & 0x2u) != 0;
+            if (Enabled)
+                ++g_CpuTopology.enabledEntries;
+            if (OnlineCapable)
+                ++g_CpuTopology.onlineCapableEntries;
+            if (X2Apic)
+                ++g_CpuTopology.x2ApicEntries;
+
+            if (g_CpuTopology.entryCount >= kCpuTopologyMaxEntries)
+                return;
+
+            CpuTopologyEntry &Entry = g_CpuTopology.entries[g_CpuTopology.entryCount++];
+            Entry.acpiProcessorUid = AcpiUid;
+            Entry.apicId = ApicId;
+            Entry.enabled = Enabled;
+            Entry.onlineCapable = OnlineCapable;
+            Entry.x2Apic = X2Apic;
+        }
+
+        static void ParseMadt(FLogFn Log, QC::PhysAddr MadtPhys)
+        {
+            if (MadtPhys == 0)
+                return;
+            if (!EnsureHhdmMapped(Log, MadtPhys, sizeof(AcpiSdtHeader)))
+            {
+                LogStr(Log, "ACPI: MADT header mapping failed\r\n");
+                return;
+            }
+
+            auto *Hdr = reinterpret_cast<const AcpiSdtHeader *>(physToVirt(MadtPhys));
+            if (Hdr->length < sizeof(AcpiMadtTable))
+            {
+                LogStr(Log, "ACPI: MADT length too small\r\n");
+                return;
+            }
+            if (!EnsureHhdmMapped(Log, MadtPhys, Hdr->length))
+            {
+                LogStr(Log, "ACPI: MADT mapping failed\r\n");
+                return;
+            }
+
+            auto *Madt = reinterpret_cast<const AcpiMadtTable *>(physToVirt(MadtPhys));
+            g_CpuTopology.madtPresent = true;
+            g_CpuTopology.localApicAddress = Madt->localApicAddress;
+            g_CpuTopology.madtFlags = Madt->flags;
+
+            const QC::u8 *Base = reinterpret_cast<const QC::u8 *>(Madt);
+            QC::usize Offset = sizeof(AcpiMadtTable);
+            while (Offset + sizeof(AcpiMadtEntryHeader) <= Hdr->length)
+            {
+                const auto *EntryHdr = reinterpret_cast<const AcpiMadtEntryHeader *>(Base + Offset);
+                if (EntryHdr->length < sizeof(AcpiMadtEntryHeader))
+                    break;
+                if (Offset + EntryHdr->length > Hdr->length)
+                    break;
+
+                if (EntryHdr->type == 0 && EntryHdr->length >= sizeof(AcpiMadtLocalApic))
+                {
+                    const auto *Cpu = reinterpret_cast<const AcpiMadtLocalApic *>(EntryHdr);
+                    RecordCpuTopologyEntry(static_cast<QC::u32>(Cpu->acpiProcessorId), static_cast<QC::u32>(Cpu->apicId), Cpu->flags, false);
+                }
+                else if (EntryHdr->type == 9 && EntryHdr->length >= sizeof(AcpiMadtLocalX2Apic))
+                {
+                    const auto *Cpu = reinterpret_cast<const AcpiMadtLocalX2Apic *>(EntryHdr);
+                    RecordCpuTopologyEntry(Cpu->acpiProcessorUid, Cpu->x2ApicId, Cpu->flags, true);
+                }
+
+                Offset += EntryHdr->length;
+            }
+
+            LogHex64(Log, "ACPI: MADT local APIC phys ", g_CpuTopology.localApicAddress);
+            LogDecU32(Log, "ACPI: MADT CPU entries: ", g_CpuTopology.totalEntries);
+            LogDecU32(Log, "ACPI: MADT enabled CPUs: ", g_CpuTopology.enabledEntries);
+            LogDecU32(Log, "ACPI: MADT online-capable CPUs: ", g_CpuTopology.onlineCapableEntries);
+            if (g_CpuTopology.x2ApicEntries != 0)
+                LogDecU32(Log, "ACPI: MADT x2APIC entries: ", g_CpuTopology.x2ApicEntries);
+            if (g_CpuTopology.entryCount < g_CpuTopology.totalEntries)
+                LogStr(Log, "ACPI: MADT CPU entry buffer truncated\r\n");
+        }
     }
 
-    void EnumerateTables(QC::PhysAddr RsdpPhys, FLogFn Log, FTpm2CrbStartupFn Tpm2CrbStartup)
+    void EnumerateTables(QC::PhysAddr RsdpPhys, FLogFn Log, FTpm2StartupFn Tpm2Startup)
     {
         g_ShutdownProfile = ShutdownProfile{};
+        ResetCpuTopology();
 
         if (RsdpPhys == 0)
         {
@@ -686,6 +827,7 @@ namespace QK::Boot::Acpi
         bool bFoundTpm2 = false;
         QC::PhysAddr Tpm2Phys = 0;
         QC::PhysAddr FadtPhys = 0;
+        QC::PhysAddr MadtPhys = 0;
         QC::PhysAddr SsdtTables[32]{};
         QC::usize SsdtCount = 0;
         const QC::u8 *Entries = reinterpret_cast<const QC::u8 *>(Sdt) + sizeof(AcpiSdtHeader);
@@ -720,12 +862,21 @@ namespace QK::Boot::Acpi
             {
                 FadtPhys = TablePhys;
             }
+            else if (QC::String::memcmp(Hdr->signature, "APIC", 4) == 0)
+            {
+                MadtPhys = TablePhys;
+            }
             else if (QC::String::memcmp(Hdr->signature, "SSDT", 4) == 0)
             {
                 if (SsdtCount < (sizeof(SsdtTables) / sizeof(SsdtTables[0])))
                     SsdtTables[SsdtCount++] = TablePhys;
             }
         }
+
+        if (MadtPhys != 0)
+            ParseMadt(Log, MadtPhys);
+        else
+            LogStr(Log, "ACPI: MADT not present; SMP topology unavailable\r\n");
 
         if (FadtPhys != 0)
             (void)BuildShutdownProfile(Log, FadtPhys, SsdtTables, SsdtCount);
@@ -802,8 +953,6 @@ namespace QK::Boot::Acpi
                         LogStr(Log, "\r\n");
                     }
 
-                    if (Tpm2CrbStartup)
-                        Tpm2CrbStartup(Tpm2->startMethod, ControlPhys, Log);
                 }
             }
             else
@@ -813,11 +962,13 @@ namespace QK::Boot::Acpi
         }
 
         constexpr QC::usize kOptionalOffset = sizeof(AcpiTpm2TableBase);
+        QC::u32 Laml = 0;
+        QC::u64 Lasa = 0;
         if (Tpm2Hdr->length >= kOptionalOffset + sizeof(QC::u32) + sizeof(QC::u64))
         {
             const QC::u8 *Base = reinterpret_cast<const QC::u8 *>(Tpm2);
-            QC::u32 Laml = *reinterpret_cast<const QC::u32 *>(Base + kOptionalOffset);
-            QC::u64 Lasa = *reinterpret_cast<const QC::u64 *>(Base + kOptionalOffset + sizeof(QC::u32));
+            Laml = *reinterpret_cast<const QC::u32 *>(Base + kOptionalOffset);
+            Lasa = *reinterpret_cast<const QC::u64 *>(Base + kOptionalOffset + sizeof(QC::u32));
             LogDecU32(Log, "  laml: ", Laml);
             LogHex64(Log, "  lasa phys ", Lasa);
         }
@@ -825,6 +976,191 @@ namespace QK::Boot::Acpi
         {
             LogStr(Log, "  eventLog: none\r\n");
         }
+
+        // The TPM layer detects CRB vs TIS/FIFO itself; TIS tables have no control area.
+        if (Tpm2Startup)
+            Tpm2Startup(Tpm2->startMethod, static_cast<QC::PhysAddr>(Tpm2->controlArea), Lasa, Laml, Log);
+    }
+
+    bool GetCpuTopologySnapshot(CpuTopologySnapshot &Out)
+    {
+        Out = g_CpuTopology;
+        return g_CpuTopology.madtPresent;
+    }
+
+    static bool InitializeLocalApicForCurrentCpu(FLogFn Log, bool RequireBsp)
+    {
+#if !defined(__x86_64__) && !defined(_M_X64)
+        LogStr(Log, "ACPI: LAPIC init not supported on this architecture\r\n");
+        return false;
+#else
+        if (!g_CpuTopology.madtPresent)
+        {
+            LogStr(Log, "ACPI: LAPIC init skipped (MADT unavailable)\r\n");
+            return false;
+        }
+        if (g_CpuTopology.localApicAddress == 0)
+        {
+            LogStr(Log, "ACPI: LAPIC init skipped (LAPIC address is zero)\r\n");
+            return false;
+        }
+
+        const QC::PhysAddr LapicPagePhys = static_cast<QC::PhysAddr>(g_CpuTopology.localApicAddress) &
+                                           ~static_cast<QC::PhysAddr>(0xFFF);
+        if (!EnsureHhdmMappedMmio(Log, LapicPagePhys, 4096))
+        {
+            LogStr(Log, "ACPI: LAPIC MMIO mapping failed\r\n");
+            return false;
+        }
+
+        QC::u64 apicBase = QC::read_msr(kIa32ApicBaseMsr);
+        if ((apicBase & (1ull << 10)) != 0)
+        {
+            LogStr(Log, "ACPI: x2APIC mode is not supported by the LAPIC MMIO driver\r\n");
+            return false;
+        }
+        QC::u64 desiredBase = (apicBase & ~kIa32ApicBaseAddrMask) |
+                              (static_cast<QC::u64>(LapicPagePhys) & kIa32ApicBaseAddrMask);
+        desiredBase |= kIa32ApicBaseEnable;
+
+        if (desiredBase != apicBase)
+        {
+            QC::write_msr(kIa32ApicBaseMsr, desiredBase);
+            apicBase = desiredBase;
+        }
+
+        if ((apicBase & kIa32ApicBaseEnable) == 0)
+        {
+            LogStr(Log, "ACPI: BSP LAPIC MSR enable bit did not stick\r\n");
+            return false;
+        }
+
+        if (RequireBsp && (apicBase & kIa32ApicBaseBsp) == 0)
+        {
+            LogStr(Log, "ACPI: BSP LAPIC init called on non-BSP CPU\r\n");
+            return false;
+        }
+
+        const QC::VirtAddr LapicBase = physToVirt(LapicPagePhys);
+        const QC::VirtAddr SvrReg = LapicBase + kLapicRegSpurious;
+        QC::u32 svr = QC::mmio_read32(SvrReg);
+        if ((svr & 0xFFu) == 0)
+            svr = (svr & ~0xFFu) | 0xFFu;
+        svr |= kLapicSpuriousEnable;
+        QC::mmio_write32(SvrReg, svr);
+
+        // Accept all interrupt priorities for now; detailed vector setup comes later.
+        QC::mmio_write32(LapicBase + kLapicRegTaskPriority, 0);
+        QC::mmio_write32(LapicBase + kLapicRegEoi, 0);
+
+        LogHex64(Log, RequireBsp ? "ACPI: BSP LAPIC enabled at phys " : "ACPI: CPU LAPIC enabled at phys ", LapicPagePhys);
+        return true;
+#endif
+    }
+
+    bool InitializeBspLocalApic(FLogFn Log)
+    {
+        return InitializeLocalApicForCurrentCpu(Log, true);
+    }
+
+    bool InitializeCurrentCpuLocalApic(FLogFn Log)
+    {
+        return InitializeLocalApicForCurrentCpu(Log, false);
+    }
+
+    bool ConfigureCurrentCpuLocalApicTimer(QC::u8 Vector, QC::u32 InitialCount, bool Periodic)
+    {
+#if !defined(__x86_64__) && !defined(_M_X64)
+        (void)Vector;
+        (void)InitialCount;
+        (void)Periodic;
+        return false;
+#else
+        if (Vector < 32 || InitialCount == 0 || !g_CpuTopology.madtPresent || g_CpuTopology.localApicAddress == 0)
+            return false;
+
+        const QC::PhysAddr LapicPagePhys = static_cast<QC::PhysAddr>(g_CpuTopology.localApicAddress) &
+                                           ~static_cast<QC::PhysAddr>(0xFFF);
+        const QC::VirtAddr LapicBase = physToVirt(LapicPagePhys);
+        QC::u64 apicBase = QC::read_msr(kIa32ApicBaseMsr);
+        if ((apicBase & (kIa32ApicBaseEnable | (1ull << 10))) != kIa32ApicBaseEnable)
+            return false;
+
+        QC::mmio_write32(LapicBase + kLapicRegTimer, static_cast<QC::u32>(Vector) |
+                         (Periodic ? kLapicTimerPeriodic : 0));
+        QC::mmio_write32(LapicBase + kLapicRegTimerDivide, 0x3);
+        QC::mmio_write32(LapicBase + kLapicRegTimerInitialCount, InitialCount);
+        return true;
+#endif
+    }
+
+    bool ReadCurrentCpuLocalApicTimerCount(QC::u32 &Out)
+    {
+#if !defined(__x86_64__) && !defined(_M_X64)
+        (void)Out;
+        return false;
+#else
+        if (!g_CpuTopology.madtPresent || g_CpuTopology.localApicAddress == 0)
+            return false;
+        const QC::PhysAddr LapicPagePhys = static_cast<QC::PhysAddr>(g_CpuTopology.localApicAddress) &
+                                           ~static_cast<QC::PhysAddr>(0xFFF);
+        const QC::VirtAddr LapicBase = physToVirt(LapicPagePhys);
+        const QC::u64 apicBase = QC::read_msr(kIa32ApicBaseMsr);
+        if ((apicBase & (kIa32ApicBaseEnable | (1ull << 10))) != kIa32ApicBaseEnable)
+            return false;
+        Out = QC::mmio_read32(LapicBase + kLapicRegTimerCurrentCount);
+        return true;
+#endif
+    }
+
+    bool ReadCurrentCpuLocalApicId(QC::u32 &Out)
+    {
+#if !defined(__x86_64__) && !defined(_M_X64)
+        (void)Out;
+        return false;
+#else
+        if (!g_CpuTopology.madtPresent || g_CpuTopology.localApicAddress == 0)
+            return false;
+        const QC::PhysAddr LapicPagePhys = static_cast<QC::PhysAddr>(g_CpuTopology.localApicAddress) &
+                                           ~static_cast<QC::PhysAddr>(0xFFF);
+        const QC::VirtAddr LapicBase = physToVirt(LapicPagePhys);
+        const QC::u64 apicBase = QC::read_msr(kIa32ApicBaseMsr);
+        if ((apicBase & (kIa32ApicBaseEnable | (1ull << 10))) != kIa32ApicBaseEnable)
+            return false;
+        Out = QC::mmio_read32(LapicBase + kLapicRegId) >> 24;
+        return true;
+#endif
+    }
+
+    void StopCurrentCpuLocalApicTimer()
+    {
+#if defined(__x86_64__) || defined(_M_X64)
+        if (!g_CpuTopology.madtPresent || g_CpuTopology.localApicAddress == 0)
+            return;
+        const QC::PhysAddr LapicPagePhys = static_cast<QC::PhysAddr>(g_CpuTopology.localApicAddress) &
+                                           ~static_cast<QC::PhysAddr>(0xFFF);
+        const QC::VirtAddr LapicBase = physToVirt(LapicPagePhys);
+        const QC::u64 apicBase = QC::read_msr(kIa32ApicBaseMsr);
+        if ((apicBase & (kIa32ApicBaseEnable | (1ull << 10))) != kIa32ApicBaseEnable)
+            return;
+        QC::mmio_write32(LapicBase + kLapicRegTimer, kLapicTimerMasked);
+        QC::mmio_write32(LapicBase + kLapicRegTimerInitialCount, 0);
+#endif
+    }
+
+    void SendCurrentCpuLocalApicEoi()
+    {
+#if defined(__x86_64__) || defined(_M_X64)
+        if (!g_CpuTopology.madtPresent || g_CpuTopology.localApicAddress == 0)
+            return;
+        const QC::PhysAddr LapicPagePhys = static_cast<QC::PhysAddr>(g_CpuTopology.localApicAddress) &
+                                           ~static_cast<QC::PhysAddr>(0xFFF);
+        const QC::VirtAddr LapicBase = physToVirt(LapicPagePhys);
+        const QC::u64 apicBase = QC::read_msr(kIa32ApicBaseMsr);
+        if ((apicBase & (kIa32ApicBaseEnable | (1ull << 10))) != kIa32ApicBaseEnable)
+            return;
+        QC::mmio_write32(LapicBase + kLapicRegEoi, 0);
+#endif
     }
 
     bool TryAcpiShutdown(FLogFn Log)
