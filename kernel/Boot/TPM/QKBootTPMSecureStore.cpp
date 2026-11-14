@@ -252,7 +252,9 @@ namespace QK::Boot::Tpm
 
             (void)Cmd::TpmFlushContext(nullptr, Obj);
             (void)Cmd::TpmFlushContext(nullptr, Primary);
-            (void)Cmd::TpmFlushContext(nullptr, PolicySession);
+            // continueSession is clear, so a successful Unseal already closed the session.
+            if (St != QC::Status::Success)
+                (void)Cmd::TpmFlushContext(nullptr, PolicySession);
             return St;
         }
 
@@ -448,7 +450,9 @@ namespace QK::Boot::Tpm
 
             (void)Cmd::TpmFlushContext(nullptr, Obj);
             (void)Cmd::TpmFlushContext(nullptr, Primary);
-            (void)Cmd::TpmFlushContext(nullptr, PolicySession);
+            // continueSession is clear, so a successful Unseal already closed the session.
+            if (St != QC::Status::Success)
+                (void)Cmd::TpmFlushContext(nullptr, PolicySession);
             return St;
         }
 
