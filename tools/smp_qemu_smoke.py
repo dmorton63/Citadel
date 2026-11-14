@@ -23,10 +23,11 @@ BUILD_DIR = PROJECT_DIR / "build"
 SYSTEM_DISK = BUILD_DIR / "system.qcow2"
 OVMF_DIR = Path(os.environ.get("OVMF_DIR", "/usr/share/OVMF"))
 SECUREBOOT_VARS = BUILD_DIR / "secureboot" / "OVMF_VARS_citadel.fd"
+# Plain OVMF reports Setup Mode (no PK) on q35, but no Secure Boot support on pc.
 EXPECTED_SECURE_BOOT = {
-    "bios": "secure_boot: off (legacy BIOS)",
-    "uefi": "secure_boot: off (firmware)",
-    "secureboot": "secure_boot: on (firmware)",
+    "bios": ("secure_boot: off (legacy BIOS)",),
+    "uefi": ("secure_boot: off (firmware)", "secure_boot: off (setup mode)"),
+    "secureboot": ("secure_boot: on (firmware)",),
 }
 WORK_ITEMS = 10_000
 ITERATIONS = 10
@@ -119,11 +120,13 @@ def validate_tpm_transcript(
         "tpm_ready: yes",
         f"tpm_transport: {expected_transport}",
         "tpm selftest: pass",
-        EXPECTED_SECURE_BOOT[firmware],
     )
     for text in required:
         if text not in transcript:
             raise ValueError(f"TPM diagnostics missing '{text}'")
+    secure_boot = EXPECTED_SECURE_BOOT[firmware]
+    if not any(text in transcript for text in secure_boot):
+        raise ValueError(f"TPM diagnostics missing '{secure_boot[0]}'")
     if not re.search(r"^pcr07 sha256: [0-9a-f]{64}\s*$", transcript, re.MULTILINE):
         raise ValueError("TPM diagnostics did not report a PCR 7 digest")
     if not re.search(r"^#\d+ pcr7 ok ", transcript, re.MULTILINE):
@@ -454,6 +457,7 @@ def qemu_arguments(
     tpm_device: str = "tpm-crb",
     firmware: str = "bios",
     ovmf_vars: Path | None = None,
+    no_ps2: bool = False,
 ) -> list[str]:
     command = [
         qemu,
@@ -484,9 +488,15 @@ def qemu_arguments(
     ]
     # OVMF Secure Boot needs q35 with SMM; its disks go on an added PIIX4 IDE
     # controller so the kernel's legacy IDE probe still finds them.
-    q35 = firmware == "secureboot"
+    q35 = firmware == "secureboot" or no_ps2
     if q35:
-        command.extend(["-machine", "q35,smm=on", "-device", "piix4-ide,id=pide"])
+        machine = "q35"
+        if firmware == "secureboot":
+            machine += ",smm=on"
+        if no_ps2:
+            # Model PCs without an 8042 so input must come from the xHCI keyboard.
+            machine += ",i8042=off"
+        command.extend(["-machine", machine, "-device", "piix4-ide,id=pide"])
     elif tpm_socket:
         command.extend(["-machine", "pc"])
     if firmware != "bios":
@@ -528,6 +538,8 @@ def qemu_arguments(
         )
     else:
         command.extend(["-device", "usb-tablet,bus=xhci.0"])
+        if no_ps2:
+            command.extend(["-device", "usb-kbd,bus=xhci.0"])
 
     if system_volume:
         if tpm_socket or q35:
@@ -671,6 +683,7 @@ def run_case(
     owner_username: str | None,
     owner_password: str | None,
     firmware: str = "bios",
+    no_ps2: bool = False,
 ) -> None:
     transcript_path = SHARED_DIR / transcript_filename(os.getpid(), cpus)
     serial_path = PROJECT_DIR / "build" / f"smp-qemu-{os.getpid()}-{cpus}.serial.log"
@@ -708,6 +721,7 @@ def run_case(
                 tpm_device,
                 firmware,
                 ovmf_vars,
+                no_ps2,
             )
             print(
                 f"Starting QEMU SMP case: {cpus} CPU(s), firmware={firmware}",
@@ -905,6 +919,12 @@ def parse_args() -> argparse.Namespace:
         help="boot with legacy BIOS, OVMF UEFI, or OVMF Secure Boot using the "
         "lab keys from tools/secureboot/make_lab_keys.sh",
     )
+    parser.add_argument(
+        "--no-ps2",
+        action="store_true",
+        help="disable the i8042 PS/2 controller (q35) and attach a USB keyboard, "
+        "like modern PCs without legacy PS/2",
+    )
     return parser.parse_args()
 
 
@@ -958,6 +978,7 @@ def main() -> int:
                 args.owner_username,
                 args.owner_password,
                 args.firmware,
+                args.no_ps2,
             )
     except (FileNotFoundError, OSError, RuntimeError, TimeoutError, ValueError) as error:
         print(f"FAIL: {error}", file=sys.stderr)

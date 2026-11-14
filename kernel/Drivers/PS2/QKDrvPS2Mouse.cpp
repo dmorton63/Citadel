@@ -2,6 +2,7 @@
 // Namespace: QKDrv::PS2
 
 #include "QKDrvPS2Mouse.h"
+#include "QKDrvPS2Controller.h"
 #include "QKInputSettings.h"
 #include "QArchPort.h"
 #include "QKInterrupts.h"
@@ -34,53 +35,52 @@ namespace QKDrv
         {
             QC_LOG_INFO("PS2Mouse", "Initializing PS/2 mouse");
 
+            if (!Controller::present())
+            {
+                QC_LOG_WARN("PS2Mouse", "No i8042 controller detected; skipping PS/2 mouse");
+                return QC::Status::NotFound;
+            }
+
             // Enable auxiliary device
-            while (QArch::inb(MOUSE_STATUS_PORT) & 0x02)
-                ;
+            if (!Controller::waitInputClear())
+                return QC::Status::Timeout;
             QArch::outb(MOUSE_COMMAND_PORT, 0xA8);
 
             // Enable interrupts
-            while (QArch::inb(MOUSE_STATUS_PORT) & 0x02)
-                ;
+            if (!Controller::waitInputClear())
+                return QC::Status::Timeout;
             QArch::outb(MOUSE_COMMAND_PORT, 0x20);
-            while (!(QArch::inb(MOUSE_STATUS_PORT) & 0x01))
-                ;
+            if (!Controller::waitOutputFull())
+                return QC::Status::Timeout;
             QC::u8 status = QArch::inb(MOUSE_DATA_PORT);
             status |= 0x02; // Enable IRQ12
 
-            while (QArch::inb(MOUSE_STATUS_PORT) & 0x02)
-                ;
+            if (!Controller::waitInputClear())
+                return QC::Status::Timeout;
             QArch::outb(MOUSE_COMMAND_PORT, 0x60);
-            while (QArch::inb(MOUSE_STATUS_PORT) & 0x02)
-                ;
+            if (!Controller::waitInputClear())
+                return QC::Status::Timeout;
             QArch::outb(MOUSE_DATA_PORT, status);
 
-            // Set defaults
-            sendCommand(0xF6);
-            waitForAck();
-
-            // Enable mouse
-            sendCommand(0xF4);
-            waitForAck();
+            // Set defaults, then enable mouse
+            if (!sendCommand(0xF6) || !waitForAck() || !sendCommand(0xF4) || !waitForAck())
+            {
+                QC_LOG_WARN("PS2Mouse", "PS/2 mouse did not respond");
+                return QC::Status::Timeout;
+            }
 
             // Try to enable scroll wheel (IntelliMouse)
-            sendCommand(0xF3);
-            waitForAck();
-            sendCommand(200);
-            waitForAck();
-            sendCommand(0xF3);
-            waitForAck();
-            sendCommand(100);
-            waitForAck();
-            sendCommand(0xF3);
-            waitForAck();
-            sendCommand(80);
-            waitForAck();
-            sendCommand(0xF2);
-            waitForAck();
-            while (!(QArch::inb(MOUSE_STATUS_PORT) & 0x01))
-                ;
-            if (QArch::inb(MOUSE_DATA_PORT) == 3)
+            const QC::u8 wheelSequence[] = {0xF3, 200, 0xF3, 100, 0xF3, 80, 0xF2};
+            bool wheelOk = true;
+            for (QC::u8 cmd : wheelSequence)
+            {
+                if (!sendCommand(cmd) || !waitForAck())
+                {
+                    wheelOk = false;
+                    break;
+                }
+            }
+            if (wheelOk && Controller::waitOutputFull() && QArch::inb(MOUSE_DATA_PORT) == 3)
             {
                 m_hasScrollWheel = true;
                 QC_LOG_INFO("PS2Mouse", "Scroll wheel detected");
@@ -108,21 +108,23 @@ namespace QKDrv
             QC_LOG_INFO("PS2Mouse", "PS/2 mouse shutdown");
         }
 
-        void Mouse::sendCommand(QC::u8 cmd)
+        bool Mouse::sendCommand(QC::u8 cmd)
         {
-            while (QArch::inb(MOUSE_STATUS_PORT) & 0x02)
-                ;
+            if (!Controller::waitInputClear())
+                return false;
             QArch::outb(MOUSE_COMMAND_PORT, 0xD4);
-            while (QArch::inb(MOUSE_STATUS_PORT) & 0x02)
-                ;
+            if (!Controller::waitInputClear())
+                return false;
             QArch::outb(MOUSE_DATA_PORT, cmd);
+            return true;
         }
 
-        void Mouse::waitForAck()
+        bool Mouse::waitForAck()
         {
-            while (!(QArch::inb(MOUSE_STATUS_PORT) & 0x01))
-                ;
+            if (!Controller::waitOutputFull())
+                return false;
             QArch::inb(MOUSE_DATA_PORT); // Discard ACK
+            return true;
         }
 
         void Mouse::setBounds(QC::i32 minX, QC::i32 minY, QC::i32 maxX, QC::i32 maxY)

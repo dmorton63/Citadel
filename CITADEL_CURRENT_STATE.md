@@ -321,7 +321,8 @@ The desktop terminal also implements some UI-local commands (not necessarily in 
 Citadel is used primarily under QEMU for bring-up; these are the common devices exercised.
 
 ### Input
-- PS/2 keyboard/mouse: supported
+- PS/2 keyboard/mouse: supported; probing is bounded and skipped when no i8042 controller exists (common on modern UEFI PCs)
+- USB keyboard on PCs without PS/2: covered by `python3 tools/smp_qemu_smoke.py --firmware uefi --no-ps2 ...` (q35 with `i8042=off`)
 - USB:
   - UHCI (USB 1.1) controller: supported
   - XHCI (USB 3.x) controller: supported

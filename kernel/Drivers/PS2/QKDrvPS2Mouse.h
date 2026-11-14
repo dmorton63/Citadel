@@ -41,8 +41,8 @@ namespace QKDrv
             Mouse(const Mouse &) = delete;
             Mouse &operator=(const Mouse &) = delete;
 
-            void sendCommand(QC::u8 cmd);
-            void waitForAck();
+            bool sendCommand(QC::u8 cmd);
+            bool waitForAck();
 
             MouseCallback m_callback;
             QC::i32 m_x;

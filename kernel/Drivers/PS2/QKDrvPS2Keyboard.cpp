@@ -2,6 +2,7 @@
 // Namespace: QKDrv::PS2
 
 #include "QKDrvPS2Keyboard.h"
+#include "QKDrvPS2Controller.h"
 #include "QArchPort.h"
 #include "QKInterrupts.h"
 #include "QCLogger.h"
@@ -33,9 +34,11 @@ namespace QKDrv
         {
             QC_LOG_INFO("PS2Kbd", "Initializing PS/2 keyboard");
 
-            // Wait for controller ready
-            while (QArch::inb(KEYBOARD_STATUS_PORT) & 0x02)
-                ;
+            if (!Controller::present() || !Controller::waitInputClear())
+            {
+                QC_LOG_WARN("PS2Kbd", "No i8042 controller detected; skipping PS/2 keyboard");
+                return QC::Status::NotFound;
+            }
 
             // Enable keyboard
             QArch::outb(KEYBOARD_COMMAND_PORT, 0xAE);
@@ -70,8 +73,8 @@ namespace QKDrv
         void Keyboard::shutdown()
         {
             // Disable keyboard
-            while (QArch::inb(KEYBOARD_STATUS_PORT) & 0x02)
-                ;
+            if (!Controller::waitInputClear())
+                return;
             QArch::outb(KEYBOARD_COMMAND_PORT, 0xAD);
             QC_LOG_INFO("PS2Kbd", "PS/2 keyboard shutdown");
         }
