@@ -19,6 +19,8 @@
 #include "Boot/ACPI/QKBootACPITables.h"
 #include "Boot/Arch/QKBootArchInit.h"
 #include "Boot/Desktop/QKBootDesktopSession.h"
+#include "Boot/TPM/QKBootTPMSecureBoot.h"
+#include "Boot/Firmware/QKBootEfiRuntime.h"
 #include "Boot/TPM/QKBootTPMSecureStore.h"
 
 #include "QCJson.h"
@@ -2701,9 +2703,26 @@ namespace QKBoot
 
     void initializeDrivers()
     {
+        const limine_firmware_type_response *FwResp = QK::Boot::Limine::GetFirmwareTypeResponse(g_Req.firmwareType);
+        const bool bUefi = FwResp && (FwResp->firmware_type == LIMINE_FIRMWARE_TYPE_UEFI32 ||
+                                      FwResp->firmware_type == LIMINE_FIRMWARE_TYPE_UEFI64);
+        if (FwResp)
+            QK::Boot::Tpm::SecureBoot::SetFirmwareIsUefi(bUefi);
+        if (bUefi && FwResp->firmware_type == LIMINE_FIRMWARE_TYPE_UEFI64)
+        {
+            const auto *SysTab = QK::Boot::Limine::GetEfiSystemTableResponse(g_Req.efiSystemTable);
+            const auto *EfiMap = QK::Boot::Limine::GetEfiMemmapResponse(g_Req.efiMemmap);
+            QK::Boot::EfiRuntime::FGlobalVariables Vars;
+            if (SysTab && EfiMap &&
+                QK::Boot::EfiRuntime::ReadGlobalVariables(SysTab->address, EfiMap->memmap, EfiMap->memmap_size,
+                                                          EfiMap->desc_size, Vars, g_Log))
+                QK::Boot::Tpm::SecureBoot::SetFirmwareVariables(Vars.bSecureBootPresent, Vars.SecureBoot,
+                                                                Vars.bSetupModePresent && Vars.SetupMode == 1,
+                                                                Vars.bPkPresent);
+        }
+
         if (g_Log)
         {
-            const limine_firmware_type_response *FwResp = QK::Boot::Limine::GetFirmwareTypeResponse(g_Req.firmwareType);
             if (FwResp)
             {
                 g_Log("Firmware: ");

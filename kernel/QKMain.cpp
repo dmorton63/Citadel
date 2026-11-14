@@ -166,6 +166,8 @@ extern "C"
     extern QC::u64 limine_firmware_type_request[];
     extern QC::u64 limine_rsdp_request[];
     extern QC::u64 limine_mp_request[];
+    extern QC::u64 limine_efi_system_table_request[];
+    extern QC::u64 limine_efi_memmap_request[];
 }
 
 // Kernel main entry point
@@ -232,6 +234,8 @@ extern "C" void kernel_main()
         req.firmwareType = limine_firmware_type_request;
         req.rsdp = limine_rsdp_request;
         req.mp = limine_mp_request;
+        req.efiSystemTable = limine_efi_system_table_request;
+        req.efiMemmap = limine_efi_memmap_request;
         QKBoot::setLimineRequests(req);
     }
     QKBoot::initializeMemory();

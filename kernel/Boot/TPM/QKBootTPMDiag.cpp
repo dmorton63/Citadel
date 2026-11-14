@@ -3,6 +3,7 @@
 #include "QKBootTPMEventLog.h"
 #include "QKBootTPMLock.h"
 #include "QKBootTPMProbePolicy.h"
+#include "QKBootTPMSecureBoot.h"
 #include "QKBootTPMSecureStore.h"
 #include "QKBootTPMTransport.h"
 
@@ -201,6 +202,12 @@ namespace QK::Boot::Tpm
                 L.Str("tpm_firmware_eventlog: ").Hex(Fw.Phys, 16).Str(" len=").Dec(Fw.Length).Emit();
             else
                 L.Str("tpm_firmware_eventlog: none").Emit();
+
+            const SecureBoot::FStatus Sb = SecureBoot::Status();
+            L.Str("secure_boot: ").Str(SecureBoot::Summary());
+            if (Sb.State == SecureBoot::EState::On || Sb.State == SecureBoot::EState::Off)
+                L.Str(Sb.bPkEnrolled ? " pk=enrolled" : " pk=none").Str(" pcr7_events=").Dec(Sb.Pcr7Events);
+            L.Str(" (").Str(Sb.Detail).Str(")").Emit();
         }
 
         static bool ParsePcrIndex(const char *P, QC::u32 &Out)

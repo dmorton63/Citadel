@@ -1,6 +1,7 @@
 #include "QKBootTPMSecureStore.h"
 #include "QKBootTPMCommands.h"
 #include "QKBootTPMDiag.h"
+#include "QKBootTPMSecureBoot.h"
 #include "QKBootTPMEventLog.h"
 #include "QKBootTPMLock.h"
 #include "QKBootTPMProbePolicy.h"
@@ -748,6 +749,7 @@ namespace QK::Boot::Tpm
 
         g_TpmSecureStore.bReady = true;
         Diag::CaptureStartupInfo(Log);
+        SecureBoot::Evaluate(EventLogPhys, EventLogLen, Log);
 
         // Verify wrap-key seal/unseal support before enabling TPM mode in SecureStore.
         // Some TPM/runtime combinations advertise presence but fail these operations.

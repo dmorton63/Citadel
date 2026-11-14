@@ -28,6 +28,8 @@ add_executable(citadel_kernel
     Boot/TPM/QKBootTPMCommands.cpp
     Boot/TPM/QKBootTPMMeasure.cpp
     Boot/TPM/QKBootTPMDiag.cpp
+    Boot/TPM/QKBootTPMSecureBoot.cpp
+    Boot/Firmware/QKBootEfiRuntime.cpp
     Boot/TPM/QKBootTPMSecureStore.cpp
     Boot/Limine/QKBootLimineRequests.cpp
     Boot/Limine/QKBootLimineModules.cpp

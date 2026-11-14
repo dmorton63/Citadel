@@ -21,6 +21,13 @@ DEFAULT_ISO = PROJECT_DIR / "build" / "citadel-limine.iso"
 SHARED_DIR = PROJECT_DIR / "shared"
 BUILD_DIR = PROJECT_DIR / "build"
 SYSTEM_DISK = BUILD_DIR / "system.qcow2"
+OVMF_DIR = Path(os.environ.get("OVMF_DIR", "/usr/share/OVMF"))
+SECUREBOOT_VARS = BUILD_DIR / "secureboot" / "OVMF_VARS_citadel.fd"
+EXPECTED_SECURE_BOOT = {
+    "bios": "secure_boot: off (legacy BIOS)",
+    "uefi": "secure_boot: off (firmware)",
+    "secureboot": "secure_boot: on (firmware)",
+}
 WORK_ITEMS = 10_000
 ITERATIONS = 10
 U64_MASK = (1 << 64) - 1
@@ -104,12 +111,15 @@ def field_value(transcript: str, name: str) -> int:
 TPM_DIAG_COMMANDS = ("tpm status", "tpm pcrs 7", "tpm selftest", "tpm eventlog")
 
 
-def validate_tpm_transcript(transcript: str, tpm_device: str) -> None:
+def validate_tpm_transcript(
+    transcript: str, tpm_device: str, firmware: str = "bios"
+) -> None:
     expected_transport = "tis-fifo" if tpm_device == "tpm-tis" else "crb"
     required = (
         "tpm_ready: yes",
         f"tpm_transport: {expected_transport}",
         "tpm selftest: pass",
+        EXPECTED_SECURE_BOOT[firmware],
     )
     for text in required:
         if text not in transcript:
@@ -442,6 +452,8 @@ def qemu_arguments(
     system_volume: bool = False,
     relative_mouse: bool = False,
     tpm_device: str = "tpm-crb",
+    firmware: str = "bios",
+    ovmf_vars: Path | None = None,
 ) -> list[str]:
     command = [
         qemu,
@@ -470,11 +482,32 @@ def qemu_arguments(
         "-qmp",
         f"unix:{qmp_path},server=on,wait=off",
     ]
+    # OVMF Secure Boot needs q35 with SMM; its disks go on an added PIIX4 IDE
+    # controller so the kernel's legacy IDE probe still finds them.
+    q35 = firmware == "secureboot"
+    if q35:
+        command.extend(["-machine", "q35,smm=on", "-device", "piix4-ide,id=pide"])
+    elif tpm_socket:
+        command.extend(["-machine", "pc"])
+    if firmware != "bios":
+        code = OVMF_DIR / (
+            "OVMF_CODE_4M.secboot.fd" if q35 else "OVMF_CODE_4M.fd"
+        )
+        if q35:
+            command.extend(["-global", "driver=cfi.pflash01,property=secure,value=on"])
+        command.extend(
+            [
+                "-drive",
+                f"if=pflash,format=raw,unit=0,readonly=on,file={code}",
+                "-drive",
+                f"if=pflash,format=raw,unit=1,file={ovmf_vars}",
+            ]
+        )
+    ide_bus = "pide.0" if q35 else "ide.0"
+
     if tpm_socket:
         command.extend(
             [
-                "-machine",
-                "pc",
                 "-chardev",
                 f"socket,id=chrtpm,path={tpm_socket}",
                 "-tpmdev",
@@ -497,13 +530,13 @@ def qemu_arguments(
         command.extend(["-device", "usb-tablet,bus=xhci.0"])
 
     if system_volume:
-        if tpm_socket:
+        if tpm_socket or q35:
             command.extend(
                 [
                     "-drive",
                     f"id=systemdisk,if=none,file={SYSTEM_DISK},media=disk,format=qcow2",
                     "-device",
-                    "ide-hd,drive=systemdisk,bus=ide.0,unit=0",
+                    f"ide-hd,drive=systemdisk,bus={ide_bus},unit=0",
                 ]
             )
         else:
@@ -514,13 +547,13 @@ def qemu_arguments(
                 ]
             )
 
-    if tpm_socket:
+    if tpm_socket or q35:
         command.extend(
             [
                 "-drive",
                 f"id=shareddisk,if=none,file=fat:rw:{SHARED_DIR},format=raw",
                 "-device",
-                "ide-hd,drive=shareddisk,bus=ide.0,unit=1",
+                f"ide-hd,drive=shareddisk,bus={ide_bus},unit=1",
             ]
         )
     else:
@@ -637,6 +670,7 @@ def run_case(
     startup_entry: str,
     owner_username: str | None,
     owner_password: str | None,
+    firmware: str = "bios",
 ) -> None:
     transcript_path = SHARED_DIR / transcript_filename(os.getpid(), cpus)
     serial_path = PROJECT_DIR / "build" / f"smp-qemu-{os.getpid()}-{cpus}.serial.log"
@@ -650,6 +684,15 @@ def run_case(
         process: subprocess.Popen | None = None
         client: QmpClient | None = None
         try:
+            ovmf_vars: Path | None = None
+            if firmware != "bios":
+                template = (
+                    SECUREBOOT_VARS
+                    if firmware == "secureboot"
+                    else OVMF_DIR / "OVMF_VARS_4M.fd"
+                )
+                ovmf_vars = Path(temp_dir) / "OVMF_VARS.fd"
+                shutil.copyfile(template, ovmf_vars)
             if tpm:
                 tpm_process, tpm_socket = start_swtpm(os.getpid(), cpus)
             command = qemu_arguments(
@@ -663,10 +706,19 @@ def run_case(
                 system_volume,
                 relative_mouse,
                 tpm_device,
+                firmware,
+                ovmf_vars,
             )
-            print(f"Starting QEMU SMP case: {cpus} CPU(s)", flush=True)
+            print(
+                f"Starting QEMU SMP case: {cpus} CPU(s), firmware={firmware}",
+                flush=True,
+            )
             process = subprocess.Popen(command)
             client = connect_qmp(qmp_path, process, timeout=30)
+            if firmware != "bios" and startup_entry_index(startup_entry) != 0:
+                # OVMF takes seconds to reach Limine; menu keys sent earlier are lost.
+                wait_for_serial_text(serial_path, "BdsDxe: starting", 120)
+                time.sleep(1.5)
             select_startup_entry(client, startup_entry)
             drive_owner_gate_if_prompted(
                 client,
@@ -694,11 +746,16 @@ def run_case(
                         f"QEMU exited during desktop login with status {process.returncode}"
                     )
 
+            # Slower boots (OVMF under TCG) can still be starting the session after
+            # owner unlock; typing earlier drops keystrokes.
+            wait_for_serial_text(serial_path, "Entering main loop", startup_delay)
+            time.sleep(1)
             if startup_entry == "desktop":
                 # The desktop binds an unmodified T key to opening the terminal.
                 client.press("t")
                 time.sleep(2)
             client.type_command("clear")
+            time.sleep(2)
             if cpus == 1:
                 client.type_command("smpstat all")
                 client.type_command(f"saveterm {transcript_path.name}")
@@ -740,7 +797,7 @@ def run_case(
 
             validate_transcript(transcript, cpus, work_items, iterations)
             if tpm and cpus > 1:
-                validate_tpm_transcript(transcript, tpm_device)
+                validate_tpm_transcript(transcript, tpm_device, firmware)
             print(f"PASS: {cpus} CPU(s), {cpus - 1} AP(s)", flush=True)
         finally:
             if client is not None:
@@ -841,6 +898,13 @@ def parse_args() -> argparse.Namespace:
         "--owner-password",
         help="optional owner password for pre-desktop owner-gate prompts",
     )
+    parser.add_argument(
+        "--firmware",
+        choices=["bios", "uefi", "secureboot"],
+        default="bios",
+        help="boot with legacy BIOS, OVMF UEFI, or OVMF Secure Boot using the "
+        "lab keys from tools/secureboot/make_lab_keys.sh",
+    )
     return parser.parse_args()
 
 
@@ -893,6 +957,7 @@ def main() -> int:
                 args.startup_entry,
                 args.owner_username,
                 args.owner_password,
+                args.firmware,
             )
     except (FileNotFoundError, OSError, RuntimeError, TimeoutError, ValueError) as error:
         print(f"FAIL: {error}", file=sys.stderr)

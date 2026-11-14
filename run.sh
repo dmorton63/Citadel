@@ -16,6 +16,8 @@ ISO_FILE="${BUILD_DIR}/citadel-limine.iso"
 SERIAL_LOG="${BUILD_DIR}/serial.log"
 SHARED_DIR="${PROJECT_DIR}/shared"
 SYSTEM_DISK="${BUILD_DIR}/system.qcow2"
+OVMF_DIR="${OVMF_DIR:-/usr/share/OVMF}"
+SECUREBOOT_DIR="${BUILD_DIR}/secureboot"
 
 TPM=false
 USE_TABLET=true
@@ -27,6 +29,7 @@ RUN_FOR_SECONDS=0
 SYSTEM_VOL=false
 QEMU_CPUS=4
 PRINT_QEMU_CMD_ONLY=false
+FIRMWARE=bios
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -42,6 +45,8 @@ while [[ $# -gt 0 ]]; do
     --no-grab) AUTO_GRAB=false; shift ;;
     --prod) PRODUCTION=true; shift ;;
     --system-vol) SYSTEM_VOL=true; shift ;;
+    --uefi) FIRMWARE=uefi; shift ;;
+    --secure-boot) FIRMWARE=secureboot; shift ;;
     --smp)
       if [[ $# -lt 2 ]] || ! [[ "${2:-}" =~ ^[1-9][0-9]*$ ]] || (( ${2} > 256 )); then
         echo "--smp requires a CPU count from 1 to 256." >&2
@@ -69,6 +74,9 @@ Options:
   --no-grab        Disable grab-on-hover helper
   --prod           Warn if running prod without --tpm
   --system-vol     Attach persistent system volume disk (build/system.qcow2)
+  --uefi           Boot with OVMF UEFI firmware (Secure Boot off)
+  --secure-boot    Boot with OVMF Secure Boot using the lab keys enrolled by
+                   tools/secureboot/make_lab_keys.sh (build with --secure-boot)
   --smp <count>    QEMU virtual CPUs (default: ${QEMU_CPUS}, max: 256)
   --print-cmd      Print the exact QEMU command and exit without running
   --run-for <s>    Auto-stop after <s> seconds (requires timeout)
@@ -80,6 +88,7 @@ Examples:
   ./run.sh --smp 4
   ./run.sh --smp 8 --tpm --system-vol --relmouse
   ./run.sh --smp 4 --print-cmd
+  ./run.sh --secure-boot --tpm
 EOF
       exit 0
       ;;
@@ -154,11 +163,48 @@ if [[ "${TPM}" == true ]]; then
   fi
 
   TPM_ARGS=(
-    -machine q35
     -device piix4-ide
     -chardev "socket,id=chrtpm,path=${SWTPM_SOCK}"
     -tpmdev "emulator,id=tpm0,chardev=chrtpm"
     -device "${TPM_DEVICE:-tpm-crb},tpmdev=tpm0"
+  )
+fi
+
+MACHINE_ARGS=()
+if [[ "${FIRMWARE}" == secureboot ]]; then
+  MACHINE_ARGS=(-machine q35,smm=on)
+elif [[ "${TPM}" == true ]]; then
+  MACHINE_ARGS=(-machine q35)
+fi
+
+FIRMWARE_ARGS=()
+if [[ "${FIRMWARE}" != bios ]]; then
+  OVMF_CODE="${OVMF_DIR}/OVMF_CODE_4M.fd"
+  OVMF_VARS_TEMPLATE="${OVMF_DIR}/OVMF_VARS_4M.fd"
+  if [[ "${FIRMWARE}" == secureboot ]]; then
+    OVMF_CODE="${OVMF_DIR}/OVMF_CODE_4M.secboot.fd"
+    OVMF_VARS_TEMPLATE="${SECUREBOOT_DIR}/OVMF_VARS_citadel.fd"
+  fi
+  for f in "${OVMF_CODE}" "${OVMF_VARS_TEMPLATE}"; do
+    if [[ ! -f "${f}" ]]; then
+      echo "Missing UEFI firmware file: ${f}" >&2
+      if [[ "${FIRMWARE}" == secureboot ]]; then
+        echo "Create lab keys first: tools/secureboot/make_lab_keys.sh" >&2
+      else
+        echo "Install OVMF: sudo apt install ovmf" >&2
+      fi
+      exit 1
+    fi
+  done
+  # Start each run from a pristine copy of the variable store.
+  OVMF_VARS_RUN="${BUILD_DIR}/OVMF_VARS_run.fd"
+  cp "${OVMF_VARS_TEMPLATE}" "${OVMF_VARS_RUN}"
+  if [[ "${FIRMWARE}" == secureboot ]]; then
+    FIRMWARE_ARGS+=(-global driver=cfi.pflash01,property=secure,value=on)
+  fi
+  FIRMWARE_ARGS+=(
+    -drive "if=pflash,format=raw,unit=0,readonly=on,file=${OVMF_CODE}"
+    -drive "if=pflash,format=raw,unit=1,file=${OVMF_VARS_RUN}"
   )
 fi
 
@@ -189,6 +235,8 @@ if [[ "${USE_TABLET}" == false ]]; then
 fi
 
 QEMU_ARGS=(
+  "${MACHINE_ARGS[@]}"
+  "${FIRMWARE_ARGS[@]}"
   "${SYSTEM_ARGS[@]}"
   -cdrom "${ISO_FILE}"
   -boot order=d

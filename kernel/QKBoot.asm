@@ -148,6 +148,28 @@ limine_mp_request:
     dq 0                     ; revision
     dq 0                     ; response pointer
     dq 0                     ; flags
+
+; EFI system table request (UEFI runtime services)
+align 8
+global limine_efi_system_table_request
+limine_efi_system_table_request:
+    dq LIMINE_COMMON_MAGIC_0
+    dq LIMINE_COMMON_MAGIC_1
+    dq 0x5ceba5163eaaf6d6
+    dq 0x0a6981610cf65fcc
+    dq 0                     ; revision
+    dq 0                     ; response pointer
+
+; EFI memory map request (locates firmware runtime regions)
+align 8
+global limine_efi_memmap_request
+limine_efi_memmap_request:
+    dq LIMINE_COMMON_MAGIC_0
+    dq LIMINE_COMMON_MAGIC_1
+    dq 0x7df62a431d6872d5
+    dq 0xa4fcdfb3e57306c8
+    dq 0                     ; revision
+    dq 0                     ; response pointer
     
 ; ============================================================================
 ; BSS section

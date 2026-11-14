@@ -55,6 +55,11 @@ namespace QKBoot
 namespace QK::Boot::Tpm
 {
     bool IsReady();
+
+    namespace SecureBoot
+    {
+        const char *Summary();
+    }
 }
 
 namespace QD
@@ -247,7 +252,8 @@ namespace QD
 
         len = Text::append(line, sizeof(line), 0, "TPM: ");
         len = Text::append(line, sizeof(line), len, QK::Boot::Tpm::IsReady() ? "present" : "not available");
-        Text::append(line, sizeof(line), len, "    Secure Boot: not verified yet");
+        len = Text::append(line, sizeof(line), len, "    Secure Boot: ");
+        Text::append(line, sizeof(line), len, QK::Boot::Tpm::SecureBoot::Summary());
         m_securityLabel->setText(line);
     }
 

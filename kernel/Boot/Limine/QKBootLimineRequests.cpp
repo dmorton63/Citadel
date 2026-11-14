@@ -36,6 +36,16 @@ namespace QK::Boot::Limine
         return GetResponse<limine_firmware_type_response>(FirmwareTypeRequest);
     }
 
+    const limine_efi_system_table_response *GetEfiSystemTableResponse(QC::u64 EfiSystemTableRequest[])
+    {
+        return GetResponse<limine_efi_system_table_response>(EfiSystemTableRequest);
+    }
+
+    const limine_efi_memmap_response *GetEfiMemmapResponse(QC::u64 EfiMemmapRequest[])
+    {
+        return GetResponse<limine_efi_memmap_response>(EfiMemmapRequest);
+    }
+
     const limine_rsdp_response *GetRsdpResponse(QC::u64 RsdpRequest[])
     {
         return GetResponse<limine_rsdp_response>(RsdpRequest);

@@ -54,6 +54,8 @@ namespace QKBoot
         QC::u64 *firmwareType = nullptr;
         QC::u64 *rsdp = nullptr;
         QC::u64 *mp = nullptr;
+        QC::u64 *efiSystemTable = nullptr;
+        QC::u64 *efiMemmap = nullptr;
     };
 
     void setLogFn(FLogFn log);
