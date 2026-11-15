@@ -459,6 +459,7 @@ def qemu_arguments(
     firmware: str = "bios",
     ovmf_vars: Path | None = None,
     no_ps2: bool = False,
+    keyboard_second_xhci: bool = False,
 ) -> list[str]:
     command = [
         qemu,
@@ -529,18 +530,15 @@ def qemu_arguments(
         )
 
     if relative_mouse:
-        command.extend(
-            [
-                "-device",
-                "usb-mouse,bus=xhci.0",
-                "-device",
-                "usb-kbd,bus=xhci.0",
-            ]
-        )
+        command.extend(["-device", "usb-mouse,bus=xhci.0"])
     else:
         command.extend(["-device", "usb-tablet,bus=xhci.0"])
-        if no_ps2:
-            command.extend(["-device", "usb-kbd,bus=xhci.0"])
+
+    if keyboard_second_xhci:
+        command.extend(["-device", "qemu-xhci,id=xhci2"])
+    if relative_mouse or no_ps2:
+        keyboard_bus = "xhci2.0" if keyboard_second_xhci else "xhci.0"
+        command.extend(["-device", f"usb-kbd,bus={keyboard_bus}"])
 
     if system_volume:
         if tpm_socket or q35:
@@ -685,6 +683,7 @@ def run_case(
     owner_password: str | None,
     firmware: str = "bios",
     no_ps2: bool = False,
+    keyboard_second_xhci: bool = False,
 ) -> None:
     transcript_path = SHARED_DIR / transcript_filename(os.getpid(), cpus)
     serial_path = PROJECT_DIR / "build" / f"smp-qemu-{os.getpid()}-{cpus}.serial.log"
@@ -723,6 +722,7 @@ def run_case(
                 firmware,
                 ovmf_vars,
                 no_ps2,
+                keyboard_second_xhci,
             )
             print(
                 f"Starting QEMU SMP case: {cpus} CPU(s), firmware={firmware}",
@@ -735,6 +735,8 @@ def run_case(
                 wait_for_serial_text(serial_path, "BdsDxe: starting", 120)
                 time.sleep(1.5)
             select_startup_entry(client, startup_entry)
+            if startup_entry == "diagnostic":
+                wait_for_serial_text(serial_path, "Boot trace enabled", startup_delay)
             drive_owner_gate_if_prompted(
                 client,
                 serial_path,
@@ -931,6 +933,11 @@ def parse_args() -> argparse.Namespace:
         help="disable the i8042 PS/2 controller (q35) and attach a USB keyboard, "
         "like modern PCs without legacy PS/2",
     )
+    parser.add_argument(
+        "--keyboard-second-xhci",
+        action="store_true",
+        help="with --no-ps2, attach the keyboard to a second xHCI controller",
+    )
     return parser.parse_args()
 
 
@@ -938,6 +945,9 @@ def main() -> int:
     args = parse_args()
     if args.work_items <= 0 or args.iterations <= 0:
         print("work item count and iteration count must be positive", file=sys.stderr)
+        return 2
+    if args.keyboard_second_xhci and not args.no_ps2:
+        print("--keyboard-second-xhci requires --no-ps2", file=sys.stderr)
         return 2
 
     try:
@@ -985,6 +995,7 @@ def main() -> int:
                 args.owner_password,
                 args.firmware,
                 args.no_ps2,
+                args.keyboard_second_xhci,
             )
     except (FileNotFoundError, OSError, RuntimeError, TimeoutError, ValueError) as error:
         print(f"FAIL: {error}", file=sys.stderr)

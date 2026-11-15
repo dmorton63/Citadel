@@ -3,6 +3,7 @@
 
 #include "xhci_internal.h"
 #include "QArchCPU.h"
+#include "QKMemHeap.h"
 #include "QKMemTranslator.h"
 #include "QCLogger.h"
 #include "QCString.h"
@@ -330,9 +331,8 @@ namespace QKDrv
         // Extended capability IDs
         constexpr QC::u8 XCAP_LEGACY = 1;
 
-        // Static singleton instance to avoid heap allocation issues
-        static XHCIControllerImpl *s_instance = nullptr;
-        static QC::u8 s_controllerBuffer[sizeof(XHCIControllerImpl)] __attribute__((aligned(16)));
+        static QC::u32 s_usbStorageCount = 0;
+        static bool s_sharedUsbAliasRegistered = false;
 
         XHCIController *xhci_init(QArch::PCIDevice *device)
         {
@@ -381,16 +381,13 @@ namespace QKDrv
             {
                 QC_LOG_INFO("xHCI", "Found xHCI controller");
 
-                if (s_instance)
+                void *storage = QK::Memory::Heap::instance().allocate(sizeof(XHCIControllerImpl));
+                if (!storage)
                 {
-                    QC_LOG_WARN("xHCI", "XHCIControllerImpl already exists, skipping");
-                    return s_instance;
+                    QC_LOG_ERROR("xHCI", "Failed to allocate controller");
+                    return nullptr;
                 }
-
-                QC_LOG_INFO("xHCI", "Using placement new with buffer at %p", s_controllerBuffer);
-                s_instance = new (s_controllerBuffer) XHCIControllerImpl(pciDevice);
-                QC_LOG_INFO("xHCI", "XHCIControllerImpl created at %p", s_instance);
-                return s_instance;
+                return new (storage) XHCIControllerImpl(pciDevice);
             }
             return nullptr;
         }
@@ -887,7 +884,7 @@ namespace QKDrv
         }
 
         XHCIControllerImpl::XHCIControllerImpl(QArch::PCIDevice *pciDevice)
-            : m_pciDevice(pciDevice), m_mmioBase(0), m_capRegs(nullptr), m_opRegs(nullptr), m_doorbells(nullptr), m_portRegs(nullptr), m_interrupter(nullptr), m_portCount(0), m_maxSlots(0), m_maxIntrs(0), m_pageSize(4096), m_contextSize(32), m_dcbaa(nullptr), m_commandRing(nullptr), m_commandEnqueue(0), m_commandCycle(true), m_eventRing(nullptr), m_erst(nullptr), m_eventDequeue(0), m_eventCycle(true), m_inputContext(nullptr), m_deviceCount(0), m_tabletSlot(0), m_mouseSlot(0), m_keyboardSlot(0), m_commandPending(false), m_lastCompletionCode(CompletionCode::Invalid), m_lastSlotId(0), m_transferPending(false), m_transferPendingSlot(0), m_transferPendingEndpoint(0), m_transferCompletionCode(CompletionCode::Invalid), m_mouseCallback(nullptr), m_screenWidth(1024), m_screenHeight(768), m_tabletDriver(nullptr), m_mouseDriver(nullptr), m_keyboardDriver(nullptr), m_storageIoBuffer(nullptr), m_storageIoBufferPhys(0), m_bulkTagCounter(1), m_usbStorageCount(0), m_sharedUsbAliasRegistered(false)
+            : m_pciDevice(pciDevice), m_mmioBase(0), m_capRegs(nullptr), m_opRegs(nullptr), m_doorbells(nullptr), m_portRegs(nullptr), m_interrupter(nullptr), m_portCount(0), m_maxSlots(0), m_maxIntrs(0), m_pageSize(4096), m_contextSize(32), m_dcbaa(nullptr), m_commandRing(nullptr), m_commandEnqueue(0), m_commandCycle(true), m_eventRing(nullptr), m_erst(nullptr), m_eventDequeue(0), m_eventCycle(true), m_inputContext(nullptr), m_deviceCount(0), m_tabletSlot(0), m_mouseSlot(0), m_keyboardSlot(0), m_commandPending(false), m_lastCompletionCode(CompletionCode::Invalid), m_lastSlotId(0), m_transferPending(false), m_transferPendingSlot(0), m_transferPendingEndpoint(0), m_transferCompletionCode(CompletionCode::Invalid), m_mouseCallback(nullptr), m_screenWidth(1024), m_screenHeight(768), m_tabletDriver(nullptr), m_mouseDriver(nullptr), m_keyboardDriver(nullptr), m_storageIoBuffer(nullptr), m_storageIoBufferPhys(0), m_bulkTagCounter(1)
         {
             QC_LOG_INFO("xHCI", "Constructor body entered");
 
@@ -2777,6 +2774,11 @@ namespace QKDrv
 
         bool XHCIControllerImpl::registerMassStorageVolume(DeviceInfo &dev)
         {
+            if (s_usbStorageCount >= 10)
+            {
+                QC_LOG_WARN("xHCI", "USB volume limit reached");
+                return false;
+            }
             QC::u32 blockSize = 0;
             QC::u64 sectorCount = 0;
             if (!queryMassStorageCapacity(dev, blockSize, sectorCount))
@@ -2815,7 +2817,7 @@ namespace QKDrv
             QC::String::memset(mountPath, 0, sizeof(mountPath));
             QC::String::strncpy(volName, "QFS_USB", sizeof(volName) - 1);
             QC::String::strncpy(mountPath, "/mnt/usb", sizeof(mountPath) - 1);
-            const char suffix = static_cast<char>('0' + (m_usbStorageCount % 10));
+            const char suffix = static_cast<char>('0' + s_usbStorageCount);
             const QC::usize vn = QC::String::strlen(volName);
             const QC::usize mp = QC::String::strlen(mountPath);
             if (vn + 1 < sizeof(volName))
@@ -2842,12 +2844,12 @@ namespace QKDrv
             const QC::Status st = QKStorage::registerBlockDevice(reg);
             if (st == QC::Status::Success || st == QC::Status::Busy)
             {
-                const QC::u32 usbIndex = m_usbStorageCount;
+                const QC::u32 usbIndex = s_usbStorageCount;
                 const bool autoSelectShared = QK::Boot::Config::GetSharedUsbVolumeAutoSelect();
                 const QC::u32 sharedUsbIndex = QK::Boot::Config::GetSharedUsbVolumeIndex();
                 bool shouldAliasShared = false;
 
-                if (QK::Boot::Config::GetPreferUsbSharedVolume() && !m_sharedUsbAliasRegistered)
+                if (QK::Boot::Config::GetPreferUsbSharedVolume() && !s_sharedUsbAliasRegistered)
                 {
                     if (autoSelectShared)
                     {
@@ -2880,7 +2882,7 @@ namespace QKDrv
                     const QC::Status sharedSt = QKStorage::registerBlockDevice(sharedReg);
                     if (sharedSt == QC::Status::Success || sharedSt == QC::Status::Busy)
                     {
-                        m_sharedUsbAliasRegistered = true;
+                        s_sharedUsbAliasRegistered = true;
                         QC_LOG_INFO("xHCI", "Registered USB shared alias QFS_SHARED at /shared (usb_index=%u status=%d)",
                                     usbIndex,
                                     static_cast<int>(sharedSt));
@@ -2893,7 +2895,7 @@ namespace QKDrv
                     }
                 }
 
-                ++m_usbStorageCount;
+                ++s_usbStorageCount;
                 QC_LOG_INFO("xHCI", "Registered USB storage volume %s at %s (slot=%u sectors=%llu fatKind=%u)",
                             volName,
                             mountPath,
