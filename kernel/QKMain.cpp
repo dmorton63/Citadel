@@ -52,6 +52,24 @@ namespace
         return (p == tokenEnd) && (*q == 0);
     }
 
+    static bool hasCmdlineToken(const char *cmdline, const char *token)
+    {
+        if (!cmdline)
+            return false;
+        const char *p = cmdline;
+        while (*p)
+        {
+            while (*p && isSpace(*p))
+                ++p;
+            const char *begin = p;
+            while (*p && !isSpace(*p))
+                ++p;
+            if (tokenEqualsIgnoreCase(begin, p, token))
+                return true;
+        }
+        return false;
+    }
+
     static QC::LogLevel parseLogLevelToken(const char *tokenBegin, const char *tokenEnd, QC::LogLevel fallback)
     {
         if (!tokenBegin || !tokenEnd || tokenEnd <= tokenBegin)
@@ -246,6 +264,11 @@ extern "C" void kernel_main()
     QK::Memory::Heap::instance().initialize(earlyHeap.Buffer, earlyHeap.Size);
 
     QK::Console::initialize(QK::Debug::Serial::WriteMirrored);
+    if (hasCmdlineToken(cmdline, "citadel.boottrace"))
+    {
+        QKBoot::setLogFn(QK::Debug::Serial::WriteMirrored);
+        QK::Debug::Serial::WriteMirrored("Boot trace enabled\r\n");
+    }
     // Limine already clears BSS for us.
     QK::Debug::Serial::Write("BSS (skipped - Limine does it)\r\n");
 

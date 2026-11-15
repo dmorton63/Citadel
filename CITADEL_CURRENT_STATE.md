@@ -323,6 +323,7 @@ Citadel is used primarily under QEMU for bring-up; these are the common devices 
 ### Input
 - PS/2 keyboard/mouse: supported; probing is bounded and skipped when no i8042 controller exists (common on modern UEFI PCs)
 - USB keyboard on PCs without PS/2: covered by `python3 tools/smp_qemu_smoke.py --firmware uefi --no-ps2 ...` (q35 with `i8042=off`)
+- For hardware boot troubleshooting, select **CITADEL (Boot Diagnostics)** in Limine to show boot progress on-screen and start in terminal mode. Normal entries retain their existing logging behavior.
 - USB:
   - UHCI (USB 1.1) controller: supported
   - XHCI (USB 3.x) controller: supported

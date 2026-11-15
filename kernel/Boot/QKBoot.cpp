@@ -2710,6 +2710,8 @@ namespace QKBoot
             QK::Boot::Tpm::SecureBoot::SetFirmwareIsUefi(bUefi);
         if (bUefi && FwResp->firmware_type == LIMINE_FIRMWARE_TYPE_UEFI64)
         {
+            if (g_Log)
+                g_Log("EFI runtime: reading firmware variables...\r\n");
             const auto *SysTab = QK::Boot::Limine::GetEfiSystemTableResponse(g_Req.efiSystemTable);
             const auto *EfiMap = QK::Boot::Limine::GetEfiMemmapResponse(g_Req.efiMemmap);
             QK::Boot::EfiRuntime::FGlobalVariables Vars;
@@ -2719,6 +2721,8 @@ namespace QKBoot
                 QK::Boot::Tpm::SecureBoot::SetFirmwareVariables(Vars.bSecureBootPresent, Vars.SecureBoot,
                                                                 Vars.bSetupModePresent && Vars.SetupMode == 1,
                                                                 Vars.bPkPresent);
+            if (g_Log)
+                g_Log("EFI runtime: firmware variable read finished\r\n");
         }
 
         if (g_Log)

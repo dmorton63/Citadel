@@ -354,6 +354,7 @@ def startup_entry_index(startup_entry: str) -> int:
         "desktop": 0,
         "terminal": 1,
         "recovery": 2,
+        "diagnostic": 3,
     }
     try:
         return mapping[startup_entry]
@@ -762,7 +763,12 @@ def run_case(
 
             # Slower boots (OVMF under TCG) can still be starting the session after
             # owner unlock; typing earlier drops keystrokes.
-            wait_for_serial_text(serial_path, "Entering main loop", startup_delay)
+            ready_marker = (
+                "Entering console-only startup path"
+                if startup_entry == "diagnostic"
+                else "Entering main loop"
+            )
+            wait_for_serial_text(serial_path, ready_marker, startup_delay)
             time.sleep(1)
             if startup_entry == "desktop":
                 # The desktop binds an unmodified T key to opening the terminal.
@@ -900,7 +906,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--startup-entry",
-        choices=["desktop", "terminal", "recovery"],
+        choices=["desktop", "terminal", "recovery", "diagnostic"],
         default="desktop",
         help="Limine menu entry to boot before running SMP commands",
     )

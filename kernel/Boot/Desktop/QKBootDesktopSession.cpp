@@ -1691,6 +1691,9 @@ namespace QK::Boot::Desktop
         }
         else
         {
+            g_Log("Keyboard driver: ");
+            g_Log(kbd->name());
+            g_Log("\r\n");
             kbd->setCallback([](const QKDrv::KeyboardReport &rep)
                              {
                                  dispatchDesktopKeyboardReport(rep, true);

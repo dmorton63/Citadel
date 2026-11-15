@@ -206,6 +206,7 @@ namespace QK::Boot::EfiRuntime
         }
 
         QC::u64 SecureBootRc = 0;
+        LogStr(Log, "EFI runtime: mapping runtime regions...\r\n");
         const QC::u64 IrqFlags = SaveAndDisableInterrupts();
         bool bOk = MapRegions(Regions, Count);
         if (bOk)
@@ -222,13 +223,17 @@ namespace QK::Boot::EfiRuntime
                 if (bOk)
                 {
                     const auto GetVariable = reinterpret_cast<FGetVariable>(Fn);
+                    LogStr(Log, "EFI runtime: querying SecureBoot...\r\n");
                     Out.bSecureBootPresent = QueryByte(GetVariable, kSecureBootName, Out.SecureBoot);
                     SecureBootRc = g_LastRc;
+                    LogStr(Log, "EFI runtime: querying SetupMode...\r\n");
                     Out.bSetupModePresent = QueryByte(GetVariable, kSetupModeName, Out.SetupMode);
+                    LogStr(Log, "EFI runtime: querying PK...\r\n");
                     Out.bPkPresent = QueryPresent(GetVariable, kPkName);
                 }
             }
         }
+        LogStr(Log, "EFI runtime: unmapping runtime regions...\r\n");
         UnmapRegions(Regions, Count);
         RestoreInterrupts(IrqFlags);
 
