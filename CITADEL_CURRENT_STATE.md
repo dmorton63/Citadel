@@ -324,7 +324,7 @@ Citadel is used primarily under QEMU for bring-up; these are the common devices 
 - PS/2 keyboard/mouse: supported; probing is bounded and skipped when no i8042 controller exists (common on modern UEFI PCs)
 - USB keyboard on PCs without PS/2: covered by `python3 tools/smp_qemu_smoke.py --firmware uefi --no-ps2 ...` (q35 with `i8042=off`)
 - Multiple xHCI controllers are probed independently; add `--keyboard-second-xhci` to the `--no-ps2` smoke test to put the keyboard on the second controller.
-- For hardware boot troubleshooting, select **CITADEL (Boot Diagnostics)** in Limine to show boot progress on-screen and start in terminal mode. Normal entries retain their existing logging behavior.
+- For hardware boot troubleshooting, select **CITADEL (Boot Diagnostics)** in Limine to show boot progress and detailed driver logs (including xHCI enumeration errors) on-screen and start in terminal mode. Record the driver initialization phase if earlier messages scroll out of view. Normal entries retain their existing logging behavior.
 - **CITADEL (Boot Diagnostics, SMP Off)** disables AP startup/timers/scheduling only for that diagnostic boot, to compare hardware bring-up with SMP active.
 - USB:
   - UHCI (USB 1.1) controller: supported

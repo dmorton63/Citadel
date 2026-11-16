@@ -17,7 +17,7 @@ namespace QC
         return instance;
     }
 
-    Logger::Logger() : m_level(LogLevel::Info)
+    Logger::Logger() : m_level(LogLevel::Info), m_mirror(nullptr)
     {
         // Initialize serial port for logging
         outb(SERIAL_COM1 + 1, 0x00); // Disable interrupts
@@ -39,8 +39,15 @@ namespace QC
         return m_level;
     }
 
+    void Logger::setMirror(MirrorFn mirror)
+    {
+        m_mirror = mirror;
+    }
+
     void Logger::outputChar(char c)
     {
+        if (m_mirror)
+            m_mirror(c);
         // Wait for transmit buffer to be empty
         while ((inb(SERIAL_COM1 + 5) & 0x20) == 0)
             ;

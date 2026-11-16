@@ -26,6 +26,8 @@ namespace QC
 
         void setLevel(LogLevel level);
         LogLevel getLevel() const;
+        using MirrorFn = void (*)(char);
+        void setMirror(MirrorFn mirror);
 
         void log(LogLevel level, const char *module, const char *format, ...);
 
@@ -49,6 +51,7 @@ namespace QC
         void vlog(LogLevel level, const char *module, const char *format, va_list args);
 
         LogLevel m_level;
+        MirrorFn m_mirror;
     };
 
 // Convenience macros

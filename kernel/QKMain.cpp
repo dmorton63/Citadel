@@ -267,6 +267,14 @@ extern "C" void kernel_main()
     if (hasCmdlineToken(cmdline, "citadel.boottrace"))
     {
         QKBoot::setLogFn(QK::Debug::Serial::WriteMirrored);
+        QC::Logger::instance().setMirror([](char c)
+                                        {
+                                            const char text[] = {c, '\0'};
+                                            if (QK::Debug::FramebufferText::IsReady())
+                                                QK::Debug::FramebufferText::Write(text);
+                                            else
+                                                QK::Debug::Terminal::Write(text);
+                                        });
         QK::Debug::Serial::WriteMirrored("Boot trace enabled\r\n");
     }
     if (hasCmdlineToken(cmdline, "citadel.smp=off"))
