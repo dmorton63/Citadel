@@ -44,6 +44,7 @@ namespace
     QKBoot::FLogFn g_LogUpstream = nullptr;
     QKBoot::LimineRequests g_Req{};
     bool g_DesktopPrepared = false;
+    bool g_SmpEnabled = true;
 
     struct ApBootSlot
     {
@@ -2391,6 +2392,11 @@ namespace QKBoot
         g_Req = req;
     }
 
+    void setSmpEnabled(bool enabled)
+    {
+        g_SmpEnabled = enabled;
+    }
+
     bool initializeSmpTimers(QC::u32 frequencyHz)
     {
         if (frequencyHz == 0)
@@ -2774,6 +2780,16 @@ namespace QKBoot
         }
 
         QK::Boot::Arch::InitCpuGdtIdtAndInterrupts(g_Log);
+
+        if (!g_SmpEnabled)
+        {
+            __atomic_store_n(&g_SmpTotalCpus, 0ull, __ATOMIC_SEQ_CST);
+            __atomic_store_n(&g_SmpTargetAps, 0ull, __ATOMIC_SEQ_CST);
+            __atomic_store_n(&g_ApSlotCount, 0u, __ATOMIC_SEQ_CST);
+            if (g_Log)
+                g_Log("SMP: disabled by boot parameter\r\n");
+            return;
+        }
 
         if (g_Log)
         {

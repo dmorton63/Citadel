@@ -60,6 +60,7 @@ namespace QKBoot
 
     void setLogFn(FLogFn log);
     void setLimineRequests(const LimineRequests &req);
+    void setSmpEnabled(bool enabled);
     bool initializeSmpTimers(QC::u32 frequencyHz);
     bool getSmpStatusSnapshot(SmpStatusSnapshot &out);
     bool submitSmpWork(SmpWorkFn work, QC::u64 argument);

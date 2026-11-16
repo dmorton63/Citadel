@@ -269,6 +269,8 @@ extern "C" void kernel_main()
         QKBoot::setLogFn(QK::Debug::Serial::WriteMirrored);
         QK::Debug::Serial::WriteMirrored("Boot trace enabled\r\n");
     }
+    if (hasCmdlineToken(cmdline, "citadel.smp=off"))
+        QKBoot::setSmpEnabled(false);
     // Limine already clears BSS for us.
     QK::Debug::Serial::Write("BSS (skipped - Limine does it)\r\n");
 
