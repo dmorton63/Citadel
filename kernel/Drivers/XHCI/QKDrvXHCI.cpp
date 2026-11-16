@@ -1695,7 +1695,7 @@ namespace QKDrv
             {
                 QC::u32 portsc = m_portRegs[port].portsc;
                 // Write 1 to clear CSC, PEC, WRC, OCC, PRC, PLC, CEC
-                m_portRegs[port].portsc = portsc | 0x00FE0000;
+                m_portRegs[port].portsc = portscWriteBase(portsc) | (portsc & PORTSC_CHANGE_MASK);
 
                 // Skip if already enumerating this port (prevents re-entrancy)
                 if (m_portEnumerating[port])
@@ -2979,7 +2979,7 @@ namespace QKDrv
                 return;
 
             // Assert reset
-            m_portRegs[port].portsc |= PORTSC_PR;
+            m_portRegs[port].portsc = portscWriteBase(m_portRegs[port].portsc) | PORTSC_PR;
 
             // Wait for reset to complete
             for (int i = 0; i < 100; ++i)
@@ -2991,7 +2991,8 @@ namespace QKDrv
             }
 
             // Clear status change bits
-            m_portRegs[port].portsc |= PORTSC_PRC;
+            m_portRegs[port].portsc = portscWriteBase(m_portRegs[port].portsc) | PORTSC_PRC;
+            QC_LOG_INFO("xHCI", "Port %u after reset: PORTSC=%08x", port, m_portRegs[port].portsc);
         }
 
         void XHCIControllerImpl::ringDoorbell(QC::u8 slot, QC::u8 target)

@@ -85,5 +85,12 @@ namespace QKDrv
         constexpr QC::u32 PORTSC_CSC = 1 << 17;
         constexpr QC::u32 PORTSC_WRC = 1 << 19;
         constexpr QC::u32 PORTSC_PRC = 1 << 21;
+        constexpr QC::u32 PORTSC_CHANGE_MASK = 0x00FE0000;
+
+        constexpr QC::u32 portscWriteBase(QC::u32 portsc)
+        {
+            // Preserve power, indicators, and wake enables, not write-one actions.
+            return portsc & (PORTSC_PP | (3u << 14) | (7u << 25));
+        }
     }
 } // namespace QKDrv
