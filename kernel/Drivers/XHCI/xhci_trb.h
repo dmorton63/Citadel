@@ -42,7 +42,8 @@ namespace QKDrv
             Stall = 6,
             ResourceError = 7,
             NoSlotsAvailable = 9,
-            ShortPacket = 13
+            ShortPacket = 13,
+            ContextStateError = 19
         };
 
         enum class EndpointType : QC::u8
@@ -89,6 +90,54 @@ namespace QKDrv
         inline QC::u8 getSlotId(const TRB &trb)
         {
             return (trb.control >> 24) & 0xFF;
+        }
+
+        inline bool commandCompletionMatches(bool pending, QC::PhysAddr commandPhys, const TRB &event)
+        {
+            return pending && (event.parameter & ~0xFull) == commandPhys;
+        }
+
+        inline bool transferCompletionMatches(bool pending, QC::u8 slot, QC::u8 endpoint, const TRB &event)
+        {
+            return pending && getSlotId(event) == slot && ((event.control >> 16) & 0x1F) == endpoint;
+        }
+
+        enum class CompletionWaitResult
+        {
+            Completed,
+            Timeout,
+            ClockStopped,
+            SpinLimit
+        };
+
+        template <typename ProcessEvents, typename NowMs, typename Relax>
+        CompletionWaitResult waitForCompletion(const bool &pending, QC::u32 timeoutMs, bool useClock,
+                                               ProcessEvents processEvents, NowMs nowMs, Relax relax,
+                                               QC::u32 maxSpins)
+        {
+            const QC::u64 start = useClock ? nowMs() : 0;
+            QC::u64 last = start;
+            QC::u32 stalled = 0;
+            while (true)
+            {
+                processEvents();
+                if (!pending)
+                    return CompletionWaitResult::Completed;
+                if (useClock)
+                {
+                    const QC::u64 now = nowMs();
+                    if (now - start >= timeoutMs)
+                        return CompletionWaitResult::Timeout;
+                    if (now != last)
+                    {
+                        last = now;
+                        stalled = 0;
+                    }
+                }
+                if (++stalled >= maxSpins)
+                    return useClock ? CompletionWaitResult::ClockStopped : CompletionWaitResult::SpinLimit;
+                relax();
+            }
         }
     }
 } // namespace QKDrv

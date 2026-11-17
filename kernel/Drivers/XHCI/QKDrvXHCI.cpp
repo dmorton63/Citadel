@@ -885,7 +885,7 @@ namespace QKDrv
         }
 
         XHCIControllerImpl::XHCIControllerImpl(QArch::PCIDevice *pciDevice)
-            : m_pciDevice(pciDevice), m_mmioBase(0), m_capRegs(nullptr), m_opRegs(nullptr), m_doorbells(nullptr), m_portRegs(nullptr), m_interrupter(nullptr), m_portCount(0), m_maxSlots(0), m_maxIntrs(0), m_pageSize(4096), m_contextSize(32), m_dcbaa(nullptr), m_commandRing(nullptr), m_commandEnqueue(0), m_commandCycle(true), m_eventRing(nullptr), m_erst(nullptr), m_eventDequeue(0), m_eventCycle(true), m_inputContext(nullptr), m_deviceCount(0), m_tabletSlot(0), m_mouseSlot(0), m_keyboardSlot(0), m_commandPending(false), m_lastCompletionCode(CompletionCode::Invalid), m_lastSlotId(0), m_transferPending(false), m_transferPendingSlot(0), m_transferPendingEndpoint(0), m_transferCompletionCode(CompletionCode::Invalid), m_mouseCallback(nullptr), m_screenWidth(1024), m_screenHeight(768), m_tabletDriver(nullptr), m_mouseDriver(nullptr), m_keyboardDriver(nullptr), m_storageIoBuffer(nullptr), m_storageIoBufferPhys(0), m_bulkTagCounter(1)
+            : m_pciDevice(pciDevice), m_mmioBase(0), m_capRegs(nullptr), m_opRegs(nullptr), m_doorbells(nullptr), m_portRegs(nullptr), m_interrupter(nullptr), m_portCount(0), m_maxSlots(0), m_maxIntrs(0), m_pageSize(4096), m_contextSize(32), m_dcbaa(nullptr), m_commandRing(nullptr), m_commandRingPhys(0), m_commandEnqueue(0), m_commandCycle(true), m_eventRing(nullptr), m_erst(nullptr), m_eventDequeue(0), m_eventCycle(true), m_inputContext(nullptr), m_deviceCount(0), m_tabletSlot(0), m_mouseSlot(0), m_keyboardSlot(0), m_commandPending(false), m_commandRingFailed(false), m_pendingCommandPhys(0), m_lastCompletionCode(CompletionCode::Invalid), m_lastSlotId(0), m_transferPending(false), m_transferPendingSlot(0), m_transferPendingEndpoint(0), m_transferCompletionCode(CompletionCode::Invalid), m_mouseCallback(nullptr), m_screenWidth(1024), m_screenHeight(768), m_tabletDriver(nullptr), m_mouseDriver(nullptr), m_keyboardDriver(nullptr), m_storageIoBuffer(nullptr), m_storageIoBufferPhys(0), m_bulkTagCounter(1)
         {
             QC_LOG_INFO("xHCI", "Constructor body entered");
 
@@ -901,6 +901,7 @@ namespace QKDrv
             QC::String::memset(m_ep0Rings, 0, sizeof(m_ep0Rings));
             QC::String::memset(m_ep0RingPhys, 0, sizeof(m_ep0RingPhys));
             QC::String::memset(m_ep0Enqueue, 0, sizeof(m_ep0Enqueue));
+            QC::String::memset(m_ep0Failed, 0, sizeof(m_ep0Failed));
             for (QC::usize i = 0; i <= MAX_DEVICES; ++i)
                 m_ep0Cycle[i] = true;
 
@@ -999,7 +1000,7 @@ namespace QKDrv
             QC::String::memset(m_storageIoBuffer, 0, 4096);
 
             // Configure max slots
-            m_opRegs->config = m_maxSlots;
+            m_opRegs->config = m_maxSlots < MAX_DEVICES ? m_maxSlots : MAX_DEVICES;
 
             // Enable interrupter
             m_interrupter->iman = 0x3; // Enable + pending clear
@@ -1143,6 +1144,7 @@ namespace QKDrv
         {
             DMAPage cmdRingPage = allocateDMAPage();
             m_commandRing = reinterpret_cast<TRB *>(cmdRingPage.virt);
+            m_commandRingPhys = cmdRingPage.phys;
             QC::String::memset(m_commandRing, 0, 4096);
 
             // Set up Link TRB at end of ring
@@ -1247,23 +1249,37 @@ namespace QKDrv
             return slot;
         }
 
+        bool XHCIControllerImpl::submitCommand(const TRB &trb, QC::u32 timeoutMs)
+        {
+            if (m_commandRingFailed)
+            {
+                QC_LOG_ERROR("xHCI", "Command ring unavailable after timeout");
+                return false;
+            }
+            m_pendingCommandPhys = m_commandRingPhys + m_commandEnqueue * sizeof(TRB);
+            m_commandPending = true;
+            m_lastCompletionCode = CompletionCode::Invalid;
+            enqueueCommand(trb);
+            ringCommandDoorbell();
+            return waitForCommand(timeoutMs);
+        }
+
         bool XHCIControllerImpl::waitForCommand(QC::u32 timeoutMs)
         {
-            m_commandPending = true;
+            const bool useClock = QK::Time::available() && QArch::CPU::instance().interruptsEnabled();
+            const QC::u32 maxSpins = useClock ? 10000000 : timeoutMs * 10000;
+            const CompletionWaitResult wait = waitForCompletion(
+                m_commandPending, timeoutMs, useClock, [&]() { processEvents(); },
+                []() { return QK::Time::milliseconds(); }, []() { cpu_relax(); }, maxSpins);
+            if (wait == CompletionWaitResult::Completed)
+                return m_lastCompletionCode == CompletionCode::Success;
+            if (wait == CompletionWaitResult::ClockStopped || wait == CompletionWaitResult::SpinLimit)
+                QC_LOG_WARN("xHCI", "Command wait stopped: %s",
+                            wait == CompletionWaitResult::ClockStopped ? "clock stopped" : "spin limit");
 
-            for (QC::u32 i = 0; i < timeoutMs * 10; ++i)
-            {
-                processEvents();
-                if (!m_commandPending)
-                {
-                    return m_lastCompletionCode == CompletionCode::Success;
-                }
-                for (int j = 0; j < 1000; ++j)
-                    cpu_relax();
-            }
-
-            QC_LOG_WARN("xHCI", "Command timeout");
+            QC_LOG_ERROR("xHCI", "Command timeout; disabling further commands on this controller");
             m_commandPending = false;
+            m_commandRingFailed = true;
             return false;
         }
 
@@ -1559,12 +1575,19 @@ namespace QKDrv
                 return "NoSlotsAvailable";
             case CompletionCode::ShortPacket:
                 return "ShortPacket";
+            case CompletionCode::ContextStateError:
+                return "ContextStateError";
             default:
                 return "Unknown";
             }
         }
         void XHCIControllerImpl::handleCommandComplete(const TRB &event)
         {
+            if (!commandCompletionMatches(m_commandPending, m_pendingCommandPhys, event))
+            {
+                QC_LOG_WARN("xHCI", "Ignoring unexpected command completion at 0x%lx", event.parameter);
+                return;
+            }
             m_lastCompletionCode = getCompletionCode(event);
             m_lastSlotId = getSlotId(event);
             m_commandPending = false;
@@ -1584,15 +1607,8 @@ namespace QKDrv
 
             QC_LOG_DEBUG("xHCI", "Transfer event: slot=%u ep=%u code=%u", slotId, epId, static_cast<QC::u8>(code));
 
-            // EP1 (DCI 1) is control endpoint 0 - signal completion for control transfers
-            if (epId == 1 && m_transferPending)
-            {
-                m_transferCompletionCode = code;
-                m_transferPending = false;
-                return;
-            }
-
-            if (m_transferPending && slotId == m_transferPendingSlot && epId == m_transferPendingEndpoint)
+            if (transferCompletionMatches(m_transferPending, m_transferPendingSlot,
+                                          m_transferPendingEndpoint, event))
             {
                 m_transferCompletionCode = code;
                 m_transferPending = false;
@@ -1603,7 +1619,8 @@ namespace QKDrv
             for (QC::usize i = 0; i < m_deviceCount; ++i)
             {
                 DeviceInfo &dev = m_devices[i];
-                if (dev.slotId == slotId && (dev.isTablet || dev.isMouse || dev.isKeyboard))
+                if (dev.slotId == slotId && epId == dev.hidEndpoint &&
+                    (dev.isTablet || dev.isMouse || dev.isKeyboard))
                 {
                     if (code == CompletionCode::Success || code == CompletionCode::ShortPacket)
                     {
@@ -1729,10 +1746,7 @@ namespace QKDrv
             TRB cmd = {};
             cmd.control = makeTRBControl(TRBType::EnableSlot, 0);
 
-            enqueueCommand(cmd);
-            ringCommandDoorbell();
-
-            if (waitForCommand())
+            if (submitCommand(cmd))
             {
                 QC_LOG_INFO("xHCI", "Slot %u enabled", m_lastSlotId);
                 return m_lastSlotId;
@@ -1742,6 +1756,11 @@ namespace QKDrv
 
         bool XHCIControllerImpl::addressDevice(QC::u8 slotId, QC::u8 port, Speed speed)
         {
+            if (m_commandRingFailed || slotId == 0 || slotId > MAX_DEVICES)
+            {
+                QC_LOG_ERROR("xHCI", "Cannot address invalid slot %u or use a failed command ring", slotId);
+                return false;
+            }
             // Allocate device context
             DMAPage devCtxPage = allocateDMAPage();
             m_deviceContexts[slotId] = reinterpret_cast<QC::u8 *>(devCtxPage.virt);
@@ -1792,10 +1811,7 @@ namespace QKDrv
             cmd.parameter = m_inputContextPhys;
             cmd.control = makeTRBControl(TRBType::AddressDevice, 0) | (slotId << 24);
 
-            enqueueCommand(cmd);
-            ringCommandDoorbell();
-
-            if (waitForCommand(500))
+            if (submitCommand(cmd, 5000))
             {
                 QC_LOG_INFO("xHCI", "Device addressed on slot %u", slotId);
                 return true;
@@ -1808,6 +1824,11 @@ namespace QKDrv
         bool XHCIControllerImpl::controlTransfer(QC::u8 slotId, QC::u8 reqType, QC::u8 request,
                                                  QC::u16 value, QC::u16 index, void *data, QC::u16 length)
         {
+            if (slotId == 0 || slotId > MAX_DEVICES || m_ep0Failed[slotId])
+            {
+                QC_LOG_ERROR("xHCI", "Control endpoint unavailable for slot %u", slotId);
+                return false;
+            }
             TRB *ring = m_ep0Rings[slotId];
             if (!ring)
             {
@@ -1888,31 +1909,31 @@ namespace QKDrv
             m_ep0Cycle[slotId] = cycle;
 
             m_transferPending = true;
+            m_transferPendingSlot = slotId;
+            m_transferPendingEndpoint = 1;
             m_transferCompletionCode = CompletionCode::Invalid;
 
             ringDoorbell(slotId, 1);
 
-            for (int i = 0; i < 5000 && m_transferPending; ++i)
+            const bool useClock = QK::Time::available() && QArch::CPU::instance().interruptsEnabled();
+            const CompletionWaitResult wait = waitForCompletion(
+                m_transferPending, 5000, useClock, [&]() { processEvents(); },
+                []() { return QK::Time::milliseconds(); }, []() { cpu_relax(); },
+                useClock ? 10000000 : 5000000);
+            if (wait != CompletionWaitResult::Completed)
             {
-                processEvents();
-                for (int j = 0; j < 1000; ++j)
-                    cpu_relax();
-            }
-
-            if (m_transferPending)
-            {
-                QC_LOG_WARN("xHCI", "Control transfer timeout");
+                QC_LOG_WARN("xHCI", "Control transfer stopped: %s",
+                            wait == CompletionWaitResult::Timeout ? "timeout" :
+                            wait == CompletionWaitResult::ClockStopped ? "clock stopped" : "spin limit");
                 m_transferPending = false;
+                m_ep0Failed[slotId] = true;
                 return false;
-            }
-
-            if (length > 0 && data && (reqType & 0x80))
-            {
-                QC::String::memcpy(data, dmaBuffer.virt, length);
             }
 
             bool success = (m_transferCompletionCode == CompletionCode::Success ||
                             m_transferCompletionCode == CompletionCode::ShortPacket);
+            if (success && length > 0 && data && (reqType & 0x80))
+                QC::String::memcpy(data, dmaBuffer.virt, length);
             if (!success)
             {
                     QC_LOG_WARN("xHCI", "Control transfer failed: code=%u (%s) reqType=0x%02x req=0x%02x value=0x%04x index=0x%04x len=%u",
@@ -2022,6 +2043,11 @@ namespace QKDrv
 
         bool XHCIControllerImpl::configureEndpoint(QC::u8 slotId, const USBEndpointDescriptor &ep)
         {
+            if (m_commandRingFailed)
+            {
+                QC_LOG_ERROR("xHCI", "Cannot configure endpoint: command ring unavailable");
+                return false;
+            }
             // Determine endpoint index (DCI)
             QC::u8 epNum = ep.bEndpointAddress & 0x0F;
             bool isIn = (ep.bEndpointAddress & 0x80) != 0;
@@ -2075,10 +2101,7 @@ namespace QKDrv
             cmd.parameter = m_inputContextPhys;
             cmd.control = makeTRBControl(TRBType::ConfigureEndpoint, 0) | (slotId << 24);
 
-            enqueueCommand(cmd);
-            ringCommandDoorbell();
-
-            if (waitForCommand(500))
+            if (submitCommand(cmd, 500))
             {
                 QC_LOG_INFO("xHCI", "Endpoint %u configured for slot %u", dci, slotId);
 
@@ -2177,6 +2200,11 @@ namespace QKDrv
 
             for (QC::u8 port = 0; port < m_portCount; ++port)
             {
+                if (m_commandRingFailed)
+                {
+                    QC_LOG_ERROR("xHCI", "Stopping port probing after command timeout");
+                    break;
+                }
                 if (isPortConnected(port))
                 {
                     enumerateDevice(port);
@@ -2236,6 +2264,9 @@ namespace QKDrv
                                  USB_DESC_DEVICE << 8, 0, &devDesc, sizeof(devDesc)))
             {
                 QC_LOG_WARN("xHCI", "Failed to get device descriptor");
+                if (port < 32)
+                    m_portEnumerating[port] = false;
+                return false;
             }
 
             QC_LOG_INFO("xHCI", "Device: VID=%04x PID=%04x Class=%02x",
@@ -2247,6 +2278,9 @@ namespace QKDrv
                                  USB_DESC_CONFIG << 8, 0, configData, sizeof(configData)))
             {
                 QC_LOG_WARN("xHCI", "Failed to get config descriptor");
+                if (port < 32)
+                    m_portEnumerating[port] = false;
+                return false;
             }
 
             // Create device entry FIRST so identifyHID/configureEndpoint can find it
@@ -2423,20 +2457,32 @@ namespace QKDrv
                 }
 
                 // Set configuration
-                setConfiguration(slotId, config->bConfigurationValue);
+                if (!setConfiguration(slotId, config->bConfigurationValue))
+                {
+                    QC_LOG_WARN("xHCI", "Failed to configure HID device on slot %u", slotId);
+                    return HIDDeviceKind::None;
+                }
 
                 // Ensure the device is in an expected protocol mode.
                 // Boot protocol is only valid for boot mouse/keyboard; tablets/other HID pointers
                 // should remain in report protocol.
                 if (isBootMouse || isBootKeyboard)
                 {
-                    setHIDProtocol(slotId, hidIface->bInterfaceNumber, 0);
+                    if (!setHIDProtocol(slotId, hidIface->bInterfaceNumber, 0))
+                    {
+                        QC_LOG_WARN("xHCI", "Failed to set HID boot protocol on slot %u", slotId);
+                        return HIDDeviceKind::None;
+                    }
                 }
 
                 // Non-boot HID devices commonly STALL SET_PROTOCOL; leave them as-is.
 
                 // Configure the interrupt endpoint
-                configureEndpoint(slotId, *hidEp);
+                if (!configureEndpoint(slotId, *hidEp))
+                {
+                    QC_LOG_WARN("xHCI", "Failed to configure HID endpoint on slot %u", slotId);
+                    return HIDDeviceKind::None;
+                }
 
                 // Note: scheduleInterruptIn is called from enumerateDevice after device is added
 
@@ -2534,7 +2580,11 @@ namespace QKDrv
                 return false;
             }
 
-            setConfiguration(slotId, config->bConfigurationValue);
+            if (!setConfiguration(slotId, config->bConfigurationValue))
+            {
+                QC_LOG_WARN("xHCI", "Failed to configure USB mass-storage device on slot %u", slotId);
+                return false;
+            }
             if (!configureEndpoint(slotId, *bulkInEp) || !configureEndpoint(slotId, *bulkOutEp))
             {
                 QC_LOG_WARN("xHCI", "Failed to configure USB mass-storage endpoints on slot %u", slotId);

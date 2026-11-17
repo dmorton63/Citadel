@@ -304,6 +304,7 @@ namespace QKDrv
 
             void ringCommandDoorbell();
             TRB *enqueueCommand(const TRB &trb);
+            bool submitCommand(const TRB &trb, QC::u32 timeoutMs = 100);
             bool waitForCommand(QC::u32 timeoutMs = 100);
 
             QC::u8 enableSlot();
@@ -368,6 +369,7 @@ namespace QKDrv
             QC::u64 *m_dcbaa;
 
             TRB *m_commandRing;
+            QC::PhysAddr m_commandRingPhys;
             QC::usize m_commandEnqueue;
             bool m_commandCycle;
 
@@ -396,6 +398,8 @@ namespace QKDrv
             QC::u8 m_mouseSlot;
             QC::u8 m_keyboardSlot;
             bool m_commandPending;
+            bool m_commandRingFailed;
+            QC::PhysAddr m_pendingCommandPhys;
             CompletionCode m_lastCompletionCode;
             QC::u8 m_lastSlotId;
 
@@ -403,6 +407,7 @@ namespace QKDrv
             QC::u8 m_transferPendingSlot;
             QC::u8 m_transferPendingEndpoint;
             CompletionCode m_transferCompletionCode;
+            bool m_ep0Failed[MAX_DEVICES + 1];
 
             MouseCallback m_mouseCallback;
             QC::u32 m_screenWidth;
