@@ -300,7 +300,7 @@ namespace QKDrv
             void reset();
             bool isPortConnected(QC::u8 port) const;
             Speed getPortSpeed(QC::u8 port) const;
-            void resetPort(QC::u8 port);
+            bool resetPort(QC::u8 port);
 
             void ringCommandDoorbell();
             TRB *enqueueCommand(const TRB &trb);

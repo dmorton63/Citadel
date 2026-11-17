@@ -92,5 +92,62 @@ namespace QKDrv
             // Preserve power, indicators, and wake enables, not write-one actions.
             return portsc & (PORTSC_PP | (3u << 14) | (7u << 25));
         }
+
+        constexpr bool portReadyAfterReset(QC::u32 portsc)
+        {
+            const QC::u32 speed = (portsc & PORTSC_SPEED_MASK) >> 10;
+            return (portsc & (PORTSC_CCS | PORTSC_PED | PORTSC_PR)) ==
+                       (PORTSC_CCS | PORTSC_PED) &&
+                   speed >= 1 && speed <= 5;
+        }
+
+        enum class PortWaitPhase
+        {
+            Debounce,
+            Reset,
+            Recovery
+        };
+
+        enum class PortWaitResult
+        {
+            Success,
+            Disconnected,
+            NotReady,
+            Timeout,
+            ClockStopped
+        };
+
+        template <typename ReadStatus, typename NowMs, typename Relax>
+        PortWaitResult waitForPort(PortWaitPhase phase, ReadStatus readStatus, NowMs nowMs,
+                                   Relax relax, QC::u32 maxStalledSpins)
+        {
+            const QC::u32 durationMs = phase == PortWaitPhase::Debounce ? 100 :
+                                       phase == PortWaitPhase::Reset ? 1000 : 10;
+            const QC::u64 start = nowMs();
+            QC::u64 last = start;
+            QC::u32 stalled = 0;
+            while (true)
+            {
+                const QC::u32 status = readStatus();
+                if (!(status & PORTSC_CCS))
+                    return PortWaitResult::Disconnected;
+                if (phase == PortWaitPhase::Recovery && !portReadyAfterReset(status))
+                    return PortWaitResult::NotReady;
+                if (phase == PortWaitPhase::Reset && portReadyAfterReset(status))
+                    return PortWaitResult::Success;
+
+                const QC::u64 now = nowMs();
+                if (now - start >= durationMs)
+                    return phase == PortWaitPhase::Reset ? PortWaitResult::Timeout : PortWaitResult::Success;
+                if (now != last)
+                {
+                    last = now;
+                    stalled = 0;
+                }
+                else if (++stalled >= maxStalledSpins)
+                    return PortWaitResult::ClockStopped;
+                relax();
+            }
+        }
     }
 } // namespace QKDrv

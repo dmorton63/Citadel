@@ -5,6 +5,7 @@
 #include "QArchCPU.h"
 #include "QKMemHeap.h"
 #include "QKMemTranslator.h"
+#include "QKTime.h"
 #include "QCLogger.h"
 #include "QCString.h"
 #include "QKInputSettings.h"
@@ -2200,7 +2201,12 @@ namespace QKDrv
             QC_LOG_INFO("xHCI", "Enumerating device on port %u", port);
 
             // Reset port
-            resetPort(port);
+            if (!resetPort(port))
+            {
+                if (port < 32)
+                    m_portEnumerating[port] = false;
+                return false;
+            }
 
             // Get speed
             Speed speed = getPortSpeed(port);
@@ -2973,26 +2979,66 @@ namespace QKDrv
             }
         }
 
-        void XHCIControllerImpl::resetPort(QC::u8 port)
+        static const char *portWaitResultName(PortWaitResult result)
         {
-            if (port >= m_portCount)
-                return;
+            switch (result)
+            {
+            case PortWaitResult::Success: return "success";
+            case PortWaitResult::Disconnected: return "disconnected";
+            case PortWaitResult::NotReady: return "not ready";
+            case PortWaitResult::Timeout: return "timeout";
+            case PortWaitResult::ClockStopped: return "clock stopped";
+            }
+            return "unknown";
+        }
+
+        bool XHCIControllerImpl::resetPort(QC::u8 port)
+        {
+            if (port >= m_portCount || !QK::Time::available())
+            {
+                QC_LOG_ERROR("xHCI", "Cannot reset port %u: invalid port or timer unavailable", port);
+                return false;
+            }
+
+            // The clock is driven by interrupts; fail rather than hang if it stops.
+            constexpr QC::u32 maxStalledSpins = 10000000;
+            auto waitForPhase = [&](PortWaitPhase phase) -> PortWaitResult
+            {
+                return waitForPort(phase, [&]() { return m_portRegs[port].portsc; },
+                                   []() { return QK::Time::milliseconds(); },
+                                   []() { cpu_relax(); }, maxStalledSpins);
+            };
+
+            QC_LOG_INFO("xHCI", "Port %u before reset: PORTSC=%08x", port, m_portRegs[port].portsc);
+            PortWaitResult result = waitForPhase(PortWaitPhase::Debounce);
+            if (result != PortWaitResult::Success)
+            {
+                QC_LOG_WARN("xHCI", "Port %u debounce failed: %s PORTSC=%08x",
+                            port, portWaitResultName(result), m_portRegs[port].portsc);
+                return false;
+            }
 
             // Assert reset
             m_portRegs[port].portsc = portscWriteBase(m_portRegs[port].portsc) | PORTSC_PR;
-
-            // Wait for reset to complete
-            for (int i = 0; i < 100; ++i)
+            result = waitForPhase(PortWaitPhase::Reset);
+            if (result != PortWaitResult::Success)
             {
-                if (!(m_portRegs[port].portsc & PORTSC_PR))
-                    break;
-                for (int j = 0; j < 10000; ++j)
-                    cpu_relax();
+                QC_LOG_WARN("xHCI", "Port %u reset failed: %s PORTSC=%08x",
+                            port, portWaitResultName(result), m_portRegs[port].portsc);
+                return false;
             }
 
-            // Clear status change bits
+            // Clear reset completion and allow the device to recover before addressing it.
             m_portRegs[port].portsc = portscWriteBase(m_portRegs[port].portsc) | PORTSC_PRC;
             QC_LOG_INFO("xHCI", "Port %u after reset: PORTSC=%08x", port, m_portRegs[port].portsc);
+            result = waitForPhase(PortWaitPhase::Recovery);
+            if (result != PortWaitResult::Success)
+            {
+                QC_LOG_WARN("xHCI", "Port %u reset recovery failed: %s PORTSC=%08x",
+                            port, portWaitResultName(result), m_portRegs[port].portsc);
+                return false;
+            }
+            return true;
         }
 
         void XHCIControllerImpl::ringDoorbell(QC::u8 slot, QC::u8 target)

@@ -40,5 +40,54 @@ int main()
     assert(!(duringReset & (PORTSC_PR | PORTSC_PED)));
     assert(applyPortWrite(pending, duringReset) == (connected | PORTSC_PRC));
 
+    assert(portReadyAfterReset(connected));
+    assert(!portReadyAfterReset(connected & ~PORTSC_CCS));
+    assert(!portReadyAfterReset(connected & ~PORTSC_PED));
+    assert(!portReadyAfterReset(connected | PORTSC_PR));
+    assert(!portReadyAfterReset(connected & ~PORTSC_SPEED_MASK));
+    assert(!portReadyAfterReset((connected & ~PORTSC_SPEED_MASK) | (6u << 10)));
+
+    QC::u64 now = 0;
+    QC::u32 status = connected;
+    auto readStatus = [&]() { return status; };
+    auto clock = [&]() { return now; };
+    auto advance = [&]() { ++now; };
+    auto wait = [&](PortWaitPhase phase)
+    { return waitForPort(phase, readStatus, clock, advance, 20); };
+
+    assert(wait(PortWaitPhase::Debounce) == PortWaitResult::Success && now == 100);
+    status = connected & ~PORTSC_PED;
+    assert(wait(PortWaitPhase::Reset) == PortWaitResult::Timeout && now == 1100);
+    now = 0;
+    auto becomeReady = [&]()
+    {
+        if (++now == 999)
+            status = connected;
+    };
+    assert(waitForPort(PortWaitPhase::Reset, readStatus, clock, becomeReady, 20) == PortWaitResult::Success);
+    assert(now == 999);
+    assert(wait(PortWaitPhase::Recovery) == PortWaitResult::Success && now == 1009);
+    now = 0;
+    auto loseReady = [&]()
+    {
+        if (++now == 5)
+            status &= ~PORTSC_PED;
+    };
+    assert(waitForPort(PortWaitPhase::Recovery, readStatus, clock, loseReady, 20) == PortWaitResult::NotReady);
+    status &= ~PORTSC_PED;
+    assert(wait(PortWaitPhase::Recovery) == PortWaitResult::NotReady);
+    status = 0;
+    assert(wait(PortWaitPhase::Debounce) == PortWaitResult::Disconnected);
+    status = connected;
+    now = 0;
+    auto disconnect = [&]()
+    {
+        if (++now == 50)
+            status = 0;
+    };
+    assert(waitForPort(PortWaitPhase::Debounce, readStatus, clock, disconnect, 20) == PortWaitResult::Disconnected);
+    status = connected;
+    assert(waitForPort(PortWaitPhase::Debounce, readStatus, clock, []() {}, 20) == PortWaitResult::ClockStopped);
+
     std::cout << "xHCI port register tests passed\n";
 }

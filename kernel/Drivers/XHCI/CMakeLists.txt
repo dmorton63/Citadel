@@ -7,4 +7,5 @@ target_include_directories(QKDrvXHCI PUBLIC
     ${PROJECT_SOURCE_DIR}/QFileSystem/Include
 )
 target_link_libraries(QKDrvXHCI PUBLIC QCommon QArch QKMemory)
+target_link_libraries(QKDrvXHCI PRIVATE QKernel)
 target_compile_options(QKDrvXHCI PRIVATE ${KERNEL_COMPILE_FLAGS})
