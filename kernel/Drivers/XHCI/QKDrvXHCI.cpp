@@ -976,10 +976,12 @@ namespace QKDrv
                         m_portCount, m_maxSlots, m_contextSize);
 
             // Take ownership from BIOS
-            takeOwnership();
+            if (!takeOwnership())
+                return QC::Status::Error;
 
             // Halt and reset controller
-            reset();
+            if (!reset())
+                return QC::Status::Error;
 
             // Initialize data structures
             initializeDCBAA();
@@ -1007,18 +1009,8 @@ namespace QKDrv
             // Start controller
             m_opRegs->usbcmd |= CMD_RUN | CMD_INTE;
 
-            // Wait for controller to start
-            for (int i = 0; i < 100 && (m_opRegs->usbsts & STS_HCH); ++i)
-            {
-                for (int j = 0; j < 10000; ++j)
-                    cpu_relax();
-            }
-
-            if (m_opRegs->usbsts & STS_HCH)
-            {
-                QC_LOG_ERROR("xHCI", "XHCIControllerImpl failed to start");
+            if (!waitForRegister("controller start", [&]() { return m_opRegs->usbsts; }, STS_HCH, 0, 100))
                 return QC::Status::Error;
-            }
 
             QC_LOG_INFO("xHCI", "xHCI controller running");
 
@@ -1042,12 +1034,33 @@ namespace QKDrv
             QC_LOG_INFO("xHCI", "xHCI controller shutdown");
         }
 
-        void XHCIControllerImpl::takeOwnership()
+        template <typename ReadRegister>
+        bool XHCIControllerImpl::waitForRegister(const char *phase, ReadRegister readRegister,
+                                               QC::u32 mask, QC::u32 expected, QC::u32 timeoutMs)
+        {
+            bool pending = true;
+            const bool useClock = QK::Time::available() && QArch::CPU::instance().interruptsEnabled();
+            const CompletionWaitResult result = waitForCompletion(
+                pending, timeoutMs, useClock,
+                [&]() { pending = (readRegister() & mask) != expected; },
+                []() { return QK::Time::milliseconds(); }, []() { cpu_relax(); },
+                useClock ? 10000000 : timeoutMs * 10000);
+            if (result != CompletionWaitResult::Completed)
+            {
+                QC_LOG_ERROR("xHCI", "%s failed: wait=%u register=%08x mask=%08x expected=%08x",
+                             phase, static_cast<QC::u32>(result), readRegister(), mask, expected);
+                return false;
+            }
+            QC_LOG_INFO("xHCI", "%s complete", phase);
+            return true;
+        }
+
+        bool XHCIControllerImpl::takeOwnership()
         {
             // Find legacy support extended capability
             QC::u32 xecp = (m_capRegs->hccParams1 >> 16) & 0xFFFF;
             if (xecp == 0)
-                return;
+                return true;
 
             volatile QC::u32 *cap = reinterpret_cast<volatile QC::u32 *>(m_mmioBase + (xecp << 2));
 
@@ -1058,30 +1071,8 @@ namespace QKDrv
 
                 if (capId == XCAP_LEGACY)
                 {
-                    // Request ownership from BIOS
-                    if (capVal & (1 << 16))
-                    {                              // BIOS owns
-                        *cap = capVal | (1 << 24); // Request OS ownership
-
-                        // Wait for BIOS to release
-                        for (int i = 0; i < 1000; ++i)
-                        {
-                            if (!(*cap & (1 << 16)))
-                                break;
-                            for (int j = 0; j < 10000; ++j)
-                                cpu_relax();
-                        }
-
-                        if (*cap & (1 << 16))
-                        {
-                            QC_LOG_WARN("xHCI", "BIOS did not release ownership");
-                        }
-                        else
-                        {
-                            QC_LOG_INFO("xHCI", "Took ownership from BIOS");
-                        }
-                    }
-                    break;
+                    *cap = capVal | (1 << 24);
+                    return waitForRegister("BIOS handoff", [&]() { return *cap; }, 1 << 16, 0, 1000);
                 }
 
                 // Move to next capability
@@ -1091,6 +1082,7 @@ namespace QKDrv
                 cap = reinterpret_cast<volatile QC::u32 *>(
                     reinterpret_cast<QC::VirtAddr>(cap) + (next << 2));
             }
+            return true;
         }
 
         void XHCIControllerImpl::hardwareReset()
@@ -1098,32 +1090,27 @@ namespace QKDrv
             reset();
         }
 
-        void XHCIControllerImpl::reset()
+        bool XHCIControllerImpl::reset()
         {
+            if (!waitForRegister("initial controller ready", [&]() { return m_opRegs->usbsts; }, STS_CNR, 0, 1000))
+                return false;
+
             // Halt first
             m_opRegs->usbcmd &= ~CMD_RUN;
-            for (int i = 0; i < 100 && !(m_opRegs->usbsts & STS_HCH); ++i)
-            {
-                for (int j = 0; j < 10000; ++j)
-                    cpu_relax();
-            }
+            if (!waitForRegister("controller halt", [&]() { return m_opRegs->usbsts; }, STS_HCH, STS_HCH, 100))
+                return false;
 
             // Reset
             m_opRegs->usbcmd |= CMD_HCRST;
-            for (int i = 0; i < 1000 && (m_opRegs->usbcmd & CMD_HCRST); ++i)
-            {
-                for (int j = 0; j < 10000; ++j)
-                    cpu_relax();
-            }
+            if (!waitForRegister("controller reset", [&]() { return m_opRegs->usbcmd; }, CMD_HCRST, 0, 1000))
+                return false;
 
             // Wait for CNR to clear
-            for (int i = 0; i < 1000 && (m_opRegs->usbsts & STS_CNR); ++i)
-            {
-                for (int j = 0; j < 10000; ++j)
-                    cpu_relax();
-            }
+            if (!waitForRegister("controller ready", [&]() { return m_opRegs->usbsts; }, STS_CNR, 0, 1000))
+                return false;
 
             QC_LOG_INFO("xHCI", "XHCIControllerImpl reset complete");
+            return true;
         }
 
         void XHCIControllerImpl::initializeDCBAA()

@@ -330,6 +330,7 @@ Citadel is used primarily under QEMU for bring-up; these are the common devices 
 - xHCI command completions are matched to the submitted ring entry; after a timeout, further commands on that controller are stopped rather than reusing its input context. Enumeration stops on descriptor failures instead of reusing stale data.
 - Composite USB HID devices prefer a boot-keyboard interface, then a boot-mouse interface, over vendor/report-only interfaces. Interface, HID descriptor, and interrupt endpoint selection stays grouped; diagnostics report the selected interface and endpoint.
 - USB control requests without data (including `SET_CONFIGURATION` and HID `SET_PROTOCOL`) use an IN status stage. Hardware configuration timeouts include the slot and USB request fields.
+- xHCI BIOS handoff, halt, reset, controller-ready, and start waits use bounded deadlines and checked register transitions rather than CPU-speed-dependent spin counts; initialization stops if a phase fails. Controller readiness is checked before issuing halt/reset as well as afterward.
 - USB:
   - UHCI (USB 1.1) controller: supported
   - XHCI (USB 3.x) controller: supported

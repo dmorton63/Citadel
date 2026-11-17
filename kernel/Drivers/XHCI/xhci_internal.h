@@ -292,12 +292,15 @@ namespace QKDrv
             friend class USBMassStorageBlockDevice;
 
         private:
-            void takeOwnership();
+            bool takeOwnership();
             void initializeEventRing();
             void initializeCommandRing();
             void initializeDCBAA();
             void initializeScratchpad();
-            void reset();
+            bool reset();
+            template <typename ReadRegister>
+            bool waitForRegister(const char *phase, ReadRegister readRegister,
+                                 QC::u32 mask, QC::u32 expected, QC::u32 timeoutMs);
             bool isPortConnected(QC::u8 port) const;
             Speed getPortSpeed(QC::u8 port) const;
             bool resetPort(QC::u8 port);
