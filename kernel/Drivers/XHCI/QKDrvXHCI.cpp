@@ -2,6 +2,7 @@
 // Namespace: QKDrv::XHCI
 
 #include "xhci_internal.h"
+#include "xhci_hid.h"
 #include "QArchCPU.h"
 #include "QKMemHeap.h"
 #include "QKMemTranslator.h"
@@ -89,11 +90,9 @@ namespace QKDrv
         constexpr QC::u8 USB_DESC_CONFIG = 2;
         constexpr QC::u8 USB_DESC_INTERFACE = 4;
         constexpr QC::u8 USB_DESC_ENDPOINT = 5;
-        constexpr QC::u8 USB_DESC_HID = 0x21;
         constexpr QC::u8 USB_DESC_HID_REPORT = 0x22;
 
         // USB class codes
-        constexpr QC::u8 USB_CLASS_HID = 0x03;
         constexpr QC::u8 USB_CLASS_MASS_STORAGE = 0x08;
         constexpr QC::u8 USB_SUBCLASS_SCSI = 0x06;
         constexpr QC::u8 USB_PROTOCOL_BULK_ONLY = 0x50;
@@ -2377,58 +2376,21 @@ namespace QKDrv
             if (totalLen > length)
                 totalLen = length;
 
-            // Parse descriptors
-            QC::u16 offset = config->bLength;
-            USBInterfaceDescriptor *hidIface = nullptr;
-            USBEndpointDescriptor *hidEp = nullptr;
-            USBHIDDescriptor *hidDesc = nullptr;
-
-            while (offset + 2 <= totalLen)
+            HIDInterfaceSelection selection{};
+            if (!selectHIDInterface(configData, totalLen, selection))
             {
-                QC::u8 descLen = configData[offset];
-                QC::u8 descType = configData[offset + 1];
-
-                if (descLen == 0)
-                    break;
-
-                if (descType == USB_DESC_INTERFACE)
-                {
-                    USBInterfaceDescriptor *iface = reinterpret_cast<USBInterfaceDescriptor *>(
-                        const_cast<QC::u8 *>(&configData[offset]));
-
-                    if (iface->bInterfaceClass == USB_CLASS_HID)
-                    {
-                        QC_LOG_INFO("xHCI", "Found HID interface: subclass=%u protocol=%u",
-                                    iface->bInterfaceSubClass, iface->bInterfaceProtocol);
-                        hidIface = iface;
-                    }
-                }
-                else if (descType == USB_DESC_ENDPOINT && hidIface)
-                {
-                    USBEndpointDescriptor *ep = reinterpret_cast<USBEndpointDescriptor *>(
-                        const_cast<QC::u8 *>(&configData[offset]));
-
-                    // Look for interrupt IN endpoint
-                    if ((ep->bmAttributes & 0x03) == 0x03 && (ep->bEndpointAddress & 0x80))
-                    {
-                        hidEp = ep;
-                        QC_LOG_INFO("xHCI", "Found interrupt IN endpoint: addr=%02x maxPacket=%u",
-                                    ep->bEndpointAddress, ep->wMaxPacketSize);
-                    }
-                }
-                else if (descType == USB_DESC_HID && hidIface)
-                {
-                    hidDesc = reinterpret_cast<USBHIDDescriptor *>(
-                        const_cast<QC::u8 *>(&configData[offset]));
-                    QC_LOG_INFO("xHCI", "Found HID descriptor: reportLen=%u",
-                                hidDesc->wDescriptorLength);
-                }
-
-                offset += descLen;
+                QC_LOG_WARN("xHCI", "Malformed or truncated HID configuration on slot %u", slotId);
+                return HIDDeviceKind::None;
             }
+            const auto *hidIface = reinterpret_cast<const USBInterfaceDescriptor *>(selection.interface);
+            const auto *hidEp = reinterpret_cast<const USBEndpointDescriptor *>(selection.endpoint);
+            const auto *hidDesc = reinterpret_cast<const USBHIDDescriptor *>(selection.hid);
 
             if (hidIface && hidEp)
             {
+                QC_LOG_INFO("xHCI", "Selected HID interface %u: subclass=%u protocol=%u endpoint=%02x",
+                            hidIface->bInterfaceNumber, hidIface->bInterfaceSubClass,
+                            hidIface->bInterfaceProtocol, hidEp->bEndpointAddress);
                 const bool isBootMouse = (hidIface->bInterfaceSubClass == USB_SUBCLASS_BOOT) &&
                                          (hidIface->bInterfaceProtocol == USB_PROTOCOL_MOUSE);
                 const bool isBootKeyboard = (hidIface->bInterfaceSubClass == USB_SUBCLASS_BOOT) &&

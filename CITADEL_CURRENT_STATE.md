@@ -328,6 +328,7 @@ Citadel is used primarily under QEMU for bring-up; these are the common devices 
 - **CITADEL (Boot Diagnostics, SMP Off)** disables AP startup/timers/scheduling only for that diagnostic boot, to compare hardware bring-up with SMP active.
 - Hardware diagnostics exposed USB transaction errors during xHCI device addressing. Port reset/event acknowledgements preserve port enablement instead of writing back the write-one-to-disable bit. Connected ports are debounced and must complete reset with a valid speed and enabled state before device addressing; diagnostics show `PORTSC` before and after reset. Real-hardware keyboard recovery still needs confirmation.
 - xHCI command completions are matched to the submitted ring entry; after a timeout, further commands on that controller are stopped rather than reusing its input context. Enumeration stops on descriptor failures instead of reusing stale data.
+- Composite USB HID devices prefer a boot-keyboard interface, then a boot-mouse interface, over vendor/report-only interfaces. Interface, HID descriptor, and interrupt endpoint selection stays grouped; diagnostics report the selected interface and endpoint.
 - USB:
   - UHCI (USB 1.1) controller: supported
   - XHCI (USB 3.x) controller: supported
