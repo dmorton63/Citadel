@@ -77,6 +77,15 @@ namespace QKDrv
             return (static_cast<QC::u32>(type) << 10) | flags;
         }
 
+        inline QC::u32 makeControlStatusTRB(QC::u8 requestType, QC::u16 length, bool cycle)
+        {
+            QC::u32 flags = TRB_IOC | (cycle ? TRB_CYCLE : 0);
+            // No-data requests always have an IN status stage; otherwise oppose the data stage.
+            if (length == 0 || !(requestType & 0x80))
+                flags |= TRB_DIR_IN;
+            return makeTRBControl(TRBType::StatusStage, flags);
+        }
+
         inline TRBType getTRBType(const TRB &trb)
         {
             return static_cast<TRBType>((trb.control >> 10) & 0x3F);

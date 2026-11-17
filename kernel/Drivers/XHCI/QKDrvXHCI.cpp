@@ -1896,12 +1896,7 @@ namespace QKDrv
 
             ring[idx].parameter = 0;
             ring[idx].status = 0;
-            QC::u32 statusCtrl = makeTRBControl(TRBType::StatusStage, TRB_IOC | (cycle ? TRB_CYCLE : 0));
-            if (length > 0 && !(reqType & 0x80))
-            {
-                statusCtrl |= TRB_DIR_IN;
-            }
-            ring[idx].control = statusCtrl;
+            ring[idx].control = makeControlStatusTRB(reqType, length, cycle);
             advance();
 
             m_ep0Enqueue[slotId] = idx;
@@ -1921,9 +1916,11 @@ namespace QKDrv
                 useClock ? 10000000 : 5000000);
             if (wait != CompletionWaitResult::Completed)
             {
-                QC_LOG_WARN("xHCI", "Control transfer stopped: %s",
+                QC_LOG_WARN("xHCI", "Control transfer stopped: %s slot=%u reqType=%02x req=%02x value=%04x index=%04x len=%u",
                             wait == CompletionWaitResult::Timeout ? "timeout" :
-                            wait == CompletionWaitResult::ClockStopped ? "clock stopped" : "spin limit");
+                            wait == CompletionWaitResult::ClockStopped ? "clock stopped" : "spin limit",
+                            slotId, reqType, request, static_cast<unsigned>(value),
+                            static_cast<unsigned>(index), static_cast<unsigned>(length));
                 m_transferPending = false;
                 m_ep0Failed[slotId] = true;
                 return false;

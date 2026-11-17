@@ -7,6 +7,16 @@ using namespace QKDrv::XHCI;
 
 int main()
 {
+    // SET_CONFIGURATION and HID SET_PROTOCOL have no data stage.
+    const QC::u32 setConfigStatus = makeControlStatusTRB(0x00, 0, true);
+    const QC::u32 setProtocolStatus = makeControlStatusTRB(0x21, 0, false);
+    assert(setConfigStatus == makeTRBControl(TRBType::StatusStage, TRB_IOC | TRB_CYCLE | TRB_DIR_IN));
+    assert(setProtocolStatus == makeTRBControl(TRBType::StatusStage, TRB_IOC | TRB_DIR_IN));
+    assert(makeControlStatusTRB(0x80, 0, false) & TRB_DIR_IN);
+    // GET_DESCRIPTOR reads data, whereas a control write sends data.
+    assert(!(makeControlStatusTRB(0x80, 18, true) & TRB_DIR_IN));
+    assert(makeControlStatusTRB(0x21, 8, true) & TRB_DIR_IN);
+
     TRB event{};
     event.parameter = 0x1010;
     assert(commandCompletionMatches(true, 0x1010, event));
