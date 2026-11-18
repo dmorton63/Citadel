@@ -4,6 +4,7 @@
 
 #include "QCSha256.h"
 #include "QCString.h"
+#include "QCLogger.h"
 
 namespace QSC
 {
@@ -677,10 +678,15 @@ namespace QSC
 
     QC::Status SecurityCenter::loadOrProvisionSst(bool allowCreate)
     {
+        const auto fail = [](const char *stage, QC::Status status)
+        {
+            QC_LOG_ERROR("SST", "stage=%s status=%d", stage, static_cast<QC::i32>(status));
+            return status;
+        };
         if (!m_sstStorage.readWrappedSst || !m_sstStorage.writeWrappedSst)
-            return QC::Status::Error;
+            return fail("storage-provider", QC::Status::Error);
         if (!m_randProvider.fillRandom)
-            return QC::Status::Error;
+            return fail("random-provider", QC::Status::Error);
 
         WrappedSstV1 wrapped;
         QC::usize got = 0;
@@ -688,7 +694,7 @@ namespace QSC
         if (st == QC::Status::NotFound)
         {
             if (!allowCreate)
-                return QC::Status::NotFound;
+                return fail("read-missing", QC::Status::NotFound);
 
             // Provision first SST.
             QC::u8 sst[32];
@@ -696,7 +702,7 @@ namespace QSC
             if (st != QC::Status::Success && st != QC::Status::Busy)
             {
                 secureZero(sst, sizeof(sst));
-                return st;
+                return fail("provision-random", st);
             }
 
             SrkKey srk;
@@ -704,6 +710,8 @@ namespace QSC
             if (st != QC::Status::Success || srk.size != 32)
             {
                 secureZero(sst, sizeof(sst));
+                fail(st != QC::Status::Success ? "provision-root-key" : "provision-root-key-size",
+                     st != QC::Status::Success ? st : QC::Status::Error);
                 return QC::Status::Error;
             }
 
@@ -715,7 +723,7 @@ namespace QSC
             if (st != QC::Status::Success && st != QC::Status::Busy)
             {
                 secureZero(sst, sizeof(sst));
-                return st;
+                return fail("provision-nonce", st);
             }
 
             QC::String::memcpy(wrapped.cipher, sst, sizeof(sst));
@@ -742,7 +750,7 @@ namespace QSC
             {
                 secureZero(sst, sizeof(sst));
                 secureZero(&wrapped, sizeof(wrapped));
-                return st;
+                return fail("write-wrapped", st);
             }
 
             QC::String::memcpy(m_sstBytes, sst, sizeof(m_sstBytes));
@@ -755,17 +763,21 @@ namespace QSC
         }
 
         if (st != QC::Status::Success)
-            return st;
+            return fail("read-wrapped", st);
         if (got != sizeof(WrappedSstV1))
-            return QC::Status::Error;
+            return fail("wrapped-size", QC::Status::Error);
 
         if (wrapped.magic != kWrappedSstMagic || wrapped.version != kWrappedSstVersion)
-            return QC::Status::Error;
+            return fail("wrapped-header", QC::Status::Error);
 
         SrkKey srk;
         st = getSrk(srk);
         if (st != QC::Status::Success || srk.size != 32)
+        {
+            fail(st != QC::Status::Success ? "load-root-key" : "load-root-key-size",
+                 st != QC::Status::Success ? st : QC::Status::Error);
             return QC::Status::Error;
+        }
 
         // Verify tag
         QC::u8 polyKeyBlock[64];
@@ -789,7 +801,7 @@ namespace QSC
         if (!constTimeEq(tagCalc, wrapped.tag, sizeof(tagCalc)))
         {
             secureZero(tagCalc, sizeof(tagCalc));
-            return QC::Status::Error;
+            return fail("verify-tag", QC::Status::Error);
         }
         secureZero(tagCalc, sizeof(tagCalc));
 

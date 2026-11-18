@@ -171,6 +171,8 @@ See: [CITADEL_UI_RUNTIME.md](CITADEL_UI_RUNTIME.md).
 ### SecureStore + bootstrapping (machine anchor)
 Citadel has a kernel-provided SecureStore used for protected persistence under `/system/sc`.
 
+SST, SecureStore, and Owner enrollment failures log `stage=... status=...` diagnostics without key material, credentials, or blob contents. These distinguish storage/header failures, TPM wrap-key seal/unseal failures, machine-anchor/root-key failures, and authentication-tag failures. Use **CITADEL (Boot Diagnostics)** to see these logs on hardware; for the graphical Owner wizard, run `startx` from that diagnostic session and reproduce the failure. QC logger output appears on the diagnostic framebuffer and serial port, but is not included in `bootlog`'s separate capture.
+
 Current anchor behavior:
 - TPM present and passing the boot-time seal/unseal probe: the machine anchor is sealed via TPM policy and stored as `WRAPKEY.TPM`.
 - TPM present but the probe fails or the TPM cannot complete the round-trip successfully: boot falls back to the non-TPM recovery path rather than blocking startup.

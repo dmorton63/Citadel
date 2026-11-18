@@ -5,6 +5,7 @@
 #include "QKEntropy.h"
 #include "QCString.h"
 #include "QCSha256.h"
+#include "QCLogger.h"
 
 namespace
 {
@@ -617,6 +618,8 @@ namespace
             if (st == QC::Status::Success)
             {
                 st = cfg.tpmUnsealWrapKey(cfg.tpmUser, blob, outKey, 32);
+                if (st != QC::Status::Success)
+                    QC_LOG_ERROR("SecureStore", "stage=tpm-unseal-wrap-key status=%d", static_cast<QC::i32>(st));
                 // best-effort wipe
                 if (blob.size() > 0)
                     QC::String::memset(blob.data(), 0, blob.size());
@@ -625,7 +628,10 @@ namespace
             }
 
             if (st != QC::Status::NotFound)
+            {
+                QC_LOG_ERROR("SecureStore", "stage=read-tpm-wrap-key status=%d", static_cast<QC::i32>(st));
                 return st;
+            }
 
             if (!allowCreate)
                 return QC::Status::NotFound;
@@ -639,6 +645,7 @@ namespace
             st = cfg.tpmSealWrapKey(cfg.tpmUser, outKey, 32, outBlob);
             if (st != QC::Status::Success)
             {
+                QC_LOG_ERROR("SecureStore", "stage=tpm-seal-wrap-key status=%d", static_cast<QC::i32>(st));
                 if (outBlob.size() > 0)
                     QC::String::memset(outBlob.data(), 0, outBlob.size());
                 outBlob.clear();
@@ -646,6 +653,8 @@ namespace
             }
 
             st = QK::SecureStore::writeBlob(kWrapKeyTpmName, outBlob.data(), outBlob.size(), cfg);
+            if (st != QC::Status::Success)
+                QC_LOG_ERROR("SecureStore", "stage=write-tpm-wrap-key status=%d", static_cast<QC::i32>(st));
             // best-effort wipe blob contents
             if (outBlob.size() > 0)
                 QC::String::memset(outBlob.data(), 0, outBlob.size());
@@ -1293,36 +1302,46 @@ namespace QK
 
         QC::Status readSealedBlob(const char *key, QC::Vector<QC::u8> &out, const Config &cfg)
         {
+            const auto fail = [key](const char *stage, QC::Status status)
+            {
+                QC_LOG_ERROR("SecureStore", "stage=%s blob=%s status=%d", stage, key,
+                             static_cast<QC::i32>(status));
+                return status;
+            };
             if (!isValid83Key(key))
                 return QC::Status::InvalidParam;
 
             QC::Vector<QC::u8> sealed;
             QC::Status st = readBlob(key, sealed, cfg);
             if (st != QC::Status::Success)
+            {
+                if (st != QC::Status::NotFound)
+                    fail("read-sealed", st);
                 return st;
+            }
 
             constexpr QC::usize headerSize = 4 + 4 + 4 + 12 + 16;
             if (sealed.size() < headerSize)
-                return QC::Status::Error;
+                return fail("sealed-header-size", QC::Status::Error);
 
             const QC::u8 *hdr = sealed.data();
             if (!(hdr[0] == 'S' && hdr[1] == 'S' && hdr[2] == 'B' && hdr[3] == '1'))
-                return QC::Status::Error;
+                return fail("sealed-magic", QC::Status::Error);
 
             const QC::u32 ver = load_le32(hdr + 4);
             if (ver != 1)
-                return QC::Status::NotSupported;
+                return fail("sealed-version", QC::Status::NotSupported);
 
             const QC::u32 plainSize = load_le32(hdr + 8);
             if (sealed.size() != headerSize + static_cast<QC::usize>(plainSize))
-                return QC::Status::Error;
+                return fail("sealed-size", QC::Status::Error);
 
             const QC::u8 *nonce = hdr + 12;
             const QC::u8 *tagIn = hdr + 24;
             QC::u8 wrapKey[32];
             st = getOrCreateWrapKey(wrapKey, cfg);
             if (st != QC::Status::Success)
-                return st;
+                return fail("load-wrap-key", st);
 
             QC::u8 polyKeyBlock[64];
             chacha20Block(wrapKey, 0, nonce, polyKeyBlock);
@@ -1342,7 +1361,7 @@ namespace QK
                 QC::String::memset(polyKeyBlock, 0, sizeof(polyKeyBlock));
                 QC::String::memset(polyKey, 0, sizeof(polyKey));
                 QC::String::memset(tagCalc, 0, sizeof(tagCalc));
-                return QC::Status::Error;
+                return fail("sealed-tag", QC::Status::Error);
             }
 
             out.clear();

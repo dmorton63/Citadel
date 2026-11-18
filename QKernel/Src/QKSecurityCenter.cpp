@@ -19,6 +19,7 @@
 #include "QCString.h"
 #include "QCSha256.h"
 #include "QCVector.h"
+#include "QCLogger.h"
 
 namespace QK
 {
@@ -564,7 +565,10 @@ namespace QK
                 st = QK::SecureStore::getOrCreateTas(tas);
             }
             if (st != QC::Status::Success)
+            {
+                QC_LOG_ERROR("SST", "stage=machine-anchor status=%d", static_cast<QC::i32>(st));
                 return st;
+            }
 
             // SRK := HMAC-SHA256(TAS, label)
             static constexpr char kSrkLabel[] = "CITADEL-QSC-SRK-v1";
@@ -1361,7 +1365,10 @@ namespace QK
         char canonicalUser[32];
         QC::Status st = normalizeOwnerUsername(username, canonicalUser);
         if (st != QC::Status::Success)
+        {
+            QC_LOG_ERROR("OwnerEnroll", "stage=validate-username status=%d", static_cast<QC::i32>(st));
             return st;
+        }
 
         if (ownerIsEnrolled())
             return QC::Status::Busy;
@@ -1381,18 +1388,27 @@ namespace QK
 
         st = qkFillRandom(nullptr, rec.salt, sizeof(rec.salt));
         if (st != QC::Status::Success && st != QC::Status::Busy)
+        {
+            QC_LOG_ERROR("OwnerEnroll", "stage=random status=%d", static_cast<QC::i32>(st));
             return st;
+        }
 
         QC::String::strncpy(rec.username, canonicalUser, sizeof(rec.username) - 1);
         computeVerifierV2(rec.username, secret, rec.salt, rec.iterations, rec.verifier);
 
         st = QK::SecureStore::ensureBaseDir();
         if (st != QC::Status::Success)
+        {
+            QC_LOG_ERROR("OwnerEnroll", "stage=ensure-directory status=%d", static_cast<QC::i32>(st));
             return st;
+        }
 
         st = writeOwnerCred(rec);
         if (st != QC::Status::Success)
+        {
+            QC_LOG_ERROR("OwnerEnroll", "stage=write-credentials status=%d", static_cast<QC::i32>(st));
             return st;
+        }
 
         if (!activateSession)
         {
