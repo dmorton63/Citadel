@@ -17,6 +17,11 @@ namespace QK::Boot::Tpm::Cmd
         return g_TpmLastRspCode;
     }
 
+    void ClearLastResponseCode()
+    {
+        g_TpmLastRspCode = 0;
+    }
+
     QC::u32 Exchange(FLogFn VerboseLog, const QC::u8 *Cmd, QC::usize CmdLen, const QC::u8 *&Rsp, QC::u32 &RspLen)
     {
         Rsp = g_RspBuf;

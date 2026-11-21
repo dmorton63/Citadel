@@ -605,7 +605,8 @@ namespace
         return QC::Status::Success;
     }
 
-    static QC::Status loadWrapKey(QC::u8 outKey[32], const QK::SecureStore::Config &cfg, bool allowCreate)
+    static QC::Status loadWrapKey(QC::u8 outKey[32], const QK::SecureStore::Config &cfg, bool allowCreate,
+                                  QK::SecureStore::WrapKeyDiagnostic *diagnostic = nullptr)
     {
         constexpr const char *kWrapKeyTpmName = "WRAPKEY.TPM";
 
@@ -613,11 +614,17 @@ namespace
 
         if (tpmEnabled)
         {
+            if (diagnostic)
+                diagnostic->operation = "read-tpm-key";
             QC::Vector<QC::u8> blob;
             QC::Status st = QK::SecureStore::readBlob(kWrapKeyTpmName, blob, cfg);
             if (st == QC::Status::Success)
             {
-                st = cfg.tpmUnsealWrapKey(cfg.tpmUser, blob, outKey, 32);
+                if (diagnostic)
+                    diagnostic->operation = "tpm-unseal";
+                st = diagnostic && cfg.tpmDiagnoseUnsealWrapKey
+                         ? cfg.tpmDiagnoseUnsealWrapKey(cfg.tpmUser, blob, outKey, 32, *diagnostic)
+                         : cfg.tpmUnsealWrapKey(cfg.tpmUser, blob, outKey, 32);
                 if (st != QC::Status::Success)
                     QC_LOG_ERROR("SecureStore", "stage=tpm-unseal-wrap-key status=%d", static_cast<QC::i32>(st));
                 // best-effort wipe
@@ -666,12 +673,16 @@ namespace
         }
 
         // Non-TPM path: wrap key must be protected under a recovery-code derived key.
+        if (diagnostic)
+            diagnostic->operation = "read-recovery-key";
         QC::Vector<QC::u8> kdfBlob;
         QC::Status st = QK::SecureStore::readBlob(kWrapKeyKdfName, kdfBlob, cfg);
         if (st == QC::Status::Success)
         {
             if (!g_nonTpmDerivedKeySet)
             {
+                if (diagnostic)
+                    diagnostic->operation = "recovery-locked";
                 if (kdfBlob.size() > 0)
                     QC::String::memset(kdfBlob.data(), 0, kdfBlob.size());
                 kdfBlob.clear();
@@ -680,12 +691,16 @@ namespace
 
             if (kdfBlob.size() != 88)
             {
+                if (diagnostic)
+                    diagnostic->operation = "recovery-format";
                 if (kdfBlob.size() > 0)
                     QC::String::memset(kdfBlob.data(), 0, kdfBlob.size());
                 kdfBlob.clear();
                 return QC::Status::Error;
             }
 
+            if (diagnostic)
+                diagnostic->operation = "recovery-unwrap";
             st = unwrapWrapKeyKdfBlob(g_nonTpmDerivedKey, kdfBlob.data(), kdfBlob.size(), outKey);
             if (kdfBlob.size() > 0)
                 QC::String::memset(kdfBlob.data(), 0, kdfBlob.size());
@@ -1301,8 +1316,14 @@ namespace QK
         }
 
         static QC::Status readSealedBlobImpl(const char *key, QC::Vector<QC::u8> &out,
-                                             const Config &cfg, bool allowCreate, const char **stage)
+                                             const Config &cfg, bool allowCreate, const char **stage,
+                                             WrapKeyDiagnostic *diagnostic)
         {
+            if (diagnostic)
+            {
+                *diagnostic = WrapKeyDiagnostic{};
+                diagnostic->path = tpm_present(cfg) ? "tpm" : "recovery";
+            }
             if (stage)
                 *stage = "ok";
             const auto fail = [key, stage](const char *failedStage, QC::Status status)
@@ -1346,7 +1367,7 @@ namespace QK
             const QC::u8 *nonce = hdr + 12;
             const QC::u8 *tagIn = hdr + 24;
             QC::u8 wrapKey[32];
-            st = allowCreate ? getOrCreateWrapKey(wrapKey, cfg) : readWrapKey(wrapKey, cfg);
+            st = allowCreate ? getOrCreateWrapKey(wrapKey, cfg) : loadWrapKey(wrapKey, cfg, false, diagnostic);
             if (st != QC::Status::Success)
                 return fail("load-wrap-key", st);
 
@@ -1391,13 +1412,13 @@ namespace QK
 
         QC::Status readSealedBlob(const char *key, QC::Vector<QC::u8> &out, const Config &cfg)
         {
-            return readSealedBlobImpl(key, out, cfg, true, nullptr);
+            return readSealedBlobImpl(key, out, cfg, true, nullptr, nullptr);
         }
 
         QC::Status readExistingSealedBlob(const char *key, QC::Vector<QC::u8> &out,
-                                          const char *&stage, const Config &cfg)
+                                          const char *&stage, const Config &cfg, WrapKeyDiagnostic *diagnostic)
         {
-            return readSealedBlobImpl(key, out, cfg, false, &stage);
+            return readSealedBlobImpl(key, out, cfg, false, &stage, diagnostic);
         }
 
         QC::Status writeTpmSealedBlob(const char *key, const void *data, QC::usize size, const Config &cfg)

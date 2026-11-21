@@ -989,21 +989,26 @@ namespace QK
         }
 
         static QC::Status readOwnerCredUncached(OwnerCredAny &out, bool readOnly = false,
-                                                const char **stage = nullptr)
+                                                const char **stage = nullptr,
+                                                QK::SecureStore::WrapKeyDiagnostic *diagnostic = nullptr)
         {
             QC::Vector<QC::u8> blob;
             const char *readStage = "ok";
             QC::Status st = readOnly
-                                ? QK::SecureStore::readExistingSealedBlob(kOwnerCredKey, blob, readStage)
+                                ? QK::SecureStore::readExistingSealedBlob(kOwnerCredKey, blob, readStage,
+                                                                         QK::SecureStore::defaultConfig(), diagnostic)
                                 : QK::SecureStore::readSealedBlob(kOwnerCredKey, blob);
             if (st == QC::Status::NotSupported || st == QC::Status::NotFound)
             {
                 const QC::Status primaryStatus = st;
                 const char *primaryStage = readStage;
+                QK::SecureStore::WrapKeyDiagnostic primaryDiagnostic{};
+                if (diagnostic)
+                    primaryDiagnostic = *diagnostic;
                 QK::SecureStore::Config compatCfg = QK::SecureStore::defaultConfig();
                 compatCfg.baseDir = kOwnerCredCompatBaseDir;
                 st = readOnly
-                         ? QK::SecureStore::readExistingSealedBlob(kOwnerCredKey, blob, readStage, compatCfg)
+                         ? QK::SecureStore::readExistingSealedBlob(kOwnerCredKey, blob, readStage, compatCfg, diagnostic)
                          : QK::SecureStore::readSealedBlob(kOwnerCredKey, blob, compatCfg);
                 if (readOnly && st == QC::Status::NotFound &&
                     QC::String::strcmp(readStage, "read-sealed") == 0 &&
@@ -1011,6 +1016,8 @@ namespace QK
                 {
                     st = primaryStatus;
                     readStage = primaryStage;
+                    if (diagnostic)
+                        *diagnostic = primaryDiagnostic;
                 }
             }
             if (st != QC::Status::Success)
@@ -1063,15 +1070,16 @@ namespace QK
         }
 
         static QC::Status readOwnerCred(OwnerCredAny &out, bool readOnly = false,
-                                        const char **stage = nullptr)
+                                        const char **stage = nullptr,
+                                        QK::SecureStore::WrapKeyDiagnostic *diagnostic = nullptr)
         {
             OwnerCredAny first{};
-            QC::Status st = readOwnerCredUncached(first, readOnly, stage);
+            QC::Status st = readOwnerCredUncached(first, readOnly, stage, diagnostic);
             if (st != QC::Status::Success)
                 return st;
 
             OwnerCredAny second{};
-            st = readOwnerCredUncached(second, readOnly, stage);
+            st = readOwnerCredUncached(second, readOnly, stage, diagnostic);
             if (st != QC::Status::Success)
                 return st;
 
@@ -1676,10 +1684,10 @@ namespace QK
         return readOwnerCred(rec) == QC::Status::Success;
     }
 
-    QC::Status SecurityCenter::diagnoseOwnerCredentials(const char *&stage) const
+    QC::Status SecurityCenter::diagnoseOwnerCredentials(const char *&stage, SecureStore::WrapKeyDiagnostic &diagnostic) const
     {
         OwnerCredAny rec{};
-        const QC::Status st = readOwnerCred(rec, true, &stage);
+        const QC::Status st = readOwnerCred(rec, true, &stage, &diagnostic);
         secureZero(&rec, sizeof(rec));
         return st;
     }

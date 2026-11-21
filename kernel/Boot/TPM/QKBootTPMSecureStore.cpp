@@ -149,14 +149,22 @@ namespace QK::Boot::Tpm
             return QC::Status::Success;
         }
 
-        static QC::Status SecureStoreTpmUnsealWrapKeyLocked(void *User, const QC::Vector<QC::u8> &Blob, QC::u8 *OutWrapKey, QC::usize OutWrapKeyLen)
+        static QC::Status SecureStoreTpmUnsealWrapKeyLocked(void *User, const QC::Vector<QC::u8> &Blob,
+                                                            QC::u8 *OutWrapKey, QC::usize OutWrapKeyLen,
+                                                            QK::SecureStore::WrapKeyDiagnostic *Diagnostic = nullptr)
         {
+            if (Diagnostic)
+                Diagnostic->operation = "tpm-validate";
             if (!User || !OutWrapKey || OutWrapKeyLen != 32)
                 return QC::Status::InvalidParam;
 
             auto *Dev = static_cast<FTpmSecureStoreCtx *>(User);
             if (!Dev->bReady)
+            {
+                if (Diagnostic)
+                    Diagnostic->operation = "tpm-not-ready";
                 return QC::Status::Busy;
+            }
 
             if (Blob.size() < 16)
                 return QC::Status::Error;
@@ -180,19 +188,36 @@ namespace QK::Boot::Tpm
             if (Total != Blob.size())
                 return QC::Status::Error;
 
+            const auto CaptureFailure = [Diagnostic]()
+            {
+                if (Diagnostic && Cmd::LastResponseCode() != 0)
+                {
+                    Diagnostic->hasTpmResult = true;
+                    Diagnostic->tpmResult = Cmd::LastResponseCode();
+                }
+            };
+            if (Diagnostic)
+            {
+                Cmd::ClearLastResponseCode();
+                Diagnostic->operation = "start-policy-session";
+            }
             QC::u32 PolicySession = 0;
             QC::Status St = Cmd::TpmStartPolicySession(nullptr, false, PolicySession);
             if (St != QC::Status::Success)
             {
+                CaptureFailure();
                 SerialStr("SecureStoreTPM: StartAuthSession(POLICY) failed (rsp=0x");
                 SerialHex32Fixed(Cmd::LastResponseCode());
                 SerialStr(")\r\n");
                 return St;
             }
 
+            if (Diagnostic)
+                Diagnostic->operation = "policy-pcr";
             St = Cmd::TpmPolicyPCR(nullptr, PolicySession);
             if (St != QC::Status::Success)
             {
+                CaptureFailure();
                 SerialStr("SecureStoreTPM: PolicyPCR failed (rsp=0x");
                 SerialHex32Fixed(Cmd::LastResponseCode());
                 SerialStr(")\r\n");
@@ -212,9 +237,12 @@ namespace QK::Boot::Tpm
                 Pub2b[i] = Blob[O++];
 
             QC::u32 Primary = 0;
+            if (Diagnostic)
+                Diagnostic->operation = "create-primary";
             St = Cmd::TpmCreatePrimaryStorageKey(nullptr, Primary);
             if (St != QC::Status::Success)
             {
+                CaptureFailure();
                 SerialStr("SecureStoreTPM: CreatePrimary failed (rsp=0x");
                 SerialHex32Fixed(Cmd::LastResponseCode());
                 SerialStr(")\r\n");
@@ -227,7 +255,11 @@ namespace QK::Boot::Tpm
             }
 
             QC::u32 Obj = 0;
+            if (Diagnostic)
+                Diagnostic->operation = "load-object";
             St = Cmd::TpmLoadSealedObject(nullptr, Primary, Priv2b, Pub2b, Obj);
+            if (St != QC::Status::Success)
+                CaptureFailure();
 
             QC::String::memset(Priv2b.data(), 0, Priv2b.size());
             QC::String::memset(Pub2b.data(), 0, Pub2b.size());
@@ -244,9 +276,12 @@ namespace QK::Boot::Tpm
                 return St;
             }
 
+            if (Diagnostic)
+                Diagnostic->operation = "unseal";
             St = Cmd::TpmUnsealWithAuthSession(nullptr, Obj, PolicySession, OutWrapKey, OutWrapKeyLen);
             if (St != QC::Status::Success)
             {
+                CaptureFailure();
                 SerialStr("SecureStoreTPM: Unseal failed (rsp=0x");
                 SerialHex32Fixed(Cmd::LastResponseCode());
                 SerialStr(")\r\n");
@@ -257,6 +292,8 @@ namespace QK::Boot::Tpm
             // continueSession is clear, so a successful Unseal already closed the session.
             if (St != QC::Status::Success)
                 (void)Cmd::TpmFlushContext(nullptr, PolicySession);
+            else if (Diagnostic)
+                Diagnostic->operation = "ok";
             return St;
         }
 
@@ -474,6 +511,19 @@ namespace QK::Boot::Tpm
             if (!Guard.Acquired())
                 return QC::Status::Busy;
             return SecureStoreTpmUnsealWrapKeyLocked(User, Blob, OutWrapKey, OutWrapKeyLen);
+        }
+
+        static QC::Status SecureStoreTpmDiagnoseUnsealWrapKey(void *User, const QC::Vector<QC::u8> &Blob,
+                                                               QC::u8 *OutWrapKey, QC::usize OutWrapKeyLen,
+                                                               QK::SecureStore::WrapKeyDiagnostic &Diagnostic)
+        {
+            FTpmOpGuard Guard;
+            if (!Guard.Acquired())
+            {
+                Diagnostic.operation = "tpm-lock";
+                return QC::Status::Busy;
+            }
+            return SecureStoreTpmUnsealWrapKeyLocked(User, Blob, OutWrapKey, OutWrapKeyLen, &Diagnostic);
         }
 
         static QC::Status SecureStoreTpmSealSecret(void *User, const QC::u8 *Secret, QC::usize SecretLen, QC::Vector<QC::u8> &OutBlob)
@@ -788,6 +838,7 @@ namespace QK::Boot::Tpm
             ScCfg.tpmUser = &g_TpmSecureStore;
             ScCfg.tpmSealWrapKey = &SecureStoreTpmSealWrapKey;
             ScCfg.tpmUnsealWrapKey = &SecureStoreTpmUnsealWrapKey;
+            ScCfg.tpmDiagnoseUnsealWrapKey = &SecureStoreTpmDiagnoseUnsealWrapKey;
             ScCfg.tpmSealSecret = &SecureStoreTpmSealSecret;
             ScCfg.tpmUnsealSecret = &SecureStoreTpmUnsealSecret;
             QK::SecureStore::setDefaultConfig(ScCfg);

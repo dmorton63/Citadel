@@ -13,6 +13,7 @@ namespace QK::Boot::Tpm::Cmd
 
     // Response code of the most recent command (0 on success).
     QC::u32 LastResponseCode();
+    void ClearLastResponseCode();
 
     // Submits a raw command; Rsp points into a shared buffer that stays valid
     // until the next command. VerboseLog logs transport details when non-null.

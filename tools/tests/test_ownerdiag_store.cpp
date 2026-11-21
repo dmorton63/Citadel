@@ -118,14 +118,18 @@ int main()
 
     QC::Vector<QC::u8> result;
     const char *stage = nullptr;
-    assert(QK::SecureStore::readExistingSealedBlob("OWNERCRD", result, stage, cfg) == QC::Status::NotFound);
+    QK::SecureStore::WrapKeyDiagnostic diagnostic{};
+    assert(QK::SecureStore::readExistingSealedBlob("OWNERCRD", result, stage, cfg, &diagnostic) == QC::Status::NotFound);
     assert(std::strcmp(stage, "read-sealed") == 0);
+    assert(std::strcmp(diagnostic.path, "tpm") == 0);
+    assert(std::strcmp(diagnostic.operation, "not-attempted") == 0);
 
     files["/test/OWNERCRD"] = std::vector<QC::u8>(40, 0);
     std::memcpy(files["/test/OWNERCRD"].data(), "SSB1", 4);
     files["/test/OWNERCRD"][4] = 1;
-    assert(QK::SecureStore::readExistingSealedBlob("OWNERCRD", result, stage, cfg) == QC::Status::NotFound);
+    assert(QK::SecureStore::readExistingSealedBlob("OWNERCRD", result, stage, cfg, &diagnostic) == QC::Status::NotFound);
     assert(std::strcmp(stage, "load-wrap-key") == 0);
+    assert(std::strcmp(diagnostic.operation, "read-tpm-key") == 0);
     assert(files.size() == 1 && writes == 0 && seals == 0);
 
     const char content[] = "test credential record";
@@ -138,10 +142,35 @@ int main()
     assert(result.size() == sizeof(content) && std::memcmp(result.data(), content, sizeof(content)) == 0);
     assert(files == snapshot && writes == writesBefore && seals == sealsBefore);
 
-    unsealFails = true;
-    assert(QK::SecureStore::readExistingSealedBlob("OWNERCRD", result, stage, cfg) == QC::Status::Error);
+    cfg.tpmDiagnoseUnsealWrapKey = [](void *, const QC::Vector<QC::u8> &, QC::u8 *, QC::usize,
+                                       QK::SecureStore::WrapKeyDiagnostic &detail)
+    {
+        detail.operation = "unseal";
+        detail.hasTpmResult = true;
+        detail.tpmResult = 0x99d;
+        return QC::Status::Error;
+    };
+    assert(QK::SecureStore::readExistingSealedBlob("OWNERCRD", result, stage, cfg, &diagnostic) == QC::Status::Error);
     assert(std::strcmp(stage, "load-wrap-key") == 0);
+    assert(std::strcmp(diagnostic.operation, "unseal") == 0);
+    assert(diagnostic.hasTpmResult && diagnostic.tpmResult == 0x99d);
+    cfg.tpmDiagnoseUnsealWrapKey = nullptr;
+    assert(QK::SecureStore::readExistingSealedBlob("OWNERCRD", result, stage, cfg, &diagnostic) == QC::Status::Success);
+    assert(!diagnostic.hasTpmResult);
+    unsealFails = true;
+    assert(QK::SecureStore::readExistingSealedBlob("OWNERCRD", result, stage, cfg, &diagnostic) == QC::Status::Error);
+    assert(std::strcmp(diagnostic.operation, "tpm-unseal") == 0 && !diagnostic.hasTpmResult);
     unsealFails = false;
+
+    QK::SecureStore::Config recoveryCfg{};
+    recoveryCfg.baseDir = "/test";
+    assert(QK::SecureStore::readExistingSealedBlob("OWNERCRD", result, stage, recoveryCfg, &diagnostic) == QC::Status::NotFound);
+    assert(std::strcmp(diagnostic.path, "recovery") == 0);
+    assert(std::strcmp(diagnostic.operation, "read-recovery-key") == 0);
+    files["/test/WRAPKEY.KDF"] = std::vector<QC::u8>(88, 0);
+    assert(QK::SecureStore::readExistingSealedBlob("OWNERCRD", result, stage, recoveryCfg, &diagnostic) == QC::Status::Busy);
+    assert(std::strcmp(diagnostic.operation, "recovery-locked") == 0);
+    files.erase("/test/WRAPKEY.KDF");
     files["/test/OWNERCRD"][24] ^= 1;
     const auto tampered = files;
     assert(QK::SecureStore::readExistingSealedBlob("OWNERCRD", result, stage, cfg) == QC::Status::Error);

@@ -15,6 +15,14 @@ namespace QK
         // - This is *not* encryption yet; it is only a controlled location + API surface.
         // - Key names are intentionally constrained to FAT 8.3 to avoid collisions/truncation.
 
+        struct WrapKeyDiagnostic
+        {
+            const char *path = "unknown";
+            const char *operation = "not-attempted";
+            bool hasTpmResult = false;
+            QC::u32 tpmResult = 0;
+        };
+
         struct Config
         {
             const char *baseDir; // default: "/system/.sc"
@@ -40,6 +48,13 @@ namespace QK
                                            const QC::Vector<QC::u8> &blob,
                                            QC::u8 *outWrapKey,
                                            QC::usize outWrapKeyLen) = nullptr;
+
+            // Optional per-call diagnostic variant of tpmUnsealWrapKey.
+            QC::Status (*tpmDiagnoseUnsealWrapKey)(void *user,
+                                                   const QC::Vector<QC::u8> &blob,
+                                                   QC::u8 *outWrapKey,
+                                                   QC::usize outWrapKeyLen,
+                                                   WrapKeyDiagnostic &diagnostic) = nullptr;
 
             // Optional TPM-backed generic secret sealing.
             //
@@ -119,7 +134,8 @@ namespace QK
         QC::Status readExistingSealedBlob(const char *key,
                                           QC::Vector<QC::u8> &out,
                                           const char *&stage,
-                                          const Config &cfg = defaultConfig());
+                                          const Config &cfg = defaultConfig(),
+                                          WrapKeyDiagnostic *diagnostic = nullptr);
 
         // Reads a blob written by writeTpmSealedBlob().
         //

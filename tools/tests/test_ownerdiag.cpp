@@ -34,9 +34,16 @@ namespace QK::SecureStore
         return QC::Status::Error;
     }
     QC::Status readExistingSealedBlob(const char *, QC::Vector<QC::u8> &out,
-                                      const char *&stage, const Config &cfg)
+                                      const char *&stage, const Config &cfg,
+                                      WrapKeyDiagnostic *diagnostic)
     {
         ++readCount;
+        if (diagnostic)
+        {
+            *diagnostic = WrapKeyDiagnostic{};
+            diagnostic->path = "tpm";
+            diagnostic->operation = "not-attempted";
+        }
         if (primaryMissing && std::strcmp(cfg.baseDir, "/system") != 0)
         {
             stage = "read-sealed";
@@ -45,6 +52,12 @@ namespace QK::SecureStore
         if (primaryKeyMissing && std::strcmp(cfg.baseDir, "/system") != 0)
         {
             stage = "load-wrap-key";
+            if (diagnostic)
+            {
+                diagnostic->operation = "unseal";
+                diagnostic->hasTpmResult = true;
+                diagnostic->tpmResult = 0x99d;
+            }
             return QC::Status::NotFound;
         }
         if (primaryKeyMissing && readStatus == QC::Status::NotFound)
@@ -68,43 +81,47 @@ int main()
 {
     auto &sc = QK::SecurityCenter::instance();
     const char *stage = nullptr;
-    assert(sc.diagnoseOwnerCredentials(stage) == QC::Status::Success);
+    QK::SecureStore::WrapKeyDiagnostic diagnostic{};
+    assert(sc.diagnoseOwnerCredentials(stage, diagnostic) == QC::Status::Success);
     assert(std::strcmp(stage, "ok") == 0 && readCount == 2);
 
     readCount = 0;
     readStatus = QC::Status::Error;
     readStage = "sealed-tag";
-    assert(sc.diagnoseOwnerCredentials(stage) == QC::Status::Error);
+    assert(sc.diagnoseOwnerCredentials(stage, diagnostic) == QC::Status::Error);
     assert(std::strcmp(stage, "sealed-tag") == 0 && readCount == 1);
 
     readCount = 0;
     primaryKeyMissing = true;
     readStatus = QC::Status::NotFound;
     readStage = "load-wrap-key";
-    assert(sc.diagnoseOwnerCredentials(stage) == QC::Status::NotFound);
+    assert(sc.diagnoseOwnerCredentials(stage, diagnostic) == QC::Status::NotFound);
     assert(std::strcmp(stage, "load-wrap-key") == 0 && readCount == 2);
+    assert(std::strcmp(diagnostic.operation, "unseal") == 0);
+    assert(diagnostic.hasTpmResult && diagnostic.tpmResult == 0x99d);
 
     readCount = 0;
     readStatus = QC::Status::Success;
-    assert(sc.diagnoseOwnerCredentials(stage) == QC::Status::Success);
+    assert(sc.diagnoseOwnerCredentials(stage, diagnostic) == QC::Status::Success);
     assert(std::strcmp(stage, "ok") == 0 && readCount == 4);
+    assert(!diagnostic.hasTpmResult);
     primaryKeyMissing = false;
 
     readCount = 0;
     readStage = "ok";
     primaryMissing = true;
-    assert(sc.diagnoseOwnerCredentials(stage) == QC::Status::Success);
+    assert(sc.diagnoseOwnerCredentials(stage, diagnostic) == QC::Status::Success);
     assert(std::strcmp(stage, "ok") == 0 && readCount == 4);
     primaryMissing = false;
 
     readCount = 0;
     changeSecondRead = true;
-    assert(sc.diagnoseOwnerCredentials(stage) == QC::Status::Error);
+    assert(sc.diagnoseOwnerCredentials(stage, diagnostic) == QC::Status::Error);
     assert(std::strcmp(stage, "credential-consistency") == 0 && readCount == 2);
     changeSecondRead = false;
 
     readCount = 0;
     record.saltLen = 0;
-    assert(sc.diagnoseOwnerCredentials(stage) == QC::Status::Error);
+    assert(sc.diagnoseOwnerCredentials(stage, diagnostic) == QC::Status::Error);
     assert(std::strcmp(stage, "credential-format") == 0 && readCount == 1);
 }

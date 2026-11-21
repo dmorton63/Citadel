@@ -384,13 +384,30 @@ namespace QK::CmdCenter
             }
 
             const char *stage = "unknown";
-            const QC::Status st = QK::SecurityCenter::instance().diagnoseOwnerCredentials(stage);
+            QK::SecureStore::WrapKeyDiagnostic diagnostic{};
+            const QC::Status st = QK::SecurityCenter::instance().diagnoseOwnerCredentials(stage, diagnostic);
             char line[128] = {};
             (void)appendString(line, sizeof(line), "ownerdiag: status=");
             (void)appendString(line, sizeof(line), statusName(st));
             (void)appendString(line, sizeof(line), " stage=");
             (void)appendString(line, sizeof(line), stage);
             ctx.writeLine(line);
+            char detail[128] = {};
+            (void)appendString(detail, sizeof(detail), "ownerdiag: key-path=");
+            (void)appendString(detail, sizeof(detail), diagnostic.path);
+            (void)appendString(detail, sizeof(detail), " operation=");
+            (void)appendString(detail, sizeof(detail), diagnostic.operation);
+            if (diagnostic.hasTpmResult)
+            {
+                char hex[9];
+                static constexpr char digits[] = "0123456789abcdef";
+                for (int i = 0; i < 8; ++i)
+                    hex[i] = digits[(diagnostic.tpmResult >> ((7 - i) * 4)) & 0xF];
+                hex[8] = '\0';
+                (void)appendString(detail, sizeof(detail), " tpm-result=0x");
+                (void)appendString(detail, sizeof(detail), hex);
+            }
+            ctx.writeLine(detail);
             if (st == QC::Status::Success)
                 ctx.writeLine("ownerdiag: existing credentials read and verified; no password checked");
             else if (QC::String::strcmp(stage, "read-sealed") == 0 && st == QC::Status::NotFound)

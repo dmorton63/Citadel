@@ -173,7 +173,7 @@ Citadel has a kernel-provided SecureStore used for protected persistence under `
 
 SST, SecureStore, and Owner enrollment failures log `stage=... status=...` diagnostics without key material, credentials, or blob contents. These distinguish storage/header failures, TPM wrap-key seal/unseal failures, machine-anchor/root-key failures, and authentication-tag failures. Use **CITADEL (Boot Diagnostics)** to see these logs on hardware; for the graphical Owner wizard, run `startx` from that diagnostic session and reproduce the failure. QC logger output appears on the diagnostic framebuffer and serial port, but is not included in `bootlog`'s separate capture.
 
-The user-level `ownerdiag` command checks existing Owner credentials twice using the existing wrap key and reports the failure stage and status. It never enrolls an Owner or creates or replaces security files; it may issue TPM commands to unseal the existing key. It does not check a password or print credentials.
+The user-level `ownerdiag` command checks existing Owner credentials twice using the existing wrap key and reports the failure stage and status, selected key path, and operation. If a TPM command fails, it reports its nonzero result captured before cleanup; `0xffffffff` denotes a transport failure rather than a TPM response. The selected path is shown even if no key operation was attempted. It never enrolls an Owner or creates or replaces security files; it may issue TPM commands to unseal the existing key. It does not check a password or print credentials.
 
 Current anchor behavior:
 - TPM present and passing the boot-time seal/unseal probe: the machine anchor is sealed via TPM policy and stored as `WRAPKEY.TPM`.

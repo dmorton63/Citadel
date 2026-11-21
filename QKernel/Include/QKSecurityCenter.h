@@ -4,6 +4,7 @@
 
 namespace QK
 {
+    namespace SecureStore { struct WrapKeyDiagnostic; }
 
     class SecurityCenter
     {
@@ -175,7 +176,7 @@ namespace QK
         void ownerLock();
         bool ownerIsEnrolled() const;
         // Read-only credential check; never enrolls or creates a wrap key.
-        QC::Status diagnoseOwnerCredentials(const char *&stage) const;
+        QC::Status diagnoseOwnerCredentials(const char *&stage, SecureStore::WrapKeyDiagnostic &diagnostic) const;
         bool ownerUnlocked() const { return m_ownerUnlocked; }
         bool ownerLockedOut() const;
         QC::u64 ownerLockoutRemainingMs() const;
