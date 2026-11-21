@@ -988,18 +988,40 @@ namespace QK
             return false;
         }
 
-        static QC::Status readOwnerCredUncached(OwnerCredAny &out)
+        static QC::Status readOwnerCredUncached(OwnerCredAny &out, bool readOnly = false,
+                                                const char **stage = nullptr)
         {
             QC::Vector<QC::u8> blob;
-            QC::Status st = QK::SecureStore::readSealedBlob(kOwnerCredKey, blob);
+            const char *readStage = "ok";
+            QC::Status st = readOnly
+                                ? QK::SecureStore::readExistingSealedBlob(kOwnerCredKey, blob, readStage)
+                                : QK::SecureStore::readSealedBlob(kOwnerCredKey, blob);
             if (st == QC::Status::NotSupported || st == QC::Status::NotFound)
             {
+                const QC::Status primaryStatus = st;
+                const char *primaryStage = readStage;
                 QK::SecureStore::Config compatCfg = QK::SecureStore::defaultConfig();
                 compatCfg.baseDir = kOwnerCredCompatBaseDir;
-                st = QK::SecureStore::readSealedBlob(kOwnerCredKey, blob, compatCfg);
+                st = readOnly
+                         ? QK::SecureStore::readExistingSealedBlob(kOwnerCredKey, blob, readStage, compatCfg)
+                         : QK::SecureStore::readSealedBlob(kOwnerCredKey, blob, compatCfg);
+                if (readOnly && st == QC::Status::NotFound &&
+                    QC::String::strcmp(readStage, "read-sealed") == 0 &&
+                    QC::String::strcmp(primaryStage, "load-wrap-key") == 0)
+                {
+                    st = primaryStatus;
+                    readStage = primaryStage;
+                }
             }
             if (st != QC::Status::Success)
+            {
+                if (stage)
+                    *stage = readStage;
                 return st;
+            }
+
+            if (stage)
+                *stage = "credential-format";
 
             if (blob.size() >= sizeof(OwnerCredRecordV2))
             {
@@ -1040,22 +1062,29 @@ namespace QK
             return QC::Status::Error;
         }
 
-        static QC::Status readOwnerCred(OwnerCredAny &out)
+        static QC::Status readOwnerCred(OwnerCredAny &out, bool readOnly = false,
+                                        const char **stage = nullptr)
         {
             OwnerCredAny first{};
-            QC::Status st = readOwnerCredUncached(first);
+            QC::Status st = readOwnerCredUncached(first, readOnly, stage);
             if (st != QC::Status::Success)
                 return st;
 
             OwnerCredAny second{};
-            st = readOwnerCredUncached(second);
+            st = readOwnerCredUncached(second, readOnly, stage);
             if (st != QC::Status::Success)
                 return st;
 
             if (!ownerCredEquivalent(first, second))
+            {
+                if (stage)
+                    *stage = "credential-consistency";
                 return QC::Status::Error;
+            }
 
             out = first;
+            if (stage)
+                *stage = "ok";
             return QC::Status::Success;
         }
 
@@ -1645,6 +1674,14 @@ namespace QK
     {
         OwnerCredAny rec;
         return readOwnerCred(rec) == QC::Status::Success;
+    }
+
+    QC::Status SecurityCenter::diagnoseOwnerCredentials(const char *&stage) const
+    {
+        OwnerCredAny rec{};
+        const QC::Status st = readOwnerCred(rec, true, &stage);
+        secureZero(&rec, sizeof(rec));
+        return st;
     }
 
     bool SecurityCenter::ownerLockedOut() const

@@ -1300,23 +1300,30 @@ namespace QK
             return st;
         }
 
-        QC::Status readSealedBlob(const char *key, QC::Vector<QC::u8> &out, const Config &cfg)
+        static QC::Status readSealedBlobImpl(const char *key, QC::Vector<QC::u8> &out,
+                                             const Config &cfg, bool allowCreate, const char **stage)
         {
-            const auto fail = [key](const char *stage, QC::Status status)
+            if (stage)
+                *stage = "ok";
+            const auto fail = [key, stage](const char *failedStage, QC::Status status)
             {
-                QC_LOG_ERROR("SecureStore", "stage=%s blob=%s status=%d", stage, key,
+                if (stage)
+                    *stage = failedStage;
+                QC_LOG_ERROR("SecureStore", "stage=%s blob=%s status=%d", failedStage, key,
                              static_cast<QC::i32>(status));
                 return status;
             };
             if (!isValid83Key(key))
-                return QC::Status::InvalidParam;
+                return fail("invalid-key", QC::Status::InvalidParam);
 
             QC::Vector<QC::u8> sealed;
             QC::Status st = readBlob(key, sealed, cfg);
             if (st != QC::Status::Success)
             {
                 if (st != QC::Status::NotFound)
-                    fail("read-sealed", st);
+                    return fail("read-sealed", st);
+                if (stage)
+                    *stage = "read-sealed";
                 return st;
             }
 
@@ -1339,7 +1346,7 @@ namespace QK
             const QC::u8 *nonce = hdr + 12;
             const QC::u8 *tagIn = hdr + 24;
             QC::u8 wrapKey[32];
-            st = getOrCreateWrapKey(wrapKey, cfg);
+            st = allowCreate ? getOrCreateWrapKey(wrapKey, cfg) : readWrapKey(wrapKey, cfg);
             if (st != QC::Status::Success)
                 return fail("load-wrap-key", st);
 
@@ -1380,6 +1387,17 @@ namespace QK
             QC::String::memset(sealed.data(), 0, sealed.size());
             sealed.clear();
             return QC::Status::Success;
+        }
+
+        QC::Status readSealedBlob(const char *key, QC::Vector<QC::u8> &out, const Config &cfg)
+        {
+            return readSealedBlobImpl(key, out, cfg, true, nullptr);
+        }
+
+        QC::Status readExistingSealedBlob(const char *key, QC::Vector<QC::u8> &out,
+                                          const char *&stage, const Config &cfg)
+        {
+            return readSealedBlobImpl(key, out, cfg, false, &stage);
         }
 
         QC::Status writeTpmSealedBlob(const char *key, const void *data, QC::usize size, const Config &cfg)

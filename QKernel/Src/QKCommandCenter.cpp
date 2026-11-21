@@ -373,6 +373,37 @@ namespace QK::CmdCenter
         // Forward declaration (definition is later in this TU).
         static bool readToken(const char *&p, char *out, QC::usize outSize);
 
+        static bool cmdOwnerDiagnose(const char *args, const QC::Cmd::Context &ctx, void *)
+        {
+            char token[8];
+            const char *p = args;
+            if (readToken(p, token, sizeof(token)))
+            {
+                ctx.writeLine("usage: ownerdiag");
+                return true;
+            }
+
+            const char *stage = "unknown";
+            const QC::Status st = QK::SecurityCenter::instance().diagnoseOwnerCredentials(stage);
+            char line[128] = {};
+            (void)appendString(line, sizeof(line), "ownerdiag: status=");
+            (void)appendString(line, sizeof(line), statusName(st));
+            (void)appendString(line, sizeof(line), " stage=");
+            (void)appendString(line, sizeof(line), stage);
+            ctx.writeLine(line);
+            if (st == QC::Status::Success)
+                ctx.writeLine("ownerdiag: existing credentials read and verified; no password checked");
+            else if (QC::String::strcmp(stage, "read-sealed") == 0 && st == QC::Status::NotFound)
+                ctx.writeLine("ownerdiag: credential file not found or could not be opened");
+            else if (QC::String::strcmp(stage, "load-wrap-key") == 0)
+                ctx.writeLine("ownerdiag: existing wrap key missing, locked, or unavailable; no key created");
+            else if (QC::String::strcmp(stage, "sealed-tag") == 0)
+                ctx.writeLine("ownerdiag: credential authentication failed with the available wrap key");
+            else
+                ctx.writeLine("ownerdiag: existing credentials could not be verified; no files changed");
+            return true;
+        }
+
         static bool cmdSysUserEnroll(const char *args, const QC::Cmd::Context &ctx, void *)
         {
             // usage: sys_user_enroll <user> <pass>
@@ -10872,6 +10903,7 @@ namespace QK::CmdCenter
         (void)reg.registerCommandExAccess("sys_trust_check", QC::Cmd::AccessLevel::SysAdmin, &cmdSysTrustCheck, nullptr, "Run trust gate check through SC dispatch");
         (void)reg.registerCommandExAccess("sys_update_verify", QC::Cmd::AccessLevel::SysAdmin, &cmdSysUpdateVerify, nullptr, "Run update verify gate through SC dispatch");
         (void)reg.registerCommandExAccess("sys_user_enroll", QC::Cmd::AccessLevel::User, &cmdSysUserEnroll, nullptr, "Enroll Owner credentials (sys_user_enroll <user> <pass>)");
+        (void)reg.registerCommandExAccess("ownerdiag", QC::Cmd::AccessLevel::User, &cmdOwnerDiagnose, nullptr, "Read-only Owner credential diagnostic (ownerdiag)");
         (void)reg.registerCommandExAccess("sys_user_unlock", QC::Cmd::AccessLevel::User, &cmdSysUserUnlock, nullptr, "Unlock Owner session (sys_user_unlock <user> <pass>)");
         (void)reg.registerCommandExAccess("sys_user_lock", QC::Cmd::AccessLevel::User, &cmdSysUserLock, nullptr, "Lock Owner session (sys_user_lock)");
         (void)reg.registerCommandExAccess("sys_vault_request", QC::Cmd::AccessLevel::SysAdmin, &cmdSysVaultRequest, nullptr, "Submit SC vault request (sys_vault_request <request_text>)");

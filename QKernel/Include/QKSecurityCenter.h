@@ -174,6 +174,8 @@ namespace QK
         QC::Status getEnrolledOwnerUsername(char *outUsername, QC::usize outCap) const;
         void ownerLock();
         bool ownerIsEnrolled() const;
+        // Read-only credential check; never enrolls or creates a wrap key.
+        QC::Status diagnoseOwnerCredentials(const char *&stage) const;
         bool ownerUnlocked() const { return m_ownerUnlocked; }
         bool ownerLockedOut() const;
         QC::u64 ownerLockoutRemainingMs() const;

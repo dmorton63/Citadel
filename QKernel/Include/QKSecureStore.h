@@ -114,6 +114,13 @@ namespace QK
                                   QC::Vector<QC::u8> &out,
                                   const Config &cfg = defaultConfig());
 
+        // Verify an existing blob without creating or replacing its wrap key.
+        // On failure, stage identifies the operation without exposing blob contents.
+        QC::Status readExistingSealedBlob(const char *key,
+                                          QC::Vector<QC::u8> &out,
+                                          const char *&stage,
+                                          const Config &cfg = defaultConfig());
+
         // Reads a blob written by writeTpmSealedBlob().
         //
         // If the stored blob is TPM-accelerated format, TPM secret unseal must

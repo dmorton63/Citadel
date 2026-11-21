@@ -158,26 +158,6 @@ namespace QK::Boot::Tpm
             if (!Dev->bReady)
                 return QC::Status::Busy;
 
-            QC::u32 PolicySession = 0;
-            QC::Status St = Cmd::TpmStartPolicySession(nullptr, false, PolicySession);
-            if (St != QC::Status::Success)
-            {
-                SerialStr("SecureStoreTPM: StartAuthSession(POLICY) failed (rsp=0x");
-                SerialHex32Fixed(Cmd::LastResponseCode());
-                SerialStr(")\r\n");
-                return St;
-            }
-
-            St = Cmd::TpmPolicyPCR(nullptr, PolicySession);
-            if (St != QC::Status::Success)
-            {
-                SerialStr("SecureStoreTPM: PolicyPCR failed (rsp=0x");
-                SerialHex32Fixed(Cmd::LastResponseCode());
-                SerialStr(")\r\n");
-                (void)Cmd::TpmFlushContext(nullptr, PolicySession);
-                return St;
-            }
-
             if (Blob.size() < 16)
                 return QC::Status::Error;
             if (!(Blob[0] == 'W' && Blob[1] == 'K' && Blob[2] == 'T' && Blob[3] == '1'))
@@ -199,6 +179,26 @@ namespace QK::Boot::Tpm
             const QC::usize Total = 16u + static_cast<QC::usize>(PrivLen) + static_cast<QC::usize>(PubLen);
             if (Total != Blob.size())
                 return QC::Status::Error;
+
+            QC::u32 PolicySession = 0;
+            QC::Status St = Cmd::TpmStartPolicySession(nullptr, false, PolicySession);
+            if (St != QC::Status::Success)
+            {
+                SerialStr("SecureStoreTPM: StartAuthSession(POLICY) failed (rsp=0x");
+                SerialHex32Fixed(Cmd::LastResponseCode());
+                SerialStr(")\r\n");
+                return St;
+            }
+
+            St = Cmd::TpmPolicyPCR(nullptr, PolicySession);
+            if (St != QC::Status::Success)
+            {
+                SerialStr("SecureStoreTPM: PolicyPCR failed (rsp=0x");
+                SerialHex32Fixed(Cmd::LastResponseCode());
+                SerialStr(")\r\n");
+                (void)Cmd::TpmFlushContext(nullptr, PolicySession);
+                return St;
+            }
 
             QC::Vector<QC::u8> Priv2b;
             QC::Vector<QC::u8> Pub2b;
@@ -222,6 +222,7 @@ namespace QK::Boot::Tpm
                 QC::String::memset(Pub2b.data(), 0, Pub2b.size());
                 Priv2b.clear();
                 Pub2b.clear();
+                (void)Cmd::TpmFlushContext(nullptr, PolicySession);
                 return St;
             }
 
