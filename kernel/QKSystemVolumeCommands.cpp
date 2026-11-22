@@ -209,9 +209,11 @@ namespace QK
                     ctx.writeLine("usbvol: no removable USB FAT volumes registered (use USB3/xHCI port and FAT32 media)");
             }
 
-            static bool parseSysformatArgs(const char *args, bool &outForce, bool &outHasIndex, QC::usize &outIndex)
+            static bool parseSysformatArgs(const char *args, bool &outForce, bool &outConfirm,
+                                           bool &outHasIndex, QC::usize &outIndex)
             {
                 outForce = false;
+                outConfirm = false;
                 outHasIndex = false;
                 outIndex = 0;
 
@@ -233,6 +235,10 @@ namespace QK
                     if (tokenEqualsIgnoreCase(token, len, "force"))
                     {
                         outForce = true;
+                    }
+                    else if (tokenEqualsIgnoreCase(token, len, "confirm"))
+                    {
+                        outConfirm = true;
                     }
                     else
                     {
@@ -1298,6 +1304,8 @@ namespace QK
 
                 QKDrv::AHCI::DetectedDeviceInfo ahciDevices[8];
                 const QC::usize ahciCount = QKDrv::AHCI::enumerateDetectedDevices(ahciDevices, 8);
+                QKDrv::IDE::DetectedDeviceInfo ideDevices[4];
+                const QC::usize ideCount = QKDrv::IDE::enumerateDetectedDevices(ideDevices, 4);
 
                 for (QC::usize i = 0; i < ahciCount; ++i)
                 {
@@ -1524,15 +1532,38 @@ namespace QK
             {
                 QC::usize deviceIndex = 0;
                 bool force = false;
+                bool confirmed = false;
                 bool hasExplicitTarget = false;
 
                 writeInstallerStage(ctx, "discover", "begin");
 
-                if (!parseSysformatArgs(args, force, hasExplicitTarget, deviceIndex))
+                if (!parseSysformatArgs(args, force, confirmed, hasExplicitTarget, deviceIndex))
                 {
-                    ctx.writeLine("sysformat: usage: sysformat [force] [diskN|N]");
-                    ctx.writeLine("sysformat: example: sysformat disk0");
-                    ctx.writeLine("sysformat: example: sysformat force disk0");
+                    ctx.writeLine("sysformat: usage: sysformat diskN|N confirm [force]");
+                    ctx.writeLine("sysformat: example: sysformat disk0 confirm");
+                    ctx.writeLine("sysformat: example: sysformat disk0 confirm force");
+                    return true;
+                }
+
+                if (!hasExplicitTarget)
+                {
+                    ctx.writeLine("sysformat: target is required; run sysdisks and choose diskN");
+                    writeInstallerLine(ctx, "installer: status=failure stage=select operation=target disk=required recovery=sysdisks");
+                    return true;
+                }
+
+                if (!confirmed)
+                {
+                    char line[128];
+                    QC::usize pos = 0;
+                    QC::String::memset(line, 0, sizeof(line));
+                    appendText(line, sizeof(line), pos, "sysformat: explicit confirmation required for disk");
+                    appendUnsigned(line, sizeof(line), pos, deviceIndex);
+                    appendText(line, sizeof(line), pos, "; run sysformat disk");
+                    appendUnsigned(line, sizeof(line), pos, deviceIndex);
+                    appendText(line, sizeof(line), pos, " confirm");
+                    ctx.writeLine(line);
+                    writeInstallerLine(ctx, "installer: status=failure stage=select operation=confirmation disk=required recovery=sysdisks");
                     return true;
                 }
 
@@ -1556,6 +1587,24 @@ namespace QK
 
                 QKDrv::AHCI::DetectedDeviceInfo ahciDevices[8];
                 const QC::usize ahciCount = QKDrv::AHCI::enumerateDetectedDevices(ahciDevices, 8);
+
+                QKDrv::IDE::DetectedDeviceInfo ideDevices[4];
+                const QC::usize ideCount = QKDrv::IDE::enumerateDetectedDevices(ideDevices, 4);
+                const QC::usize diskCount = ahciCount + ideCount;
+                if (deviceIndex >= diskCount)
+                {
+                    char line[160];
+                    QC::usize pos = 0;
+                    QC::String::memset(line, 0, sizeof(line));
+                    appendText(line, sizeof(line), pos, "sysformat: invalid disk");
+                    appendUnsigned(line, sizeof(line), pos, deviceIndex);
+                    appendText(line, sizeof(line), pos, "; detected ");
+                    appendUnsigned(line, sizeof(line), pos, diskCount);
+                    appendText(line, sizeof(line), pos, " disk(s)");
+                    ctx.writeLine(line);
+                    writeInstallerLine(ctx, "installer: status=failure stage=select operation=invalid-target recovery=sysdisks");
+                    return true;
+                }
 
                 {
                     char line[256];
@@ -1835,7 +1884,7 @@ namespace QK
                 QC::Cmd::AccessLevel::Admin,
                 &cmdSysformat,
                 nullptr,
-                "Partition+format a detected disk as FAT32 and mount /system (sysformat [diskN|N])");
+                "Partition+format a selected disk as FAT32 and mount /system (sysformat diskN confirm [force])");
 
             (void)reg.registerCommandExAccess(
                 "sysmount",

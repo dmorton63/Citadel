@@ -279,7 +279,7 @@ Protected-path policy applies:
 
 ### System volume
 - `sysdisks` (User) — list legacy IDE disks Citadel can currently see, including size and basic layout state
-- `sysformat [diskN|N]` (Admin) — partition+format the selected detected disk as FAT32 and mount `/system`; without an argument it falls back to the first eligible detected disk
+- `sysformat diskN confirm [force]` (Admin) — partition+format an explicitly selected detected disk as FAT32 and mount `/system`; confirmation is mandatory and no implicit default target is allowed
 - `sysmount` (Admin) — probe+mount `/system` without formatting (useful after reboot or for recovery)
 - `sysprovenance` (User) — emit consolidated storage provenance for mounted volumes and discovered AHCI/IDE disks
 

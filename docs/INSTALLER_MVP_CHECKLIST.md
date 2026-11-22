@@ -47,14 +47,14 @@ Contract decisions for installer v1 (2026-06-13):
 - [x] Clearly label controller type, disk index, size, model, and current layout state.
 - [x] Show whether a disk already appears partitioned or FAT-formatted.
 - [x] Show whether a disk is already bound to `QFS_SYSTEM` or `QFS_SHARED`.
-- [ ] Require explicit operator selection of the install target.
-- [ ] Prevent ambiguous default-target behavior once multiple disks are present.
+- [x] Require explicit operator selection of the install target.
+- [x] Prevent ambiguous default-target behavior once multiple disks are present.
 
 ## Phase 4: Safe Format And Mount Flow
 
 - [x] Wrap format, reprobe, and mount into one installer operation.
-- [ ] Require explicit confirmation before destructive formatting.
-- [ ] Refuse format when the target selection is invalid or ambiguous.
+- [x] Require explicit confirmation before destructive formatting.
+- [x] Refuse format when the target selection is invalid or ambiguous.
 - [ ] Emit clear failure states for probe failure, partition failure, format failure, and mount failure.
 - [ ] Verify that `/system` is mounted before payload deployment begins.
 
@@ -138,7 +138,7 @@ Boot-path decisions for installer v1 (2026-06-13):
 Current installer command surface (implemented in [kernel/QKSystemVolumeCommands.cpp](../kernel/QKSystemVolumeCommands.cpp)):
 
 - `sysdisks` prints the install-relevant disk inventory and stage markers for discovery.
-- `sysformat [diskN|N]` wraps select, format, probe/mount, payload verification, and completion reporting.
+- `sysformat diskN confirm [force]` wraps explicit selection, format, probe/mount, payload verification, and completion reporting.
 - `sysmount` reprobes and mounts `/system` without reformatting.
 - `sysverify` checks the installer-required payload set under `/system`.
 

@@ -716,7 +716,8 @@ namespace QK::Boot::Config
             LogStr(Log, "- View commands: help\r\n");
             LogStr(Log, "- Enable admin commands: admin enable (run twice)\r\n");
             LogStr(Log, "- Probe and mount system volume: sysmount\r\n");
-            LogStr(Log, "- Partition+format a blank system disk: sysformat\r\n");
+            LogStr(Log, "- Discover disks: sysdisks\r\n");
+            LogStr(Log, "- Partition+format a selected system disk: sysformat diskN confirm\r\n");
             LogStr(Log, "- Reboot after mount/format: reboot now\r\n");
             LogStr(Log, "\r\n");
         }
