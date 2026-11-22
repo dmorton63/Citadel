@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.20)
 project(Citadel VERSION 1.0.0 LANGUAGES C CXX ASM)
 
+enable_testing()
+
 # Helps editors (VS Code, clangd) mirror CMake's exact include paths/defines.
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
@@ -85,3 +87,32 @@ add_subdirectory(QPR)
 add_subdirectory(QQuantum)
 add_subdirectory(QSecurityCenter)
 add_subdirectory(kernel)
+
+add_executable(test_fat32_io
+    tools/tests/test_fat32_io.cpp
+    QCCore/Src/QCString.cpp
+    QFileSystem/Src/QFSFAT32.cpp
+    QFileSystem/Src/QFSFile.cpp
+    QFileSystem/Src/QFSDirectory.cpp
+    QFileSystem/Src/QFSPath.cpp
+)
+target_include_directories(test_fat32_io PRIVATE
+    QFileSystem/Include
+    QCCore/Include
+    QKMemory/Include
+)
+add_test(NAME fat32_io COMMAND test_fat32_io)
+
+add_executable(test_ownerdiag_store
+    tools/tests/test_ownerdiag_store.cpp
+    QCCore/Src/QCString.cpp
+    QCCore/Src/QCSha256.cpp
+    QKernel/Src/QKSecureStore.cpp
+)
+target_include_directories(test_ownerdiag_store PRIVATE
+    QFileSystem/Include
+    QCCore/Include
+    QKMemory/Include
+    QKernel/Include
+)
+add_test(NAME ownerdiag_store COMMAND test_ownerdiag_store)

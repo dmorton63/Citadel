@@ -65,6 +65,14 @@ namespace QFS
         return QC::Status::NotFound;
     }
     QC::Status VFS::createDir(const char *) { ++writes; return QC::Status::Success; }
+    bool VFS::exists(const char *path)
+    {
+        if (!path)
+            return false;
+        if (std::strcmp(path, "/test") == 0)
+            return true;
+        return files.count(path) != 0;
+    }
     QC::Status VFS::remove(const char *path)
     {
         ++writes;
