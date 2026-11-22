@@ -182,9 +182,9 @@ Operator output contract for installer v1 (2026-06-13):
 
 ## Phase 8: Verification
 
-- [ ] Verify the installer flow in QEMU using the current supported storage path.
+- [x] Verify the installer flow in QEMU using the current supported storage path.
 - [ ] Verify the installer flow on the real test machine.
-- [ ] Verify that `/system` contents persist across reboot.
+- [x] Verify that `/system` contents persist across reboot.
 - [ ] Verify that a production-mode boot still accepts the installed assets and configuration.
 - [ ] Verify that desktop startup still loads correctly from the installed persistent state.
 
