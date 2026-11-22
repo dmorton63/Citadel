@@ -8,6 +8,7 @@
 #include "QKBootTPMTransport.h"
 
 #include "QCString.h"
+#include "QCSha256.h"
 #include "QFSFile.h"
 #include "QFSVFS.h"
 #include "QKEntropy.h"
@@ -45,7 +46,8 @@ namespace QK::Boot::Tpm
             SerialStr(HexBuf);
         }
 
-        static QC::Status SecureStoreTpmSealWrapKeyLocked(void *User, const QC::u8 *WrapKey, QC::usize WrapKeyLen, QC::Vector<QC::u8> &OutBlob)
+        static QC::Status SecureStoreTpmSealWrapKeyLocked(void *User, const QC::u8 *WrapKey, QC::usize WrapKeyLen,
+                                                          QC::Vector<QC::u8> &OutBlob, const QC::u8 *TargetPcr = nullptr)
         {
             if (!User || !WrapKey || WrapKeyLen != 32)
                 return QC::Status::InvalidParam;
@@ -55,7 +57,7 @@ namespace QK::Boot::Tpm
                 return QC::Status::Busy;
 
             QC::u32 PolicyDigestSession = 0;
-            QC::Status St = Cmd::TpmStartPolicySession(nullptr, false, PolicyDigestSession);
+            QC::Status St = Cmd::TpmStartPolicySession(nullptr, TargetPcr != nullptr, PolicyDigestSession);
             if (St != QC::Status::Success)
             {
                 SerialStr("SecureStoreTPM: StartAuthSession(POLICY-DIGEST) failed (rsp=0x");
@@ -64,7 +66,11 @@ namespace QK::Boot::Tpm
                 return St;
             }
 
-            St = Cmd::TpmPolicyPCR(nullptr, PolicyDigestSession);
+            QC::u8 TargetDigest[32] = {};
+            if (TargetPcr)
+                QC::Sha256(TargetPcr, 32, TargetDigest);
+            St = Cmd::TpmPolicyPCR(nullptr, PolicyDigestSession, TargetPcr ? TargetDigest : nullptr);
+            QC::String::memset(TargetDigest, 0, sizeof(TargetDigest));
             if (St != QC::Status::Success)
             {
                 SerialStr("SecureStoreTPM: PolicyPCR(POLICY-DIGEST) failed (rsp=0x");
@@ -505,6 +511,25 @@ namespace QK::Boot::Tpm
             return SecureStoreTpmSealWrapKeyLocked(User, WrapKey, WrapKeyLen, OutBlob);
         }
 
+        static QC::Status SecureStoreTpmSealWrapKeyForPcr7(void *User, const QC::u8 *WrapKey,
+                                                            QC::usize WrapKeyLen, const QC::u8 TargetPcr[32],
+                                                            QC::Vector<QC::u8> &OutBlob)
+        {
+            if (!User || !TargetPcr)
+                return QC::Status::InvalidParam;
+            FTpmOpGuard Guard;
+            if (!Guard.Acquired())
+                return QC::Status::Busy;
+            QC::u8 CurrentPcr[32];
+            QC::u32 Counter = 0;
+            const QC::Status ReadSt = Cmd::TpmPcrReadSha256(7, CurrentPcr, Counter);
+            if (ReadSt != QC::Status::Success)
+                return ReadSt;
+            if (QC::String::memcmp(CurrentPcr, TargetPcr, sizeof(CurrentPcr)) == 0)
+                return QC::Status::InvalidParam;
+            return SecureStoreTpmSealWrapKeyLocked(User, WrapKey, WrapKeyLen, OutBlob, TargetPcr);
+        }
+
         static QC::Status SecureStoreTpmUnsealWrapKey(void *User, const QC::Vector<QC::u8> &Blob, QC::u8 *OutWrapKey, QC::usize OutWrapKeyLen)
         {
             FTpmOpGuard Guard;
@@ -839,6 +864,7 @@ namespace QK::Boot::Tpm
             ScCfg.tpmSealWrapKey = &SecureStoreTpmSealWrapKey;
             ScCfg.tpmUnsealWrapKey = &SecureStoreTpmUnsealWrapKey;
             ScCfg.tpmDiagnoseUnsealWrapKey = &SecureStoreTpmDiagnoseUnsealWrapKey;
+            ScCfg.tpmSealWrapKeyForPcr7 = &SecureStoreTpmSealWrapKeyForPcr7;
             ScCfg.tpmSealSecret = &SecureStoreTpmSealSecret;
             ScCfg.tpmUnsealSecret = &SecureStoreTpmUnsealSecret;
             QK::SecureStore::setDefaultConfig(ScCfg);

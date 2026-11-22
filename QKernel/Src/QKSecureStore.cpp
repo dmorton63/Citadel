@@ -336,6 +336,7 @@ namespace
     constexpr const char *kDefaultHiddenBaseDir = "/system/.sc";
     constexpr const char *kLegacyBaseDir = "/system/sc";
     constexpr const char *kCompatBaseDir = "/system";
+    constexpr const char *kKernelWrapKeyTpmName = "WRAPKRNL.TPM";
 
     constexpr QC::u8 kWrapKeyKdfMagic[4] = {'W', 'K', 'D', '1'};
     constexpr QC::u32 kWrapKeyKdfVersion = 1;
@@ -605,6 +606,8 @@ namespace
         return QC::Status::Success;
     }
 
+    static QC::Status probeSecurityBlob(const char *key, const QK::SecureStore::Config &cfg);
+
     static QC::Status loadWrapKey(QC::u8 outKey[32], const QK::SecureStore::Config &cfg, bool allowCreate,
                                   QK::SecureStore::WrapKeyDiagnostic *diagnostic = nullptr)
     {
@@ -625,12 +628,36 @@ namespace
                 st = diagnostic && cfg.tpmDiagnoseUnsealWrapKey
                          ? cfg.tpmDiagnoseUnsealWrapKey(cfg.tpmUser, blob, outKey, 32, *diagnostic)
                          : cfg.tpmUnsealWrapKey(cfg.tpmUser, blob, outKey, 32);
-                if (st != QC::Status::Success)
-                    QC_LOG_ERROR("SecureStore", "stage=tpm-unseal-wrap-key status=%d", static_cast<QC::i32>(st));
                 // best-effort wipe
                 if (blob.size() > 0)
                     QC::String::memset(blob.data(), 0, blob.size());
                 blob.clear();
+                if (st == QC::Status::Error)
+                {
+                    QC::Vector<QC::u8> alternate;
+                    const QC::Status readSt = QK::SecureStore::readBlob(kKernelWrapKeyTpmName, alternate, cfg);
+                    if (readSt == QC::Status::Success)
+                    {
+                        if (diagnostic)
+                        {
+                            *diagnostic = QK::SecureStore::WrapKeyDiagnostic{};
+                            diagnostic->path = "tpm-kernel";
+                            diagnostic->operation = "tpm-unseal";
+                        }
+                        st = diagnostic && cfg.tpmDiagnoseUnsealWrapKey
+                                 ? cfg.tpmDiagnoseUnsealWrapKey(cfg.tpmUser, alternate, outKey, 32, *diagnostic)
+                                 : cfg.tpmUnsealWrapKey(cfg.tpmUser, alternate, outKey, 32);
+                        if (alternate.size() > 0)
+                            QC::String::memset(alternate.data(), 0, alternate.size());
+                    }
+                    else if (readSt != QC::Status::NotFound)
+                    {
+                        QC_LOG_ERROR("SecureStore", "stage=read-alternate-wrap-key status=%d", static_cast<QC::i32>(readSt));
+                        return readSt;
+                    }
+                }
+                if (st != QC::Status::Success)
+                    QC_LOG_ERROR("SecureStore", "stage=tpm-unseal-wrap-key status=%d", static_cast<QC::i32>(st));
                 return st;
             }
 
@@ -640,8 +667,39 @@ namespace
                 return st;
             }
 
+            // Never provision a different primary key while an alternate exists.
+            QC::Vector<QC::u8> alternate;
+            const QC::Status alternateSt = QK::SecureStore::readBlob(kKernelWrapKeyTpmName, alternate, cfg);
+            if (alternateSt == QC::Status::Success)
+            {
+                if (diagnostic)
+                {
+                    diagnostic->path = "tpm-kernel";
+                    diagnostic->operation = "tpm-unseal";
+                }
+                st = diagnostic && cfg.tpmDiagnoseUnsealWrapKey
+                         ? cfg.tpmDiagnoseUnsealWrapKey(cfg.tpmUser, alternate, outKey, 32, *diagnostic)
+                         : cfg.tpmUnsealWrapKey(cfg.tpmUser, alternate, outKey, 32);
+                if (alternate.size() > 0)
+                    QC::String::memset(alternate.data(), 0, alternate.size());
+                return st;
+            }
+            if (alternateSt != QC::Status::NotFound)
+                return alternateSt;
             if (!allowCreate)
                 return QC::Status::NotFound;
+            const char *keyNames[] = {kWrapKeyTpmName, kKernelWrapKeyTpmName, "OWNERCRD", "SSTWRAP"};
+            for (const char *keyName : keyNames)
+            {
+                const QC::Status probeSt = probeSecurityBlob(keyName, cfg);
+                if (probeSt == QC::Status::Success)
+                {
+                    QC_LOG_ERROR("SecureStore", "stage=existing-security-data-without-key");
+                    return QC::Status::Error;
+                }
+                if (probeSt != QC::Status::NotFound)
+                    return probeSt;
+            }
 
             // No TPM blob yet: generate wrap key, seal it, and persist blob.
             st = QK::Entropy::fillRandom(outKey, 32);
@@ -815,6 +873,7 @@ namespace
             if (st != QC::Status::Success)
                 return st;
         }
+
         {
             QC::Status st = appendTo(out, outSize, key);
             if (st != QC::Status::Success)
@@ -822,6 +881,24 @@ namespace
         }
 
         return QC::Status::Success;
+    }
+
+    static QC::Status probeSecurityBlob(const char *key, const QK::SecureStore::Config &cfg)
+    {
+        const char *dirs[] = {resolveBaseDirForPath(cfg), kDefaultHiddenBaseDir, kLegacyBaseDir, kCompatBaseDir};
+        const QC::usize count = (!cfg.baseDir || isDefaultHiddenBaseDir(cfg.baseDir)) ? 4 : 1;
+        for (QC::usize i = 0; i < count; ++i)
+        {
+            char path[256];
+            QC::Status st = buildPath(path, sizeof(path), dirs[i], key);
+            if (st != QC::Status::Success)
+                return st;
+            QFS::FileInfo info{};
+            st = QFS::VFS::instance().stat(path, &info);
+            if (st != QC::Status::NotFound)
+                return st;
+        }
+        return QC::Status::NotFound;
     }
 
     static QC::Status ensureDirRecursive(const char *absPath)
@@ -1038,12 +1115,28 @@ namespace QK
             QFS::File *file = vfs.open(path, QFS::OpenMode::Read);
             if (!file)
             {
+                QFS::FileInfo info{};
+                st = vfs.stat(path, &info);
+                if (st == QC::Status::Success)
+                    return QC::Status::Error;
+                if (st != QC::Status::NotFound)
+                    return st;
                 // Compatibility path: attempt legacy non-hidden SC storage location.
                 if (isDefaultHiddenBaseDir(baseDir))
                 {
                     char legacyPath[256];
-                    if (buildPath(legacyPath, sizeof(legacyPath), kLegacyBaseDir, key) == QC::Status::Success)
-                        file = vfs.open(legacyPath, QFS::OpenMode::Read);
+                    st = buildPath(legacyPath, sizeof(legacyPath), kLegacyBaseDir, key);
+                    if (st != QC::Status::Success)
+                        return st;
+                    file = vfs.open(legacyPath, QFS::OpenMode::Read);
+                    if (!file)
+                    {
+                        st = vfs.stat(legacyPath, &info);
+                        if (st == QC::Status::Success)
+                            return QC::Status::Error;
+                        if (st != QC::Status::NotFound)
+                            return st;
+                    }
                 }
                 if (!file)
                     return QC::Status::NotFound;
@@ -1059,6 +1152,102 @@ namespace QK
             if (!outWrapKey)
                 return QC::Status::InvalidParam;
             return loadWrapKey(outWrapKey, cfg, false);
+        }
+
+        QC::Status authorizeKernelPcr7(const QC::u8 pcr[32], const char *&stage, const Config &cfg)
+        {
+            stage = "validate";
+            if (!pcr)
+                return QC::Status::InvalidParam;
+            if (!tpm_present(cfg) || !cfg.tpmSealWrapKeyForPcr7)
+                return QC::Status::NotSupported;
+
+            const char *baseDir = resolveBaseDirForPath(cfg);
+            char path[256];
+            QC::Status st = buildPath(path, sizeof(path), baseDir, kKernelWrapKeyTpmName);
+            if (st != QC::Status::Success)
+                return st;
+            QFS::VFS &vfs = QFS::VFS::instance();
+            stage = "check-alternate";
+            st = probeSecurityBlob(kKernelWrapKeyTpmName, cfg);
+            if (st == QC::Status::Success)
+                return QC::Status::Busy;
+            if (st != QC::Status::NotFound)
+                return st;
+
+            QC::Vector<QC::u8> original;
+            stage = "read-original";
+            st = readBlob("WRAPKEY.TPM", original, cfg);
+            if (st != QC::Status::Success)
+                return st;
+
+            QC::u8 wrapKey[32] = {};
+            stage = "unseal-original";
+            st = cfg.tpmUnsealWrapKey(cfg.tpmUser, original, wrapKey, sizeof(wrapKey));
+            if (original.size())
+                QC::String::memset(original.data(), 0, original.size());
+            if (st != QC::Status::Success)
+            {
+                QC::String::memset(wrapKey, 0, sizeof(wrapKey));
+                return st;
+            }
+
+            stage = "verify-owner";
+            QC::Vector<QC::u8> owner;
+            const char *ownerStage = nullptr;
+            st = readExistingSealedBlob("OWNERCRD", owner, ownerStage, cfg);
+            if (owner.size())
+                secureZero(owner.data(), owner.size());
+            if (st != QC::Status::Success)
+            {
+                secureZero(wrapKey, sizeof(wrapKey));
+                return st;
+            }
+
+            QC::Vector<QC::u8> alternate;
+            stage = "seal-alternate";
+            st = cfg.tpmSealWrapKeyForPcr7(cfg.tpmUser, wrapKey, sizeof(wrapKey), pcr, alternate);
+            QC::String::memset(wrapKey, 0, sizeof(wrapKey));
+            if (st != QC::Status::Success)
+                return st;
+            if (alternate.size() == 0)
+                return QC::Status::Error;
+
+            stage = "write-alternate";
+            QFS::File *file = vfs.open(path, QFS::OpenMode::Write | QFS::OpenMode::Create);
+            if (!file)
+                st = QC::Status::Error;
+            else
+            {
+                if (file->size() != 0)
+                    st = QC::Status::Busy;
+                else
+                {
+                    st = writeAll(file, alternate.data(), alternate.size());
+                    if (st == QC::Status::Success)
+                        st = file->sync();
+                }
+                const QC::Status closeSt = vfs.close(file);
+                if (st == QC::Status::Success)
+                    st = closeSt;
+            }
+            if (st == QC::Status::Success)
+            {
+                stage = "verify-alternate";
+                QC::Vector<QC::u8> reread;
+                st = readBlob(kKernelWrapKeyTpmName, reread, cfg);
+                if (st == QC::Status::Success &&
+                    (reread.size() != alternate.size() ||
+                     QC::String::memcmp(reread.data(), alternate.data(), alternate.size()) != 0))
+                    st = QC::Status::Error;
+                if (reread.size())
+                    QC::String::memset(reread.data(), 0, reread.size());
+            }
+            if (alternate.size())
+                QC::String::memset(alternate.data(), 0, alternate.size());
+            if (st == QC::Status::Success)
+                stage = "ok";
+            return st;
         }
 
         QC::Status getOrCreateWrapKey(QC::u8 outWrapKey[32], const Config &cfg)

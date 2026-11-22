@@ -56,6 +56,12 @@ namespace QK
                                                    QC::usize outWrapKeyLen,
                                                    WrapKeyDiagnostic &diagnostic) = nullptr;
 
+            QC::Status (*tpmSealWrapKeyForPcr7)(void *user,
+                                                const QC::u8 *wrapKey,
+                                                QC::usize wrapKeyLen,
+                                                const QC::u8 pcr[32],
+                                                QC::Vector<QC::u8> &outBlob) = nullptr;
+
             // Optional TPM-backed generic secret sealing.
             //
             // These APIs intentionally operate on opaque blobs, so callers can
@@ -154,6 +160,10 @@ namespace QK
         // - NotFound: wrap key not present yet.
         // - Error: wrap key present but invalid/unsealable.
         QC::Status readWrapKey(QC::u8 outWrapKey[32], const Config &cfg = defaultConfig());
+
+        // Add an alternate PCR 7 binding without changing the existing TPM blob.
+        QC::Status authorizeKernelPcr7(const QC::u8 pcr[32], const char *&stage,
+                                      const Config &cfg = defaultConfig());
 
         // Returns the SecureStore wrap key, creating it if necessary.
         //

@@ -373,6 +373,77 @@ namespace QK::CmdCenter
         // Forward declaration (definition is later in this TU).
         static bool readToken(const char *&p, char *out, QC::usize outSize);
 
+        static bool cmdOwnerAuthorizeKernel(const char *args, const QC::Cmd::Context &ctx, void *)
+        {
+#if !defined(CITADEL_EXPERIMENTAL_OWNERKERNEL)
+            (void)args;
+            ctx.writeLine("ownerkernel: unavailable; migration storage safeguards are incomplete");
+            return true;
+#else
+            char pcrText[66] = {};
+            char confirm[66] = {};
+            char presence[16] = {};
+            char extra[2] = {};
+            const char *p = args;
+            if (!readToken(p, pcrText, sizeof(pcrText)) ||
+                !readToken(p, confirm, sizeof(confirm)) ||
+                !readToken(p, presence, sizeof(presence)) ||
+                readToken(p, extra, sizeof(extra)) ||
+                QC::String::strlen(pcrText) != 64 || QC::String::strcmp(pcrText, confirm) != 0 ||
+                QC::String::strcmp(presence, "present") != 0)
+            {
+                ctx.writeLine("usage: ownerkernel <kernel-pcr7-hex> <same-pcr7-hex> present");
+                return true;
+            }
+            if (!QK::SecurityCenter::instance().ownerUnlocked() ||
+                QK::Boot::Config::GetStartupMode() != QK::Boot::Config::StartupMode::Terminal)
+            {
+                ctx.writeLine("ownerkernel: Owner login and terminal startup required");
+                return true;
+            }
+            if (!QFS::VolumeManager::instance().isMounted("QFS_SYSTEM"))
+            {
+                ctx.writeLine("ownerkernel: persistent system volume is not mounted");
+                return true;
+            }
+            const auto nibble = [](char c) -> int
+            {
+                if (c >= '0' && c <= '9')
+                    return c - '0';
+                if (c >= 'a' && c <= 'f')
+                    return c - 'a' + 10;
+                if (c >= 'A' && c <= 'F')
+                    return c - 'A' + 10;
+                return -1;
+            };
+            QC::u8 pcr[32];
+            for (QC::usize i = 0; i < sizeof(pcr); ++i)
+            {
+                const int hi = nibble(pcrText[i * 2]);
+                const int lo = nibble(pcrText[i * 2 + 1]);
+                if (hi < 0 || lo < 0)
+                {
+                    ctx.writeLine("ownerkernel: invalid PCR 7 hexadecimal value");
+                    return true;
+                }
+                pcr[i] = static_cast<QC::u8>((hi << 4) | lo);
+            }
+            const char *stage = "unknown";
+            const QC::Status st = QK::SecureStore::authorizeKernelPcr7(pcr, stage);
+            char line[128] = {};
+            (void)appendString(line, sizeof(line), "ownerkernel: status=");
+            (void)appendString(line, sizeof(line), statusName(st));
+            (void)appendString(line, sizeof(line), " stage=");
+            (void)appendString(line, sizeof(line), stage);
+            ctx.writeLine(line);
+            if (st == QC::Status::Success)
+                ctx.writeLine("ownerkernel: alternate read back; original key not intentionally changed");
+            else
+                ctx.writeLine("ownerkernel: failed; an incomplete alternate may remain; original key not intentionally changed");
+            return true;
+#endif
+        }
+
         static bool cmdOwnerDiagnose(const char *args, const QC::Cmd::Context &ctx, void *)
         {
             char token[8];
@@ -10921,6 +10992,7 @@ namespace QK::CmdCenter
         (void)reg.registerCommandExAccess("sys_update_verify", QC::Cmd::AccessLevel::SysAdmin, &cmdSysUpdateVerify, nullptr, "Run update verify gate through SC dispatch");
         (void)reg.registerCommandExAccess("sys_user_enroll", QC::Cmd::AccessLevel::User, &cmdSysUserEnroll, nullptr, "Enroll Owner credentials (sys_user_enroll <user> <pass>)");
         (void)reg.registerCommandExAccess("ownerdiag", QC::Cmd::AccessLevel::User, &cmdOwnerDiagnose, nullptr, "Read-only Owner credential diagnostic (ownerdiag)");
+        (void)reg.registerCommandExAccess("ownerkernel", QC::Cmd::AccessLevel::User, &cmdOwnerAuthorizeKernel, nullptr, "Authorize a Kernel PCR 7 value using the existing Owner key");
         (void)reg.registerCommandExAccess("sys_user_unlock", QC::Cmd::AccessLevel::User, &cmdSysUserUnlock, nullptr, "Unlock Owner session (sys_user_unlock <user> <pass>)");
         (void)reg.registerCommandExAccess("sys_user_lock", QC::Cmd::AccessLevel::User, &cmdSysUserLock, nullptr, "Lock Owner session (sys_user_lock)");
         (void)reg.registerCommandExAccess("sys_vault_request", QC::Cmd::AccessLevel::SysAdmin, &cmdSysVaultRequest, nullptr, "Submit SC vault request (sys_vault_request <request_text>)");

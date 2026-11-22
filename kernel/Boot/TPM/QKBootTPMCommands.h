@@ -22,7 +22,7 @@ namespace QK::Boot::Tpm::Cmd
     bool TpmRspParams(const QC::u8 *Rsp, QC::u32 RspLen, const QC::u8 *&OutParams, QC::u32 &OutParamsLen);
 
     QC::Status TpmStartPolicySession(FLogFn Log, bool bTrial, QC::u32 &OutSession);
-    QC::Status TpmPolicyPCR(FLogFn Log, QC::u32 PolicySession);
+    QC::Status TpmPolicyPCR(FLogFn Log, QC::u32 PolicySession, const QC::u8 *PcrDigest = nullptr);
     QC::Status TpmPcrExtendSha256(FLogFn Log, QC::u32 PcrIndex, const QC::u8 Digest[32]);
     QC::Status TpmPolicyGetDigest(FLogFn Log, QC::u32 PolicySession, QC::u8 OutDigest[32]);
     QC::Status TpmCreatePrimaryStorageKey(FLogFn Log, QC::u32 &OutHandle);

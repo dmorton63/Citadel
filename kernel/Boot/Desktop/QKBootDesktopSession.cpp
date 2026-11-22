@@ -432,6 +432,21 @@ namespace
         if (!QK::SecureStore::tpm_present())
             return false;
 
+        QFS::VFS &vfs = QFS::VFS::instance();
+        const char *protectedPaths[] = {
+            "/system/.sc/OWNERCRD", "/system/sc/OWNERCRD", "/system/OWNERCRD",
+            "/system/.sc/WRAPKRNL.TPM", "/system/sc/WRAPKRNL.TPM", "/system/WRAPKRNL.TPM",
+        };
+        for (const char *path : protectedPaths)
+        {
+            QFS::FileInfo info{};
+            if (vfs.stat(path, &info) != QC::Status::NotFound)
+            {
+                QK::Console::write("SecureStore dev-recovery: existing Owner data protected; no anchor reset\r\n");
+                return false;
+            }
+        }
+
         constexpr const char *kWrapKeyTpm = "WRAPKEY.TPM";
         constexpr const char *kWrappedSst = "SSTWRAP";
         constexpr const char *kRetiringSstMarker = "SST.RET";

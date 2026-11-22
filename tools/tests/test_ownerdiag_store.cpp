@@ -14,6 +14,10 @@ static std::map<std::string, std::vector<QC::u8>> files;
 static int writes = 0;
 static int seals = 0;
 static bool unsealFails = false;
+static bool failWrite = false;
+static QC::u8 currentPcr = 0;
+static std::string blockedRead;
+static std::string failedStat;
 
 namespace QC
 {
@@ -46,9 +50,16 @@ namespace QFS
     }
     QC::Status VFS::stat(const char *path, FileInfo *info)
     {
+        if (failedStat == path)
+            return QC::Status::Error;
         if (std::strcmp(path, "/test") == 0)
         {
             info->type = FileType::Directory;
+            return QC::Status::Success;
+        }
+        if (files.count(path))
+        {
+            info->type = FileType::Regular;
             return QC::Status::Success;
         }
         return QC::Status::NotFound;
@@ -64,12 +75,15 @@ namespace QFS
     File::~File() = default;
     File *VFS::open(const char *path, OpenMode mode)
     {
+        if ((mode & OpenMode::Read) && blockedRead == path)
+            return nullptr;
         auto it = files.find(path);
         if (mode & OpenMode::Write)
         {
             ++writes;
             it = files.emplace(path, std::vector<QC::u8>{}).first;
-            it->second.clear();
+            if (mode & OpenMode::Truncate)
+                it->second.clear();
         }
         if (it == files.end())
             return nullptr;
@@ -89,6 +103,8 @@ namespace QFS
     }
     QC::isize File::write(const void *in, QC::usize size)
     {
+        if (failWrite)
+            return -1;
         auto &data = *static_cast<std::vector<QC::u8> *>(handle());
         const auto *bytes = static_cast<const QC::u8 *>(in);
         data.insert(data.end(), bytes, bytes + size);
@@ -131,6 +147,11 @@ int main()
     assert(std::strcmp(stage, "load-wrap-key") == 0);
     assert(std::strcmp(diagnostic.operation, "read-tpm-key") == 0);
     assert(files.size() == 1 && writes == 0 && seals == 0);
+
+    QC::u8 key[32] = {};
+    assert(QK::SecureStore::getOrCreateWrapKey(key, cfg) == QC::Status::Error);
+    assert(files.size() == 1 && writes == 0 && seals == 0);
+    files.clear();
 
     const char content[] = "test credential record";
     assert(QK::SecureStore::writeSealedBlob("OWNERCRD", content, sizeof(content), cfg) == QC::Status::Success);
@@ -176,4 +197,89 @@ int main()
     assert(QK::SecureStore::readExistingSealedBlob("OWNERCRD", result, stage, cfg) == QC::Status::Error);
     assert(std::strcmp(stage, "sealed-tag") == 0);
     assert(files == tampered && writes == writesBefore && seals == sealsBefore);
+
+    files = snapshot;
+    const auto original = files["/test/WRAPKEY.TPM"];
+    cfg.tpmUnsealWrapKey = [](void *, const QC::Vector<QC::u8> &blob, QC::u8 *key, QC::usize size)
+    {
+        if (size != 32 || (blob.size() != 32 && blob.size() != 64))
+            return QC::Status::Error;
+        if ((blob.size() == 32 && currentPcr != 1) ||
+            (blob.size() == 64 && currentPcr != blob[32]))
+            return QC::Status::Error;
+        std::memcpy(key, blob.data(), size);
+        return QC::Status::Success;
+    };
+    cfg.tpmSealWrapKeyForPcr7 = [](void *, const QC::u8 *key, QC::usize size, const QC::u8 pcr[32],
+                                    QC::Vector<QC::u8> &blob)
+    {
+        if (size != 32)
+            return QC::Status::Error;
+        blob.resize(64);
+        std::memcpy(blob.data(), key, 32);
+        std::memcpy(blob.data() + 32, pcr, 32);
+        return QC::Status::Success;
+    };
+    QC::u8 target[32] = {2};
+    currentPcr = 3;
+    assert(QK::SecureStore::authorizeKernelPcr7(target, stage, cfg) == QC::Status::Error);
+    assert(std::strcmp(stage, "unseal-original") == 0);
+    assert(files == snapshot);
+
+    currentPcr = 1;
+    files["/test/OWNERCRD"][24] ^= 1;
+    const auto invalidOwner = files;
+    assert(QK::SecureStore::authorizeKernelPcr7(target, stage, cfg) == QC::Status::Error);
+    assert(std::strcmp(stage, "verify-owner") == 0 && files == invalidOwner);
+    files = snapshot;
+    assert(QK::SecureStore::authorizeKernelPcr7(target, stage, cfg) == QC::Status::Success);
+    assert(std::strcmp(stage, "ok") == 0);
+    assert(files["/test/WRAPKEY.TPM"] == original);
+    const auto migrated = files;
+    assert(QK::SecureStore::authorizeKernelPcr7(target, stage, cfg) == QC::Status::Busy);
+    assert(files == migrated);
+    assert(QK::SecureStore::readExistingSealedBlob("OWNERCRD", result, stage, cfg, &diagnostic) == QC::Status::Success);
+    currentPcr = 2;
+    assert(QK::SecureStore::readExistingSealedBlob("OWNERCRD", result, stage, cfg, &diagnostic) == QC::Status::Success);
+    assert(std::strcmp(diagnostic.path, "tpm-kernel") == 0);
+    currentPcr = 3;
+    assert(QK::SecureStore::readExistingSealedBlob("OWNERCRD", result, stage, cfg) == QC::Status::Error);
+    assert(files == migrated);
+
+    files = snapshot;
+    currentPcr = 1;
+    failWrite = true;
+    assert(QK::SecureStore::authorizeKernelPcr7(target, stage, cfg) == QC::Status::Error);
+    assert(std::strcmp(stage, "write-alternate") == 0);
+    failWrite = false;
+    assert(files["/test/WRAPKEY.TPM"] == original);
+    assert(QK::SecureStore::authorizeKernelPcr7(target, stage, cfg) == QC::Status::Busy);
+
+    files = snapshot;
+    blockedRead = "/test/WRAPKEY.TPM";
+    const auto sealsBeforeBlockedRead = seals;
+    assert(QK::SecureStore::getOrCreateWrapKey(key, cfg) == QC::Status::Error);
+    assert(files == snapshot && seals == sealsBeforeBlockedRead);
+    blockedRead.clear();
+
+    files.erase("/test/WRAPKEY.TPM");
+    files["/test/WRAPKRNL.TPM"] = migrated.at("/test/WRAPKRNL.TPM");
+    blockedRead = "/test/WRAPKRNL.TPM";
+    const auto blockedSnapshot = files;
+    assert(QK::SecureStore::getOrCreateWrapKey(key, cfg) == QC::Status::Error);
+    assert(files == blockedSnapshot && seals == sealsBeforeBlockedRead);
+    blockedRead.clear();
+
+    files = snapshot;
+    failedStat = "/test/WRAPKRNL.TPM";
+    assert(QK::SecureStore::authorizeKernelPcr7(target, stage, cfg) == QC::Status::Error);
+    assert(files == snapshot);
+    failedStat.clear();
+
+    QK::SecureStore::Config defaultCfg = cfg;
+    defaultCfg.baseDir = nullptr;
+    files["/system/WRAPKRNL.TPM"] = {1};
+    const auto compatibilitySnapshot = files;
+    assert(QK::SecureStore::authorizeKernelPcr7(target, stage, defaultCfg) == QC::Status::Busy);
+    assert(files == compatibilitySnapshot);
 }

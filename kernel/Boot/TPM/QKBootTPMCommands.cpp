@@ -138,7 +138,7 @@ namespace QK::Boot::Tpm::Cmd
         return QC::Status::Success;
     }
 
-    QC::Status TpmPolicyPCR(FLogFn Log, QC::u32 PolicySession)
+    QC::Status TpmPolicyPCR(FLogFn Log, QC::u32 PolicySession, const QC::u8 *PcrDigest)
     {
         QC::u8 Cmd[96];
         FTpmBufWriter W{Cmd, sizeof(Cmd), 0};
@@ -151,7 +151,7 @@ namespace QK::Boot::Tpm::Cmd
             return QC::Status::Error;
         if (!W.Be32(PolicySession))
             return QC::Status::Error;
-        if (!W.Be16(0))
+        if (!W.Be16(PcrDigest ? 32 : 0) || (PcrDigest && !W.Push(PcrDigest, 32)))
             return QC::Status::Error;
         if (!W.Be32(1))
             return QC::Status::Error;
